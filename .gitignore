@@ -1,0 +1,38 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Node / frontend
+node_modules/
+dist/
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.d.ts
+
+# Runtime data
+logs/
+storage/*
+!storage/.gitkeep
+!storage/uploads/
+storage/uploads/*
+!storage/uploads/.gitkeep
+postgres_data/
+
+# Local artifacts
+.DS_Store
+Thumbs.db
+=*

@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: med-annotate-gpu-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-med_annotate}
+      POSTGRES_USER: ${POSTGRES_USER:-med_annotate}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-med_annotate}
+    ports:
+      - "${POSTGRES_PORT_ON_HOST:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-med_annotate} -d ${POSTGRES_DB:-med_annotate}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: med-annotate-gpu-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+
+volumes:
+  postgres_data:
