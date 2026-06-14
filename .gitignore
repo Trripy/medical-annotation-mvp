@@ -33,6 +33,7 @@ storage/uploads/*
 postgres_data/
 
 # Local artifacts
+.local/
 .DS_Store
 Thumbs.db
 =*
