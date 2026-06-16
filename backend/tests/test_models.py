@@ -29,7 +29,7 @@ def test_metadata_contains_core_tables() -> None:
 
 
 def test_can_create_project_task_image_and_polygon_annotation(session: Session) -> None:
-    user = User(email="reader@example.com", full_name="Reader")
+    user = User(username="reader", email="reader@example.com", full_name="Reader")
     project = Project(name="Chest CT", owner=user)
     label = Label(project=project, name="Nodule", color="#22c55e")
     task = Task(project=project, name="Round 1")
@@ -63,7 +63,7 @@ def test_can_create_project_task_image_and_polygon_annotation(session: Session) 
 
 
 def test_annotation_shape_type_is_limited(session: Session) -> None:
-    user = User(email="owner@example.com")
+    user = User(username="owner", email="owner@example.com")
     project = Project(name="MR Brain", owner=user)
     label = Label(project=project, name="Lesion")
     image = Image(

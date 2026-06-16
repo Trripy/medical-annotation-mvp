@@ -7,7 +7,16 @@ import { useRoute, useRouter } from 'vue-router'
 
 import AppSidebar from '../components/AppSidebar.vue'
 import { useAdminStore } from '../stores/admin'
-import { useJobsStore, type JobCard, type JobExportFormat, type ProjectCard } from '../stores/jobs'
+import {
+  useJobsStore,
+  type JobCard,
+  type JobExportFormat,
+  type JobImportFormat,
+  type JobImportMode,
+  type JobImportReport,
+  type MissingLabelPolicy,
+  type ProjectCard,
+} from '../stores/jobs'
 import { useUsersStore, type UserAccount } from '../stores/users'
 
 const route = useRoute()
@@ -19,6 +28,46 @@ const { jobs, loading, error, projects } = storeToRefs(jobsStore)
 const { isAdmin } = storeToRefs(adminStore)
 const { users, loading: usersLoading, error: usersError } = storeToRefs(usersStore)
 const newUsername = ref('')
+const importFileInput = ref<HTMLInputElement | null>(null)
+const importFolderInput = ref<HTMLInputElement | null>(null)
+const importModalVisible = ref(false)
+const selectedImportJob = ref<JobCard | null>(null)
+const importFiles = ref<File[]>([])
+const importFormat = ref<JobImportFormat>('auto')
+const importMode = ref<JobImportMode>('append')
+const missingLabelPolicy = ref<MissingLabelPolicy>('auto_create')
+const importingLabels = ref(false)
+const importReport = ref<JobImportReport | null>(null)
+
+const importFormatOptions: Array<{ label: string; value: JobImportFormat }> = [
+  { label: 'Auto detect', value: 'auto' },
+  { label: 'LabelMe JSON', value: 'labelme' },
+  { label: 'COCO JSON', value: 'coco' },
+  { label: 'CVAT XML', value: 'cvat' },
+  { label: 'YOLO TXT / ZIP', value: 'yolo' },
+  { label: 'Mask PNG', value: 'mask' },
+  { label: 'Pascal VOC XML', value: 'voc' },
+  { label: 'VIA JSON', value: 'via' },
+  { label: 'Supervisely JSON', value: 'supervisely' },
+]
+
+const importModeOptions: Array<{ label: string; value: JobImportMode; description: string }> = [
+  {
+    label: 'Append to existing annotations',
+    value: 'append',
+    description: 'Safe default. Keep all existing annotations and add imported annotations.',
+  },
+  {
+    label: 'Replace annotations of matched images',
+    value: 'replace_matched_images',
+    description: 'Only delete existing annotations on images matched by imported files. Unmatched images are not affected.',
+  },
+  {
+    label: 'Replace all annotations in this job',
+    value: 'replace_all_job',
+    description: 'Destructive. Delete all existing annotations in this job before import.',
+  },
+]
 
 const projectId = computed(() => route.params.projectId ? String(route.params.projectId) : '')
 const isProjectJobsMode = computed(() => projectId.value.length > 0)
@@ -128,6 +177,114 @@ async function exportJob(job: JobCard, format: JobExportFormat) {
 
 function handleExportCommand(job: JobCard, command: string | number | object) {
   void exportJob(job, command as JobExportFormat)
+}
+
+function openImportModal(job: JobCard) {
+  selectedImportJob.value = job
+  importModalVisible.value = true
+  importFiles.value = []
+  importFormat.value = 'auto'
+  importMode.value = 'append'
+  missingLabelPolicy.value = 'auto_create'
+  importReport.value = null
+}
+
+function closeImportModal() {
+  if (importingLabels.value) {
+    return
+  }
+
+  importModalVisible.value = false
+  selectedImportJob.value = null
+  importFiles.value = []
+  importReport.value = null
+}
+
+function chooseImportFiles() {
+  importFileInput.value?.click()
+}
+
+function chooseImportFolder() {
+  importFolderInput.value?.click()
+}
+
+function handleImportFilesChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const selectedFiles = Array.from(input.files ?? [])
+  if (selectedFiles.length > 0) {
+    const existingKeys = new Set(importFiles.value.map(fileKey))
+    const nextFiles = selectedFiles.filter((file) => !existingKeys.has(fileKey(file)))
+    importFiles.value = [...importFiles.value, ...nextFiles]
+    importReport.value = null
+  }
+  input.value = ''
+}
+
+function removeImportFile(index: number) {
+  importFiles.value = importFiles.value.filter((_file, fileIndex) => fileIndex !== index)
+}
+
+function clearImportFiles() {
+  importFiles.value = []
+  importReport.value = null
+}
+
+function fileKey(file: File) {
+  return `${relativeFileName(file)}:${file.size}:${file.lastModified}`
+}
+
+function relativeFileName(file: File) {
+  return (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
+}
+
+async function submitImportLabels() {
+  if (!selectedImportJob.value) {
+    return
+  }
+
+  if (importFiles.value.length === 0) {
+    ElMessage.warning('Select at least one annotation file.')
+    return
+  }
+
+  if (importMode.value !== 'append') {
+    const message = importMode.value === 'replace_all_job'
+      ? 'This will delete all existing annotations in this job before importing. This action cannot be undone. Continue?'
+      : 'This mode may delete existing annotations. Are you sure?'
+    const confirmButtonText = importMode.value === 'replace_all_job' ? 'Delete and Import' : 'Continue Import'
+
+    try {
+      await ElMessageBox.confirm(message, 'Confirm Import Strategy', {
+        cancelButtonText: 'Cancel',
+        confirmButtonText,
+        type: 'warning',
+      })
+    } catch {
+      return
+    }
+  }
+
+  const formData = new FormData()
+  formData.append('format', importFormat.value)
+  formData.append('import_mode', importMode.value)
+  formData.append('missing_label_policy', missingLabelPolicy.value)
+  for (const file of importFiles.value) {
+    formData.append('files', file, relativeFileName(file))
+  }
+
+  importingLabels.value = true
+  importReport.value = null
+  const report = await jobsStore.importLabels(selectedImportJob.value.id, formData)
+  importingLabels.value = false
+
+  if (!report) {
+    ElMessage.error(jobsStore.error || 'Import failed')
+    return
+  }
+
+  importReport.value = report
+  ElMessage.success('Import completed')
+  await loadPage()
 }
 
 async function confirmDeleteProject(project: ProjectCard) {
@@ -340,6 +497,9 @@ async function confirmDeleteJob(job: JobCard) {
               <el-button size="small" type="primary" @click.stop="openJob(job)">
                 Open
               </el-button>
+              <el-button class="job-import-labels-button" size="small" type="success" plain @click.stop="openImportModal(job)">
+                Import Labels
+              </el-button>
               <el-dropdown
                 trigger="click"
                 @click.stop
@@ -385,5 +545,134 @@ async function confirmDeleteJob(job: JobCard) {
         </div>
       </section>
     </section>
+
+    <div v-if="importModalVisible" class="app-modal-backdrop" @click.self="closeImportModal">
+      <section class="app-modal import-labels-modal" @click.stop>
+        <header class="import-labels-modal-header">
+          <div>
+            <p class="eyebrow">Import labels</p>
+            <span class="import-current-job-label">Current Job</span>
+            <h2>{{ selectedImportJob?.name || 'Job' }}</h2>
+          </div>
+          <el-tag size="small" type="info">Job #{{ selectedImportJob?.id }}</el-tag>
+        </header>
+
+        <div class="import-labels-modal-body">
+          <section class="import-field">
+            <label>Annotation files</label>
+            <div class="import-file-actions">
+              <el-button size="small" @click="chooseImportFiles">Select Files</el-button>
+              <el-button size="small" @click="chooseImportFolder">Select Folder</el-button>
+              <el-button v-if="importFiles.length" size="small" text @click="clearImportFiles">
+                Clear
+              </el-button>
+            </div>
+            <input
+              ref="importFileInput"
+              class="hidden-file-input"
+              type="file"
+              multiple
+              accept=".json,.xml,.txt,.png,.bmp,.tif,.tiff,.zip"
+              @change="handleImportFilesChange"
+            />
+            <input
+              ref="importFolderInput"
+              class="hidden-file-input"
+              type="file"
+              multiple
+              webkitdirectory
+              @change="handleImportFilesChange"
+            />
+            <p class="import-help">
+              Supports single files, multiple files, zip archives, and folder upload when supported by the browser.
+            </p>
+            <div v-if="importFiles.length" class="import-file-list">
+              <div v-for="(file, index) in importFiles.slice(0, 8)" :key="fileKey(file)" class="import-file-row">
+                <span>{{ relativeFileName(file) }}</span>
+                <button type="button" @click="removeImportFile(index)">Remove</button>
+              </div>
+              <p v-if="importFiles.length > 8" class="import-help">
+                +{{ importFiles.length - 8 }} more files selected
+              </p>
+            </div>
+          </section>
+
+          <section class="import-field">
+            <label>Import format</label>
+            <el-select v-model="importFormat" teleported popper-class="settings-select-popper">
+              <el-option
+                v-for="option in importFormatOptions"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+              />
+            </el-select>
+          </section>
+
+          <section class="import-field">
+            <label>Import strategy</label>
+            <el-radio-group v-model="importMode" class="import-radio-stack">
+              <el-radio
+                v-for="option in importModeOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                <span class="import-radio-label">{{ option.label }}</span>
+                <small>{{ option.description }}</small>
+              </el-radio>
+            </el-radio-group>
+          </section>
+
+          <section class="import-field">
+            <label>Missing labels</label>
+            <el-radio-group v-model="missingLabelPolicy" class="import-radio-stack">
+              <el-radio value="auto_create">
+                <span class="import-radio-label">Auto create missing labels</span>
+                <small>New labels are added without deleting existing job labels.</small>
+              </el-radio>
+              <el-radio value="skip">
+                <span class="import-radio-label">Skip unknown labels</span>
+                <small>Unknown labels are reported and their annotations are skipped.</small>
+              </el-radio>
+            </el-radio-group>
+          </section>
+
+          <section v-if="importReport" class="import-report">
+            <h3>Import completed</h3>
+            <div class="import-report-grid">
+              <span>Format: {{ importReport.format_detected }}</span>
+              <span>Matched images: {{ importReport.matched_images }}</span>
+              <span>Created annotations: {{ importReport.created_annotations }}</span>
+              <span>Created labels: {{ importReport.created_labels.length }}</span>
+              <span>Skipped: {{ importReport.skipped_items.length }}</span>
+              <span>Errors: {{ importReport.errors.length }}</span>
+            </div>
+            <details v-if="importReport.skipped_items.length || importReport.errors.length">
+              <summary>Details</summary>
+              <ul>
+                <li v-for="item in importReport.skipped_items" :key="`${item.source}-${item.reason}`">
+                  {{ item.source }}: {{ item.reason }}
+                </li>
+                <li v-for="errorItem in importReport.errors" :key="errorItem">
+                  {{ errorItem }}
+                </li>
+              </ul>
+            </details>
+          </section>
+        </div>
+
+        <footer class="import-labels-modal-footer">
+          <el-button :disabled="importingLabels" @click="closeImportModal">Cancel</el-button>
+          <el-button
+            type="primary"
+            :disabled="importFiles.length === 0"
+            :loading="importingLabels"
+            @click="submitImportLabels"
+          >
+            Import
+          </el-button>
+        </footer>
+      </section>
+    </div>
   </main>
 </template>

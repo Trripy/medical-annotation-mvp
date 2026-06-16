@@ -169,6 +169,34 @@ textarea {
   overflow: hidden;
 }
 
+.import-labels-modal {
+  display: flex;
+  width: min(640px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.label-management-modal {
+  display: flex;
+  width: min(820px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.delete-label-modal {
+  display: flex;
+  width: min(520px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.label-delete-backdrop {
+  z-index: 11000;
+}
+
 .app-modal h2 {
   margin: 0 0 18px;
   color: #172026;
@@ -196,6 +224,374 @@ textarea {
   padding: 14px 24px;
   border-top: 1px solid #e5e7eb;
   background: #ffffff;
+}
+
+.import-labels-modal-header,
+.import-labels-modal-footer,
+.label-management-modal-header,
+.delete-label-modal-footer {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 24px 10px;
+}
+
+.import-labels-modal-header h2 {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.label-management-modal-header {
+  padding: 20px 24px 14px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.label-management-modal-header h2,
+.delete-label-modal-header h2 {
+  margin: 4px 0 0;
+  color: #172026;
+  overflow-wrap: anywhere;
+}
+
+.label-management-modal-header span {
+  display: inline-flex;
+  margin-top: 4px;
+  color: #64726f;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.import-current-job-label {
+  display: inline-flex;
+  margin-top: 4px;
+  color: #64726f;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.import-labels-modal-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+  padding: 8px 24px 20px;
+}
+
+.label-management-modal-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 18px;
+  overflow-y: auto;
+  padding: 18px 24px 22px;
+}
+
+.label-management-table {
+  display: grid;
+  gap: 8px;
+}
+
+.label-management-row,
+.label-management-add-row {
+  display: grid;
+  grid-template-columns: 52px minmax(180px, 1fr) 140px 70px 150px;
+  gap: 10px;
+  align-items: center;
+}
+
+.label-management-row {
+  padding: 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.label-management-row-head {
+  border: 0;
+  color: #64726f;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.label-management-color {
+  width: 44px;
+  height: 34px;
+  padding: 2px;
+  cursor: pointer;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.label-management-name,
+.label-management-shape,
+.delete-label-select {
+  min-width: 0;
+  width: 100%;
+  height: 34px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 0 10px;
+  color: #172026;
+  background: #ffffff;
+  font: inherit;
+}
+
+.label-management-name:disabled {
+  color: #64726f;
+  background: #e5e7eb;
+}
+
+.label-management-used {
+  color: #31413e;
+  font-weight: 800;
+}
+
+.label-management-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.label-management-empty {
+  padding: 16px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  color: #64726f;
+  text-align: center;
+}
+
+.label-management-add {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 16px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.label-management-add h3 {
+  margin: 0;
+  color: #172026;
+  font-size: 16px;
+}
+
+.label-management-add-row {
+  grid-template-columns: 52px minmax(180px, 1fr) 140px auto;
+}
+
+.delete-label-modal-header {
+  flex: 0 0 auto;
+  padding: 20px 24px 10px;
+}
+
+.delete-label-modal-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  padding: 8px 24px 20px;
+  color: #31413e;
+}
+
+.delete-label-modal-body p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.delete-label-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.delete-label-option input {
+  margin-top: 3px;
+}
+
+.delete-label-option span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.delete-label-option strong {
+  color: #172026;
+}
+
+.delete-label-option small {
+  color: #64726f;
+}
+
+.delete-label-option-danger {
+  border-color: rgba(185, 28, 28, 0.24);
+  background: rgba(254, 242, 242, 0.88);
+}
+
+.delete-label-modal-footer {
+  align-items: center;
+  justify-content: flex-end;
+  padding: 14px 24px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.import-labels-modal-footer {
+  align-items: center;
+  justify-content: flex-end;
+  padding: 14px 24px;
+  border-top: 1px solid #e5e7eb;
+  background: #ffffff;
+}
+
+.import-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #4f5f5c;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.import-field .el-select {
+  width: 100%;
+}
+
+.import-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.import-help {
+  margin: 0;
+  color: #71807d;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.import-file-list {
+  display: flex;
+  max-height: 180px;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 8px;
+  background: #f8fafc;
+}
+
+.import-file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #172026;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.import-file-row span {
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.import-file-row button {
+  flex: 0 0 auto;
+  cursor: pointer;
+  border: 0;
+  color: #b91c1c;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.import-radio-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.import-radio-stack .el-radio {
+  height: auto;
+  align-items: flex-start;
+  margin-right: 0;
+  white-space: normal;
+}
+
+.import-radio-stack .el-radio__label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  line-height: 1.3;
+}
+
+.import-radio-label {
+  color: #172026;
+  font-weight: 800;
+}
+
+.import-radio-stack small {
+  color: #71807d;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.import-report {
+  border: 1px solid rgba(31, 97, 91, 0.16);
+  border-radius: 10px;
+  padding: 12px;
+  background: rgba(31, 97, 91, 0.08);
+}
+
+.import-report h3 {
+  margin: 0 0 10px;
+  color: #172026;
+  font-size: 16px;
+}
+
+.import-report-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  color: #31413e;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.import-report details {
+  margin-top: 10px;
+  color: #4f5f5c;
+  font-size: 12px;
+}
+
+.import-report ul {
+  max-height: 160px;
+  margin: 8px 0 0;
+  overflow-y: auto;
+  padding-left: 18px;
 }
 
 .admin-password-field {
@@ -688,6 +1084,10 @@ textarea {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.job-import-labels-button {
+  flex-shrink: 0;
 }
 
 .empty-jobs {
@@ -1188,6 +1588,27 @@ textarea {
   font-size: 12px;
   font-weight: 800;
   text-transform: uppercase;
+}
+
+.panel-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.panel-link-button {
+  cursor: pointer;
+  border: 0;
+  color: #88d4c4;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.panel-link-button:hover {
+  color: #ffffff;
 }
 
 .label-list,
@@ -1816,6 +2237,22 @@ textarea {
   .frame-choice {
     min-height: 32px;
     padding: 6px 9px;
+  }
+
+  .label-management-row,
+  .label-management-add-row {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .label-management-row-head {
+    display: none;
+  }
+
+  .label-management-shape,
+  .label-management-used,
+  .label-management-actions,
+  .label-management-add-row .el-button {
+    grid-column: 1 / -1;
   }
 
   .sidebar-footer,

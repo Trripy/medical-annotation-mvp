@@ -1,13 +1,20 @@
 <script setup lang="ts">
 import { Back, Delete, Finished, Pointer, RefreshRight } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { storeToRefs } from 'pinia'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AnnotationCanvas from '../components/AnnotationCanvas.vue'
 import ObjectPanel from '../components/ObjectPanel.vue'
-import { useAnnotationStore, type AnnotationObject } from '../stores/annotation'
+import {
+  useAnnotationStore,
+  type AnnotationObject,
+  type Label,
+  type LabelDeleteStrategy,
+  type LabelUsage,
+  type ShapeType,
+} from '../stores/annotation'
 import {
   useUserSettingsStore,
   type Sam2Candidate,
@@ -26,6 +33,13 @@ type Sam2Settings = {
   mask_threshold: number
   max_hole_area: number
   candidate: Sam2Candidate
+}
+type LabelDraft = {
+  id: number
+  name: string
+  color: string
+  shape_type: ShapeType
+  annotation_count: number
 }
 
 const props = defineProps<{
@@ -56,6 +70,18 @@ const undoStack = ref<AnnotationObject[][]>([])
 const suppressNextSelectToolSwitch = ref(false)
 const hasUserChangedSam2Settings = ref(false)
 const sam2Settings = ref<Sam2Settings>(sam2SettingsFromUserSettings(userSettings.value))
+const labelManagerVisible = ref(false)
+const labelDrafts = ref<LabelDraft[]>([])
+const labelManagerLoading = ref(false)
+const labelActionLoading = ref(false)
+const newLabelName = ref('')
+const newLabelColor = ref('#22c55e')
+const newLabelShapeType = ref<ShapeType>('polygon')
+const deleteLabelModalVisible = ref(false)
+const pendingDeleteLabel = ref<LabelDraft | null>(null)
+const pendingDeleteUsage = ref<LabelUsage | null>(null)
+const deleteLabelStrategy = ref<LabelDeleteStrategy>('move_to_undefined')
+const reassignTargetLabelId = ref<number | null>(null)
 
 const currentImage = computed(() => job.value?.images[selectedImageIndex.value] ?? null)
 const totalImages = computed(() => job.value?.images.length ?? 0)
@@ -204,6 +230,267 @@ function applySam2DefaultsFromUserSettings() {
 
 function markSam2SettingsChanged() {
   hasUserChangedSam2Settings.value = true
+}
+
+function labelToDraft(label: Label): LabelDraft {
+  return {
+    id: label.id,
+    name: label.name,
+    color: label.color,
+    shape_type: label.shape_type,
+    annotation_count: label.annotation_count ?? 0,
+  }
+}
+
+function isUndefinedLabel(label: { name: string }) {
+  return label.name.trim().toLowerCase() === 'undefined'
+}
+
+function nextLabelColor() {
+  const palette = ['#22c55e', '#0ea5e9', '#f97316', '#e11d48', '#a855f7', '#14b8a6', '#f59e0b', '#64748b']
+  return palette[(job.value?.labels.length ?? labelDrafts.value.length) % palette.length]
+}
+
+function resetNewLabelForm() {
+  newLabelName.value = ''
+  newLabelColor.value = nextLabelColor()
+  newLabelShapeType.value = 'polygon'
+}
+
+async function openLabelManager() {
+  labelManagerVisible.value = true
+  resetNewLabelForm()
+  await loadManagedLabels()
+}
+
+function closeLabelManager() {
+  if (labelActionLoading.value) {
+    return
+  }
+
+  labelManagerVisible.value = false
+  closeDeleteLabelModal()
+}
+
+async function loadManagedLabels() {
+  labelManagerLoading.value = true
+  const labels = await annotationStore.fetchJobLabels(props.jobId)
+  labelManagerLoading.value = false
+
+  if (!labels) {
+    ElMessage.error(annotationStore.error || 'Failed to load labels.')
+    return
+  }
+
+  labelDrafts.value = labels.map(labelToDraft)
+  const labelIds = new Set(labels.map((label) => label.id))
+  const hasStaleAnnotationLabels = job.value?.annotations.some((annotation) => !labelIds.has(annotation.label_id)) ?? false
+  if (hasStaleAnnotationLabels) {
+    await annotationStore.fetchJob(props.jobId)
+  }
+  if (job.value) {
+    job.value.labels = labels
+  }
+  reconcileSelectedLabel()
+}
+
+function reconcileSelectedLabel(preferredLabelId: number | null = selectedLabelId.value) {
+  const labels = job.value?.labels ?? []
+  if (preferredLabelId !== null && labels.some((label) => label.id === preferredLabelId)) {
+    selectedLabelId.value = preferredLabelId
+    return
+  }
+
+  selectedLabelId.value = labels[0]?.id ?? null
+}
+
+async function refreshJobAfterLabelChange(preferredLabelId: number | null = selectedLabelId.value) {
+  await annotationStore.fetchJob(props.jobId)
+  reconcileSelectedLabel(preferredLabelId)
+  selectedAnnotationId.value = currentImageAnnotations.value.some((annotation) => annotation.id === selectedAnnotationId.value)
+    ? selectedAnnotationId.value
+    : null
+  const annotationIds = new Set(currentImageAnnotations.value.map((annotation) => annotation.id))
+  hiddenAnnotationIds.value = hiddenAnnotationIds.value.filter((id) => annotationIds.has(id))
+  await loadManagedLabels()
+}
+
+async function ensureCurrentFrameSavedBeforeLabelMutation() {
+  if (!hasUnsavedChanges.value) {
+    return true
+  }
+
+  const saved = await saveAnnotations()
+  if (!saved) {
+    ElMessage.error('Failed to save current annotations. Label change was not applied.')
+    return false
+  }
+
+  return true
+}
+
+async function addManagedLabel() {
+  const name = newLabelName.value.trim()
+  if (!name) {
+    ElMessage.warning('Label name is required.')
+    return
+  }
+
+  labelActionLoading.value = true
+  const created = await annotationStore.createJobLabel(props.jobId, {
+    name,
+    color: newLabelColor.value,
+    shape_type: newLabelShapeType.value,
+  })
+  labelActionLoading.value = false
+
+  if (!created) {
+    ElMessage.error(annotationStore.error || 'Create label failed.')
+    return
+  }
+
+  ElMessage.success('Label created.')
+  resetNewLabelForm()
+  await refreshJobAfterLabelChange(created.id)
+}
+
+async function saveManagedLabel(label: LabelDraft) {
+  const name = label.name.trim()
+  if (!name) {
+    ElMessage.warning('Label name is required.')
+    return
+  }
+
+  labelActionLoading.value = true
+  const updated = await annotationStore.updateJobLabel(props.jobId, label.id, {
+    name,
+    color: label.color,
+    shape_type: label.shape_type,
+  })
+  labelActionLoading.value = false
+
+  if (!updated) {
+    ElMessage.error(annotationStore.error || 'Update label failed.')
+    return
+  }
+
+  ElMessage.success('Label updated.')
+  await refreshJobAfterLabelChange(selectedLabelId.value)
+}
+
+async function requestDeleteManagedLabel(label: LabelDraft) {
+  if (!(await ensureCurrentFrameSavedBeforeLabelMutation())) {
+    return
+  }
+
+  const usage = await annotationStore.getJobLabelUsage(props.jobId, label.id)
+  if (!usage) {
+    ElMessage.error(annotationStore.error || 'Failed to check label usage.')
+    return
+  }
+
+  if (usage.annotation_count === 0) {
+    try {
+      await ElMessageBox.confirm(`Delete label "${label.name}"?`, 'Delete Label', {
+        cancelButtonText: 'Cancel',
+        confirmButtonText: 'Delete Label',
+        type: 'warning',
+      })
+    } catch {
+      return
+    }
+
+    await executeDeleteManagedLabel(label, { preferredLabelId: null })
+    return
+  }
+
+  pendingDeleteLabel.value = label
+  pendingDeleteUsage.value = usage
+  reassignTargetLabelId.value = labelDrafts.value.find((item) => item.id !== label.id)?.id ?? null
+  deleteLabelStrategy.value = isUndefinedLabel(label)
+    ? (reassignTargetLabelId.value ? 'reassign' : 'delete_annotations')
+    : 'move_to_undefined'
+  deleteLabelModalVisible.value = true
+}
+
+function closeDeleteLabelModal() {
+  deleteLabelModalVisible.value = false
+  pendingDeleteLabel.value = null
+  pendingDeleteUsage.value = null
+  deleteLabelStrategy.value = 'move_to_undefined'
+  reassignTargetLabelId.value = null
+}
+
+async function confirmDeleteManagedLabel() {
+  const label = pendingDeleteLabel.value
+  if (!label) {
+    return
+  }
+
+  if (deleteLabelStrategy.value === 'reassign' && !reassignTargetLabelId.value) {
+    ElMessage.warning('Choose a target label.')
+    return
+  }
+
+  if (deleteLabelStrategy.value === 'delete_annotations') {
+    try {
+      await ElMessageBox.confirm(
+        'This will permanently delete all annotations using this label. This action cannot be undone.',
+        'Delete Annotations',
+        {
+          cancelButtonText: 'Cancel',
+          confirmButtonText: 'Delete Annotations',
+          type: 'error',
+        },
+      )
+    } catch {
+      return
+    }
+  }
+
+  await executeDeleteManagedLabel(label, {
+    strategy: deleteLabelStrategy.value,
+    targetLabelId: reassignTargetLabelId.value,
+  })
+  closeDeleteLabelModal()
+}
+
+async function executeDeleteManagedLabel(
+  label: LabelDraft,
+  options: {
+    strategy?: LabelDeleteStrategy
+    targetLabelId?: number | null
+    preferredLabelId?: number | null
+  } = {},
+) {
+  labelActionLoading.value = true
+  const result = await annotationStore.deleteJobLabel(
+    props.jobId,
+    label.id,
+    options.strategy
+      ? {
+          strategy: options.strategy,
+          target_label_id: options.targetLabelId ?? null,
+        }
+      : undefined,
+  )
+  labelActionLoading.value = false
+
+  if (!result) {
+    ElMessage.error(annotationStore.error || 'Delete label failed.')
+    return
+  }
+
+  let preferredLabelId = options.preferredLabelId ?? selectedLabelId.value
+  if (selectedLabelId.value === label.id) {
+    preferredLabelId = options.targetLabelId ?? null
+  }
+  ElMessage.success('Label deleted.')
+  await refreshJobAfterLabelChange(preferredLabelId)
+  if (options.strategy === 'move_to_undefined') {
+    const undefinedLabel = job.value?.labels.find(isUndefinedLabel)
+    selectedLabelId.value = undefinedLabel?.id ?? selectedLabelId.value
+  }
 }
 
 function updateCurrentImageAnnotations(nextAnnotations: AnnotationObject[]) {
@@ -614,7 +901,12 @@ function isTextEntryTarget(target: EventTarget | null) {
       <div class="sidebar-middle" :class="{ 'sidebar-middle-sam2': tool === 'sam2' }">
         <div class="sidebar-settings-labels sidebar-label-settings-scroll">
           <section class="tool-panel sidebar-labels">
-            <p class="panel-label">Label</p>
+            <div class="panel-label-row">
+              <p class="panel-label">Label</p>
+              <button class="panel-link-button" type="button" @click="openLabelManager">
+                Manage
+              </button>
+            </div>
             <div class="label-list">
               <button
                 v-for="label in job?.labels ?? []"
@@ -840,5 +1132,143 @@ function isTextEntryTarget(target: EventTarget | null) {
       @toggle-visibility="toggleAnnotationVisibility"
       @update-annotation-label="updateAnnotationLabel"
     />
+
+    <div v-if="labelManagerVisible" class="app-modal-backdrop" @click.self="closeLabelManager">
+      <section class="app-modal label-management-modal" @click.stop>
+        <header class="label-management-modal-header">
+          <div>
+            <p class="eyebrow">Job labels</p>
+            <h2>Manage Labels</h2>
+            <span>{{ job?.name ?? `Job ${jobId}` }}</span>
+          </div>
+          <el-button :disabled="labelActionLoading" @click="closeLabelManager">Close</el-button>
+        </header>
+
+        <div v-loading="labelManagerLoading" class="label-management-modal-body">
+          <div class="label-management-table">
+            <div class="label-management-row label-management-row-head">
+              <span>Color</span>
+              <span>Name</span>
+              <span>Shape</span>
+              <span>Used</span>
+              <span>Actions</span>
+            </div>
+
+            <div v-for="label in labelDrafts" :key="label.id" class="label-management-row">
+              <input v-model="label.color" class="label-management-color" type="color" />
+              <input
+                v-model="label.name"
+                class="label-management-name"
+                :disabled="isUndefinedLabel(label)"
+                type="text"
+              />
+              <select v-model="label.shape_type" class="label-management-shape">
+                <option value="polygon">polygon</option>
+                <option value="rectangle">rectangle</option>
+                <option value="point">point</option>
+              </select>
+              <span class="label-management-used">{{ label.annotation_count }}</span>
+              <div class="label-management-actions">
+                <el-button size="small" :loading="labelActionLoading" @click="saveManagedLabel(label)">
+                  Save
+                </el-button>
+                <el-button
+                  size="small"
+                  text
+                  type="danger"
+                  :loading="labelActionLoading"
+                  @click="requestDeleteManagedLabel(label)"
+                >
+                  Delete
+                </el-button>
+              </div>
+            </div>
+
+            <div v-if="labelDrafts.length === 0" class="label-management-empty">
+              No labels yet. Add a label before creating annotations.
+            </div>
+          </div>
+
+          <section class="label-management-add">
+            <h3>Add Label</h3>
+            <div class="label-management-add-row">
+              <input v-model="newLabelColor" class="label-management-color" type="color" />
+              <input v-model="newLabelName" class="label-management-name" placeholder="Label name" type="text" />
+              <select v-model="newLabelShapeType" class="label-management-shape">
+                <option value="polygon">polygon</option>
+                <option value="rectangle">rectangle</option>
+                <option value="point">point</option>
+              </select>
+              <el-button type="primary" :loading="labelActionLoading" @click="addManagedLabel">
+                Add Label
+              </el-button>
+            </div>
+          </section>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="deleteLabelModalVisible" class="app-modal-backdrop label-delete-backdrop" @click.self="closeDeleteLabelModal">
+      <section class="app-modal delete-label-modal" @click.stop>
+        <header class="delete-label-modal-header">
+          <p class="eyebrow">Delete label</p>
+          <h2>{{ pendingDeleteLabel?.name }}</h2>
+        </header>
+
+        <div class="delete-label-modal-body">
+          <p>
+            This label is used by
+            <strong>{{ pendingDeleteUsage?.annotation_count ?? 0 }}</strong>
+            annotations in
+            <strong>{{ pendingDeleteUsage?.frame_count ?? 0 }}</strong>
+            frames. Please choose how to handle these annotations.
+          </p>
+
+          <label class="delete-label-option">
+            <input v-model="deleteLabelStrategy" type="radio" value="reassign" />
+            <span>
+              <strong>Reassign annotations to another label</strong>
+              <small>Move all annotations using this label to a different existing label.</small>
+            </span>
+          </label>
+          <select
+            v-if="deleteLabelStrategy === 'reassign'"
+            v-model.number="reassignTargetLabelId"
+            class="delete-label-select"
+          >
+            <option
+              v-for="label in labelDrafts.filter((item) => item.id !== pendingDeleteLabel?.id)"
+              :key="label.id"
+              :value="label.id"
+            >
+              {{ label.name }}
+            </option>
+          </select>
+
+          <label v-if="pendingDeleteLabel && !isUndefinedLabel(pendingDeleteLabel)" class="delete-label-option">
+            <input v-model="deleteLabelStrategy" type="radio" value="move_to_undefined" />
+            <span>
+              <strong>Move annotations to undefined</strong>
+              <small>Keep annotation shapes and change their label to undefined.</small>
+            </span>
+          </label>
+
+          <label class="delete-label-option delete-label-option-danger">
+            <input v-model="deleteLabelStrategy" type="radio" value="delete_annotations" />
+            <span>
+              <strong>Delete annotations using this label</strong>
+              <small>This is destructive and requires another confirmation.</small>
+            </span>
+          </label>
+        </div>
+
+        <footer class="delete-label-modal-footer">
+          <el-button :disabled="labelActionLoading" @click="closeDeleteLabelModal">Cancel</el-button>
+          <el-button type="danger" :loading="labelActionLoading" @click="confirmDeleteManagedLabel">
+            Confirm
+          </el-button>
+        </footer>
+      </section>
+    </div>
   </main>
 </template>

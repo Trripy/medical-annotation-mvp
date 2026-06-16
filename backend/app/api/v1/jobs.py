@@ -3,9 +3,9 @@ import logging
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
@@ -18,8 +18,19 @@ from app.schemas.annotation import (
     JobImageRead,
     LabelRead,
 )
-from app.schemas.job import JobLabelCreate, JobRead
+from app.schemas.job import (
+    JobImportRequest,
+    JobImportResponse,
+    JobLabelCreate,
+    JobLabelDeleteRequest,
+    JobLabelDeleteResponse,
+    JobLabelPayload,
+    JobLabelRead,
+    JobLabelUsageRead,
+    JobRead,
+)
 from app.services.image_storage import InvalidImageError, save_uploaded_image
+from app.services.importers import import_labels_for_job
 from app.services.labelme_export import build_job_labelme_zip
 from app.services.export_visual import (
     build_job_color_mask_zip,
@@ -29,6 +40,8 @@ from app.services.export_visual import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+UNDEFINED_LABEL_NAME = "undefined"
+UNDEFINED_LABEL_COLOR = "#9CA3AF"
 
 
 @router.get("", response_model=list[JobRead])
@@ -171,6 +184,148 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetailRead:
     )
 
 
+@router.get("/{job_id}/labels", response_model=list[JobLabelRead])
+def list_job_labels(job_id: int, db: Session = Depends(get_db)) -> list[JobLabelRead]:
+    job = _get_job_for_label_management(job_id, db)
+    labels, changed = _ensure_job_label_scope(job, db)
+    if changed:
+        db.commit()
+        labels = _job_scoped_labels(job, db)
+
+    return [_label_to_read(label, job, db) for label in labels]
+
+
+@router.post("/{job_id}/labels", response_model=JobLabelRead, status_code=status.HTTP_201_CREATED)
+def create_job_label(
+    job_id: int,
+    payload: JobLabelPayload,
+    db: Session = Depends(get_db),
+) -> JobLabelRead:
+    job = _get_job_for_label_management(job_id, db)
+    labels, _ = _ensure_job_label_scope(job, db)
+    _validate_unique_label_name(payload.name, labels)
+    sort_order = max((label.sort_order for label in labels), default=-1) + 1
+    label = Label(
+        job_id=job.id,
+        name=payload.name,
+        color=payload.color,
+        shape_type=payload.shape_type,
+        sort_order=sort_order,
+    )
+    db.add(label)
+    db.commit()
+    db.refresh(label)
+    return _label_to_read(label, job, db)
+
+
+@router.put("/{job_id}/labels/{label_id}", response_model=JobLabelRead)
+def update_job_label(
+    job_id: int,
+    label_id: int,
+    payload: JobLabelPayload,
+    db: Session = Depends(get_db),
+) -> JobLabelRead:
+    job = _get_job_for_label_management(job_id, db)
+    labels, _ = _ensure_job_label_scope(job, db)
+    label = _get_job_label_or_404(job, label_id, db)
+    if _is_undefined_label(label) and payload.name.lower() != UNDEFINED_LABEL_NAME:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The undefined label is reserved and cannot be renamed",
+        )
+
+    _validate_unique_label_name(payload.name, labels, exclude_label_id=label.id)
+    label.name = payload.name
+    label.color = payload.color
+    label.shape_type = payload.shape_type
+    db.commit()
+    db.refresh(label)
+    return _label_to_read(label, job, db)
+
+
+@router.get("/{job_id}/labels/{label_id}/usage", response_model=JobLabelUsageRead)
+def get_job_label_usage(
+    job_id: int,
+    label_id: int,
+    db: Session = Depends(get_db),
+) -> JobLabelUsageRead:
+    job = _get_job_for_label_management(job_id, db)
+    _ensure_job_label_scope(job, db)
+    label = _get_job_label_or_404(job, label_id, db)
+    annotation_count, frame_count = _label_usage(label, job, db)
+    return JobLabelUsageRead(
+        label_id=label.id,
+        label_name=label.name,
+        annotation_count=annotation_count,
+        frame_count=frame_count,
+    )
+
+
+@router.delete("/{job_id}/labels/{label_id}", response_model=JobLabelDeleteResponse)
+def delete_job_label(
+    job_id: int,
+    label_id: int,
+    payload: JobLabelDeleteRequest | None = Body(default=None),
+    db: Session = Depends(get_db),
+) -> JobLabelDeleteResponse:
+    job = _get_job_for_label_management(job_id, db)
+    _ensure_job_label_scope(job, db)
+    label = _get_job_label_or_404(job, label_id, db)
+    annotation_count, _ = _label_usage(label, job, db)
+    strategy = payload.strategy if payload else None
+    target_label: Label | None = None
+
+    if annotation_count > 0:
+        if strategy is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Label is used by annotations. Choose a delete strategy.",
+            )
+
+        if strategy == "reassign":
+            if payload is None or payload.target_label_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="target_label_id is required when strategy is reassign",
+                )
+            target_label = _get_job_label_or_404(job, payload.target_label_id, db)
+            if target_label.id == label.id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="target_label_id cannot be the label being deleted",
+                )
+            db.execute(
+                update(Annotation)
+                .where(Annotation.label_id == label.id, _annotation_job_scope(job))
+                .values(label_id=target_label.id)
+            )
+        elif strategy == "move_to_undefined":
+            if _is_undefined_label(label):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot move undefined label annotations to undefined.",
+                )
+            target_label = _get_or_create_undefined_label(job, db)
+            db.execute(
+                update(Annotation)
+                .where(Annotation.label_id == label.id, _annotation_job_scope(job))
+                .values(label_id=target_label.id)
+            )
+        elif strategy == "delete_annotations":
+            db.execute(delete(Annotation).where(Annotation.label_id == label.id, _annotation_job_scope(job)))
+        else:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported delete strategy")
+
+    db.delete(label)
+    db.commit()
+    return JobLabelDeleteResponse(
+        deleted_label_id=label_id,
+        strategy=strategy,
+        affected_annotations=annotation_count,
+        target_label=target_label.name if target_label is not None else None,
+    )
+
+
 @router.put("/{job_id}/images/{image_id}/annotations", response_model=list[AnnotationRead])
 def save_image_annotations(
     job_id: int,
@@ -209,6 +364,55 @@ def save_image_annotations(
         db.refresh(annotation)
 
     return saved_annotations
+
+
+@router.post("/{job_id}/import-labels", response_model=JobImportResponse)
+async def import_job_labels(
+    job_id: int,
+    format: str = Form("auto"),
+    import_mode: str = Form("append"),
+    missing_label_policy: str = Form("auto_create"),
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+) -> JobImportResponse:
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    try:
+        payload = JobImportRequest(
+            format=format,
+            import_mode=import_mode,
+            missing_label_policy=missing_label_policy,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    uploads: list[tuple[str, bytes]] = []
+    for upload in files:
+        filename = upload.filename or "upload"
+        content = await upload.read()
+        uploads.append((filename, content))
+
+    try:
+        result = import_labels_for_job(
+            job=job,
+            db=db,
+            uploads=uploads,
+            import_format=payload.format,
+            import_mode=payload.import_mode,
+            missing_label_policy=payload.missing_label_policy,
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Failed to import labels for job %s: %s", job_id, exc)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Import failed") from exc
+
+    return JobImportResponse(**result)
 
 
 @router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -308,6 +512,157 @@ def export_job_color_masks(job_id: int, db: Session = Depends(get_db)) -> Stream
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+def _get_job_for_label_management(job_id: int, db: Session) -> Job:
+    job = db.scalar(
+        select(Job)
+        .where(Job.id == job_id)
+        .options(
+            selectinload(Job.labels),
+            selectinload(Job.images),
+            selectinload(Job.project).selectinload(Project.labels),
+            selectinload(Job.task).selectinload(Task.images),
+            selectinload(Job.task).selectinload(Task.project).selectinload(Project.labels),
+        )
+    )
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return job
+
+
+def _job_scoped_labels(job: Job, db: Session) -> list[Label]:
+    return list(
+        db.scalars(
+            select(Label)
+            .where(Label.job_id == job.id)
+            .order_by(Label.sort_order.asc(), Label.id.asc())
+        ).all()
+    )
+
+
+def _ensure_job_label_scope(job: Job, db: Session) -> tuple[list[Label], bool]:
+    labels = _job_scoped_labels(job, db)
+    if labels:
+        return labels, False
+
+    source_labels = []
+    if job.project is not None and job.project.labels:
+        source_labels = sorted(job.project.labels, key=lambda label: (label.sort_order, label.id))
+    elif job.task is not None and job.task.project is not None:
+        source_labels = sorted(job.task.project.labels, key=lambda label: (label.sort_order, label.id))
+
+    if not source_labels:
+        return [], False
+
+    created: list[Label] = []
+    source_to_created: list[tuple[int, Label]] = []
+    seen_names: set[str] = set()
+    for index, source_label in enumerate(source_labels):
+        key = source_label.name.strip().lower()
+        if not key or key in seen_names:
+            continue
+        seen_names.add(key)
+        created_label = Label(
+            job_id=job.id,
+            name=source_label.name.strip(),
+            color=source_label.color,
+            shape_type=source_label.shape_type,
+            sort_order=index,
+        )
+        created.append(created_label)
+        source_to_created.append((source_label.id, created_label))
+
+    if not created:
+        return [], False
+
+    db.add_all(created)
+    db.flush()
+    scope = _annotation_job_scope(job)
+    for source_label_id, created_label in source_to_created:
+        db.execute(
+            update(Annotation)
+            .where(Annotation.label_id == source_label_id, scope)
+            .values(label_id=created_label.id)
+        )
+
+    return _job_scoped_labels(job, db), True
+
+
+def _label_to_read(label: Label, job: Job, db: Session) -> JobLabelRead:
+    annotation_count, _ = _label_usage(label, job, db)
+    return JobLabelRead(
+        id=label.id,
+        name=label.name,
+        color=label.color,
+        shape_type=label.shape_type,
+        sort_order=label.sort_order,
+        annotation_count=annotation_count,
+    )
+
+
+def _get_job_label_or_404(job: Job, label_id: int, db: Session) -> Label:
+    label = db.get(Label, label_id)
+    if label is None or label.job_id != job.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Label not found")
+    return label
+
+
+def _validate_unique_label_name(
+    name: str,
+    labels: list[Label],
+    *,
+    exclude_label_id: int | None = None,
+) -> None:
+    key = name.strip().lower()
+    for label in labels:
+        if label.id == exclude_label_id:
+            continue
+        if label.name.strip().lower() == key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f'Label "{name}" already exists in this job',
+            )
+
+
+def _is_undefined_label(label: Label) -> bool:
+    return label.name.strip().lower() == UNDEFINED_LABEL_NAME
+
+
+def _get_or_create_undefined_label(job: Job, db: Session) -> Label:
+    labels = _job_scoped_labels(job, db)
+    for label in labels:
+        if _is_undefined_label(label):
+            return label
+
+    label = Label(
+        job_id=job.id,
+        name=UNDEFINED_LABEL_NAME,
+        color=UNDEFINED_LABEL_COLOR,
+        shape_type="polygon",
+        sort_order=max((item.sort_order for item in labels), default=-1) + 1,
+    )
+    db.add(label)
+    db.flush()
+    return label
+
+
+def _annotation_job_scope(job: Job):
+    image_ids = [image.id for image in _job_images(job)]
+    if image_ids:
+        return or_(Annotation.job_id == job.id, Annotation.image_id.in_(image_ids))
+    return Annotation.job_id == job.id
+
+
+def _label_usage(label: Label, job: Job, db: Session) -> tuple[int, int]:
+    scope = _annotation_job_scope(job)
+    annotation_count = db.scalar(
+        select(func.count(Annotation.id)).where(Annotation.label_id == label.id, scope)
+    ) or 0
+    frame_count = db.scalar(
+        select(func.count(func.distinct(Annotation.image_id))).where(Annotation.label_id == label.id, scope)
+    ) or 0
+    return annotation_count, frame_count
 
 
 def _thumbnail_url(thumbnail_path: str) -> str:

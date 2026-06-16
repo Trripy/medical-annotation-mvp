@@ -22,6 +22,19 @@ export type ProjectCard = {
 }
 
 export type JobExportFormat = 'labelme' | 'overlay' | 'indexed-mask' | 'color-mask'
+export type JobImportFormat = 'auto' | 'labelme' | 'coco' | 'cvat' | 'yolo' | 'mask' | 'voc' | 'via' | 'supervisely'
+export type JobImportMode = 'append' | 'replace_matched_images' | 'replace_all_job'
+export type MissingLabelPolicy = 'auto_create' | 'skip'
+export type JobImportReport = {
+  job_id: number
+  format_detected: string
+  matched_images: number
+  unmatched_items: number
+  created_annotations: number
+  created_labels: string[]
+  skipped_items: Array<{ source: string; reason: string }>
+  errors: string[]
+}
 
 const exportConfigs: Record<JobExportFormat, { endpoint: string; filenameSuffix: string }> = {
   labelme: {
@@ -177,6 +190,27 @@ export const useJobsStore = defineStore('jobs', {
     },
     async exportLabelMe(jobId: number) {
       return this.exportJob(jobId, 'labelme')
+    },
+    async importLabels(jobId: number, formData: FormData): Promise<JobImportReport | null> {
+      this.error = ''
+
+      try {
+        const response = await fetch(apiUrl(`/api/jobs/${jobId}/import-labels`), {
+          method: 'POST',
+          body: formData,
+        })
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null)
+          const detail = typeof payload?.detail === 'string' ? payload.detail : `Import failed: ${response.status}`
+          throw new Error(detail)
+        }
+
+        return await response.json()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      }
     },
   },
   getters: {

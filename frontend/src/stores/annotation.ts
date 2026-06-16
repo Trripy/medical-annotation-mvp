@@ -8,6 +8,7 @@ export type Label = {
   color: string
   shape_type: ShapeType
   sort_order: number
+  annotation_count?: number
 }
 
 export type JobImage = {
@@ -39,6 +40,33 @@ export type JobDetail = {
   images: JobImage[]
   labels: Label[]
   annotations: AnnotationObject[]
+}
+
+export type LabelPayload = {
+  name: string
+  color: string
+  shape_type: ShapeType
+}
+
+export type LabelUsage = {
+  label_id: number
+  label_name: string
+  annotation_count: number
+  frame_count: number
+}
+
+export type LabelDeleteStrategy = 'reassign' | 'move_to_undefined' | 'delete_annotations'
+
+export type LabelDeletePayload = {
+  strategy?: LabelDeleteStrategy
+  target_label_id?: number | null
+}
+
+export type LabelDeleteResult = {
+  deleted_label_id: number
+  strategy: LabelDeleteStrategy | null
+  affected_annotations: number
+  target_label: string | null
 }
 
 function resolveStorageUrl(path: string): string {
@@ -125,6 +153,105 @@ export const useAnnotationStore = defineStore('annotation', {
         return false
       } finally {
         this.saving = false
+      }
+    },
+    async fetchJobLabels(jobId: string | number): Promise<Label[] | null> {
+      this.error = ''
+
+      try {
+        const response = await fetch(apiUrl(`/api/jobs/${jobId}/labels`), { cache: 'no-store' })
+
+        if (!response.ok) {
+          throw new Error(`Labels request failed: ${response.status}`)
+        }
+
+        return await response.json()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      }
+    },
+    async createJobLabel(jobId: string | number, payload: LabelPayload): Promise<Label | null> {
+      this.error = ''
+
+      try {
+        const response = await fetch(apiUrl(`/api/jobs/${jobId}/labels`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+
+        if (!response.ok) {
+          const errorPayload = await response.json().catch(() => null)
+          throw new Error(typeof errorPayload?.detail === 'string' ? errorPayload.detail : `Create label failed: ${response.status}`)
+        }
+
+        return await response.json()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      }
+    },
+    async updateJobLabel(jobId: string | number, labelId: number, payload: LabelPayload): Promise<Label | null> {
+      this.error = ''
+
+      try {
+        const response = await fetch(apiUrl(`/api/jobs/${jobId}/labels/${labelId}`), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+
+        if (!response.ok) {
+          const errorPayload = await response.json().catch(() => null)
+          throw new Error(typeof errorPayload?.detail === 'string' ? errorPayload.detail : `Update label failed: ${response.status}`)
+        }
+
+        return await response.json()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      }
+    },
+    async getJobLabelUsage(jobId: string | number, labelId: number): Promise<LabelUsage | null> {
+      this.error = ''
+
+      try {
+        const response = await fetch(apiUrl(`/api/jobs/${jobId}/labels/${labelId}/usage`), { cache: 'no-store' })
+
+        if (!response.ok) {
+          throw new Error(`Label usage request failed: ${response.status}`)
+        }
+
+        return await response.json()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      }
+    },
+    async deleteJobLabel(
+      jobId: string | number,
+      labelId: number,
+      payload?: LabelDeletePayload,
+    ): Promise<LabelDeleteResult | null> {
+      this.error = ''
+
+      try {
+        const response = await fetch(apiUrl(`/api/jobs/${jobId}/labels/${labelId}`), {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload ? JSON.stringify(payload) : undefined,
+        })
+
+        if (!response.ok) {
+          const errorPayload = await response.json().catch(() => null)
+          throw new Error(typeof errorPayload?.detail === 'string' ? errorPayload.detail : `Delete label failed: ${response.status}`)
+        }
+
+        return await response.json()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
       }
     },
   },
