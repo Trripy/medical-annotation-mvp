@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Image, Job, Label, Task
 from app.services.importers.base import ImportSkippedItem, ImportedAnnotation
+from app.services.label_colors import LABEL_COLOR_PALETTE, normalize_hex_color, pick_distinct_label_color
 
 
 @dataclass(frozen=True)
@@ -70,17 +71,7 @@ def safe_json_loads(content: bytes) -> dict | list:
 
 
 def generate_label_color(index: int) -> str:
-    palette = [
-        "#22c55e",
-        "#0ea5e9",
-        "#f97316",
-        "#e11d48",
-        "#a855f7",
-        "#14b8a6",
-        "#f59e0b",
-        "#84cc16",
-    ]
-    return palette[index % len(palette)]
+    return LABEL_COLOR_PALETTE[index % len(LABEL_COLOR_PALETTE)]
 
 
 def clamp_point(point: list[float], width: int | None, height: int | None) -> list[float]:
@@ -180,10 +171,16 @@ def ensure_job_label(
 
     sort_order = db.scalar(select(Label.sort_order).where(Label.job_id == job.id).order_by(Label.sort_order.desc()))
     next_sort_order = (sort_order or 0) + 1 if sort_order is not None else 0
+    used_colors = [
+        label.color
+        for label in db.scalars(select(Label).where(Label.job_id == job.id)).all()
+        if label.color
+    ]
+    color = pick_distinct_label_color(label_color or generate_label_color(next_sort_order), used_colors)
     label = Label(
         job_id=job.id,
         name=normalized,
-        color=label_color or generate_label_color(next_sort_order),
+        color=color,
         shape_type=shape_type or "polygon",
         sort_order=next_sort_order,
     )
@@ -231,16 +228,28 @@ def ensure_import_label(
 
     sort_order = db.scalar(select(Label.sort_order).where(Label.project_id == project_id).order_by(Label.sort_order.desc()))
     next_sort_order = (sort_order or 0) + 1 if sort_order is not None else 0
+    used_colors = [
+        label.color
+        for label in db.scalars(select(Label).where(Label.project_id == project_id)).all()
+        if label.color
+    ]
+    color = pick_distinct_label_color(label_color or generate_label_color(next_sort_order), used_colors)
     label = Label(
         project_id=project_id,
         name=normalized,
-        color=label_color or generate_label_color(next_sort_order),
+        color=color,
         shape_type=shape_type or "polygon",
         sort_order=next_sort_order,
     )
     db.add(label)
     db.flush()
     return label
+
+
+def label_color_changed(requested_color: str | None, actual_color: str) -> bool:
+    normalized_requested = normalize_hex_color(requested_color)
+    normalized_actual = normalize_hex_color(actual_color)
+    return normalized_requested is not None and normalized_actual is not None and normalized_requested != normalized_actual
 
 
 def build_imported_annotation(

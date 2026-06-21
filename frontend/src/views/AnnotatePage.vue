@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { Back, Delete, Finished, Pointer, RefreshRight } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { storeToRefs } from 'pinia'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AnnotationCanvas from '../components/AnnotationCanvas.vue'
@@ -22,6 +22,22 @@ import {
   type UserSettings,
 } from '../stores/userSettings'
 import { useUsersStore } from '../stores/users'
+import {
+  LABEL_COLOR_PALETTE,
+  isColorConflict,
+  normalizeHexColor,
+  pickDistinctLabelColor,
+} from '../utils/labelColors'
+import {
+  buildPolygonSmoothingAttributes,
+  clampPolygonSmoothValue,
+  clonePoints,
+  getPolygonRawPoints,
+  getPolygonSmoothValue,
+  normalizeAnnotationObject,
+  simplifyPolygonRdp,
+  sliderValueToSmoothEpsilon,
+} from '../utils/polygon'
 
 type ToolType = 'cursor' | 'rectangle' | 'polygon' | 'sam2'
 type Sam2Settings = {
@@ -82,6 +98,8 @@ const pendingDeleteLabel = ref<LabelDraft | null>(null)
 const pendingDeleteUsage = ref<LabelUsage | null>(null)
 const deleteLabelStrategy = ref<LabelDeleteStrategy>('move_to_undefined')
 const reassignTargetLabelId = ref<number | null>(null)
+const activePolygonSmoothingAnnotationId = ref<number | string | null>(null)
+const boundaryAssistReferenceAnnotationId = ref<number | string | null>(null)
 
 const currentImage = computed(() => job.value?.images[selectedImageIndex.value] ?? null)
 const totalImages = computed(() => job.value?.images.length ?? 0)
@@ -134,9 +152,20 @@ watch(selectedImageIndex, (index) => {
   hiddenAnnotationIds.value = []
   hasSam2Preview.value = false
   undoStack.value = []
+  activePolygonSmoothingAnnotationId.value = null
+  boundaryAssistReferenceAnnotationId.value = null
   if (frameQueryReady.value) {
     syncFrameQuery(index)
     persistLastFrame()
+  }
+})
+
+watch(currentImageAnnotations, (annotations) => {
+  if (
+    boundaryAssistReferenceAnnotationId.value !== null &&
+    !annotations.some((annotation) => annotation.id === boundaryAssistReferenceAnnotationId.value && annotation.shape_type === 'polygon')
+  ) {
+    boundaryAssistReferenceAnnotationId.value = null
   }
 })
 
@@ -247,8 +276,10 @@ function isUndefinedLabel(label: { name: string }) {
 }
 
 function nextLabelColor() {
-  const palette = ['#22c55e', '#0ea5e9', '#f97316', '#e11d48', '#a855f7', '#14b8a6', '#f59e0b', '#64748b']
-  return palette[(job.value?.labels.length ?? labelDrafts.value.length) % palette.length]
+  const usedColors = new Set(
+    [...(job.value?.labels ?? []), ...labelDrafts.value].map((label) => label.color).filter(Boolean),
+  )
+  return pickDistinctLabelColor(LABEL_COLOR_PALETTE[(job.value?.labels.length ?? labelDrafts.value.length) % LABEL_COLOR_PALETTE.length], usedColors)
 }
 
 function resetNewLabelForm() {
@@ -336,10 +367,16 @@ async function addManagedLabel() {
     return
   }
 
+  const usedColors = new Set(labelDrafts.value.map((label) => label.color).filter(Boolean))
+  const color = pickDistinctLabelColor(newLabelColor.value, usedColors)
+  if (normalizeHexColor(newLabelColor.value) !== color) {
+    ElMessage.warning(`Label color is too similar to another label color. Using ${color} instead.`)
+  }
+
   labelActionLoading.value = true
   const created = await annotationStore.createJobLabel(props.jobId, {
     name,
-    color: newLabelColor.value,
+    color,
     shape_type: newLabelShapeType.value,
   })
   labelActionLoading.value = false
@@ -361,10 +398,23 @@ async function saveManagedLabel(label: LabelDraft) {
     return
   }
 
+  const usedColors = new Set(
+    labelDrafts.value.filter((item) => item.id !== label.id).map((item) => item.color).filter(Boolean),
+  )
+  const normalizedColor = normalizeHexColor(label.color)
+  if (!normalizedColor) {
+    ElMessage.warning('Label color must be a 6-digit hex color.')
+    return
+  }
+  if (isColorConflict(normalizedColor, usedColors)) {
+    ElMessage.warning('This color is too similar to another label color.')
+    return
+  }
+
   labelActionLoading.value = true
   const updated = await annotationStore.updateJobLabel(props.jobId, label.id, {
     name,
-    color: label.color,
+    color: normalizedColor,
     shape_type: label.shape_type,
   })
   labelActionLoading.value = false
@@ -389,27 +439,16 @@ async function requestDeleteManagedLabel(label: LabelDraft) {
     return
   }
 
-  if (usage.annotation_count === 0) {
-    try {
-      await ElMessageBox.confirm(`Delete label "${label.name}"?`, 'Delete Label', {
-        cancelButtonText: 'Cancel',
-        confirmButtonText: 'Delete Label',
-        type: 'warning',
-      })
-    } catch {
-      return
-    }
-
-    await executeDeleteManagedLabel(label, { preferredLabelId: null })
-    return
-  }
-
   pendingDeleteLabel.value = label
   pendingDeleteUsage.value = usage
   reassignTargetLabelId.value = labelDrafts.value.find((item) => item.id !== label.id)?.id ?? null
-  deleteLabelStrategy.value = isUndefinedLabel(label)
-    ? (reassignTargetLabelId.value ? 'reassign' : 'delete_annotations')
-    : 'move_to_undefined'
+  if (usage.annotation_count === 0) {
+    deleteLabelStrategy.value = 'delete_annotations'
+  } else if (isUndefinedLabel(label)) {
+    deleteLabelStrategy.value = reassignTargetLabelId.value ? 'reassign' : 'delete_annotations'
+  } else {
+    deleteLabelStrategy.value = 'move_to_undefined'
+  }
   deleteLabelModalVisible.value = true
 }
 
@@ -421,7 +460,19 @@ function closeDeleteLabelModal() {
   reassignTargetLabelId.value = null
 }
 
-async function confirmDeleteManagedLabel() {
+async function confirmDeleteUnusedLabel() {
+  const label = pendingDeleteLabel.value
+  if (!label) {
+    return
+  }
+
+  const deleted = await executeDeleteManagedLabel(label, { preferredLabelId: null })
+  if (deleted) {
+    closeDeleteLabelModal()
+  }
+}
+
+async function confirmDeleteUsedLabel() {
   const label = pendingDeleteLabel.value
   if (!label) {
     return
@@ -432,27 +483,13 @@ async function confirmDeleteManagedLabel() {
     return
   }
 
-  if (deleteLabelStrategy.value === 'delete_annotations') {
-    try {
-      await ElMessageBox.confirm(
-        'This will permanently delete all annotations using this label. This action cannot be undone.',
-        'Delete Annotations',
-        {
-          cancelButtonText: 'Cancel',
-          confirmButtonText: 'Delete Annotations',
-          type: 'error',
-        },
-      )
-    } catch {
-      return
-    }
-  }
-
-  await executeDeleteManagedLabel(label, {
+  const deleted = await executeDeleteManagedLabel(label, {
     strategy: deleteLabelStrategy.value,
     targetLabelId: reassignTargetLabelId.value,
   })
-  closeDeleteLabelModal()
+  if (deleted) {
+    closeDeleteLabelModal()
+  }
 }
 
 async function executeDeleteManagedLabel(
@@ -478,7 +515,7 @@ async function executeDeleteManagedLabel(
 
   if (!result) {
     ElMessage.error(annotationStore.error || 'Delete label failed.')
-    return
+    return false
   }
 
   let preferredLabelId = options.preferredLabelId ?? selectedLabelId.value
@@ -491,6 +528,7 @@ async function executeDeleteManagedLabel(
     const undefinedLabel = job.value?.labels.find(isUndefinedLabel)
     selectedLabelId.value = undefinedLabel?.id ?? selectedLabelId.value
   }
+  return true
 }
 
 function updateCurrentImageAnnotations(nextAnnotations: AnnotationObject[]) {
@@ -498,9 +536,10 @@ function updateCurrentImageAnnotations(nextAnnotations: AnnotationObject[]) {
     return
   }
 
+  const normalizedAnnotations = nextAnnotations.map((annotation) => normalizeAnnotationObject(annotation))
   job.value.annotations = [
     ...job.value.annotations.filter((annotation) => annotation.image_id !== currentImage.value?.id),
-    ...nextAnnotations,
+    ...normalizedAnnotations,
   ]
   hasUnsavedChanges.value = true
 }
@@ -522,6 +561,7 @@ function undo() {
     return
   }
 
+  activePolygonSmoothingAnnotationId.value = null
   const previous = undoStack.value[undoStack.value.length - 1]
   undoStack.value = undoStack.value.slice(0, -1)
   job.value.annotations = [
@@ -543,11 +583,53 @@ function selectAnnotation(id: number | string | null) {
   }
 }
 
+function startBoundaryAssist(annotationId: number | string) {
+  const annotation = currentImageAnnotations.value.find((item) => item.id === annotationId)
+  if (!annotation || annotation.shape_type !== 'polygon') {
+    ElMessage.warning('Select a polygon annotation first.')
+    return
+  }
+
+  const preferredLabel = job.value?.labels.find((label) => label.name.trim().toLowerCase() === 'layer_up')
+  const fallbackLabelId = preferredLabel?.id ?? selectedLabelId.value ?? job.value?.labels[0]?.id ?? null
+  if (!fallbackLabelId) {
+    ElMessage.warning('Create a label before using boundary-assisted polygon.')
+    return
+  }
+
+  selectedLabelId.value = fallbackLabelId
+
+  boundaryAssistReferenceAnnotationId.value = annotation.id
+  selectAnnotation(annotation.id)
+  setTool('cursor')
+}
+
+function cancelBoundaryAssist() {
+  boundaryAssistReferenceAnnotationId.value = null
+}
+
+async function continueBoundaryAssistAsPolygon(payload: {
+  initialPoints: number[][]
+  attributes: Record<string, unknown> | null
+}) {
+  boundaryAssistReferenceAnnotationId.value = null
+  selectedAnnotationId.value = null
+  setTool('polygon')
+  await nextTick()
+  canvasRef.value?.startPolygonDraftWithInitialPoints?.(payload.initialPoints, payload.attributes)
+}
+
+function completeBoundaryAssist(createdAnnotationId: number | string) {
+  boundaryAssistReferenceAnnotationId.value = null
+  selectAnnotation(createdAnnotationId)
+}
+
 function deleteAnnotation(id: number | string | null = selectedAnnotationId.value) {
   if (id === null || !job.value || !currentImage.value) {
     return
   }
 
+  activePolygonSmoothingAnnotationId.value = null
   pushUndoState()
   updateCurrentImageAnnotations(currentImageAnnotations.value.filter((annotation) => annotation.id !== id))
   hiddenAnnotationIds.value = hiddenAnnotationIds.value.filter((hiddenId) => hiddenId !== id)
@@ -564,6 +646,7 @@ function updateAnnotationLabel(id: number | string, labelId: number) {
     return
   }
 
+  activePolygonSmoothingAnnotationId.value = null
   pushUndoState()
   updateCurrentImageAnnotations(
     currentImageAnnotations.value.map((annotation) => (
@@ -576,6 +659,88 @@ function toggleAnnotationVisibility(id: number | string) {
   hiddenAnnotationIds.value = hiddenAnnotationIds.value.includes(id)
     ? hiddenAnnotationIds.value.filter((hiddenId) => hiddenId !== id)
     : [...hiddenAnnotationIds.value, id]
+}
+
+function showAllAnnotations() {
+  hiddenAnnotationIds.value = []
+}
+
+function hideAllAnnotations() {
+  hiddenAnnotationIds.value = currentImageAnnotations.value.map((annotation) => annotation.id)
+}
+
+function applyPolygonSmoothing(annotation: AnnotationObject, smoothValue: number): AnnotationObject {
+  if (!currentImage.value || annotation.shape_type !== 'polygon') {
+    return annotation
+  }
+
+  const rawPoints = getPolygonRawPoints(annotation)
+  const clampedSmoothValue = clampPolygonSmoothValue(smoothValue)
+  const epsilon = sliderValueToSmoothEpsilon(clampedSmoothValue, currentImage.value.width, currentImage.value.height)
+  const nextPoints = clampedSmoothValue === 0
+    ? clonePoints(rawPoints)
+    : simplifyPolygonRdp(rawPoints, epsilon)
+
+  return {
+    ...annotation,
+    points: nextPoints.length >= 3 ? nextPoints : clonePoints(rawPoints),
+    attributes: buildPolygonSmoothingAttributes(rawPoints, clampedSmoothValue, annotation.attributes),
+  }
+}
+
+function ensurePolygonSmoothingUndoState(annotationId: number | string) {
+  if (activePolygonSmoothingAnnotationId.value === annotationId) {
+    return
+  }
+
+  pushUndoState()
+  activePolygonSmoothingAnnotationId.value = annotationId
+}
+
+function updatePolygonSmoothing(annotationId: number | string, smoothValue: number) {
+  const target = currentImageAnnotations.value.find((annotation) => annotation.id === annotationId)
+  if (!target || target.shape_type !== 'polygon') {
+    return
+  }
+
+  ensurePolygonSmoothingUndoState(annotationId)
+  updateCurrentImageAnnotations(
+    currentImageAnnotations.value.map((annotation) => (
+      annotation.id === annotationId ? applyPolygonSmoothing(annotation, smoothValue) : annotation
+    )),
+  )
+}
+
+function commitPolygonSmoothing(annotationId: number | string, smoothValue: number) {
+  const target = currentImageAnnotations.value.find((annotation) => annotation.id === annotationId)
+  if (!target || target.shape_type !== 'polygon') {
+    return
+  }
+
+  if (activePolygonSmoothingAnnotationId.value !== annotationId) {
+    pushUndoState()
+  }
+  updateCurrentImageAnnotations(
+    currentImageAnnotations.value.map((annotation) => (
+      annotation.id === annotationId ? applyPolygonSmoothing(annotation, smoothValue) : annotation
+    )),
+  )
+  activePolygonSmoothingAnnotationId.value = null
+}
+
+function resetPolygonSmoothing(annotationId: number | string) {
+  const target = currentImageAnnotations.value.find((annotation) => annotation.id === annotationId)
+  if (!target || target.shape_type !== 'polygon' || getPolygonSmoothValue(target) === 0) {
+    return
+  }
+
+  pushUndoState()
+  updateCurrentImageAnnotations(
+    currentImageAnnotations.value.map((annotation) => (
+      annotation.id === annotationId ? applyPolygonSmoothing(annotation, 0) : annotation
+    )),
+  )
+  activePolygonSmoothingAnnotationId.value = null
 }
 
 async function generateSam2Mask() {
@@ -780,6 +945,11 @@ async function goToImage(index: number) {
     return
   }
 
+  if (canvasRef.value?.isBoundaryAssistActive) {
+    ElMessage.warning('Please finish or cancel the boundary-assisted polygon first.')
+    return
+  }
+
   if (hasUnsavedChanges.value) {
     const saved = await saveAnnotations()
     if (!saved) {
@@ -828,6 +998,11 @@ function onKeydown(event: KeyboardEvent) {
 
   if (event.ctrlKey && event.key.toLowerCase() === 'z') {
     event.preventDefault()
+    if (canvasRef.value?.isBoundaryAssistActive) {
+      canvasRef.value.undoBoundaryAssistStep?.()
+      return
+    }
+
     if (tool.value === 'polygon' && canvasRef.value?.removeLastPolygonPoint()) {
       return
     }
@@ -1107,14 +1282,18 @@ function isTextEntryTarget(target: EventTarget | null) {
         :hidden-annotation-ids="hiddenAnnotationIds"
         :selected-annotation-id="selectedAnnotationId"
         :selected-label-id="selectedLabelId"
-        :sam2-settings="sam2Settings"
-        :tool="tool"
-        :user-settings="userSettings"
-        @before-change="pushUndoState"
-        @change="updateCurrentImageAnnotations"
-        @sam2-preview-change="hasSam2Preview = $event"
-        @select-object="selectAnnotation"
-      />
+      :sam2-settings="sam2Settings"
+      :boundary-assist-reference-annotation-id="boundaryAssistReferenceAnnotationId"
+      :tool="tool"
+      :user-settings="userSettings"
+      @boundary-assist-cancel="cancelBoundaryAssist"
+      @boundary-assist-continue-polygon="continueBoundaryAssistAsPolygon"
+      @boundary-assist-complete="completeBoundaryAssist"
+      @before-change="pushUndoState"
+      @change="updateCurrentImageAnnotations"
+      @sam2-preview-change="hasSam2Preview = $event"
+      @select-object="selectAnnotation"
+    />
 
       <div v-else v-loading="loading" class="annotate-empty">
         <el-icon><Pointer /></el-icon>
@@ -1127,10 +1306,16 @@ function isTextEntryTarget(target: EventTarget | null) {
       :hidden-annotation-ids="hiddenAnnotationIds"
       :labels="job?.labels ?? []"
       :selected-annotation-id="selectedAnnotationId"
+      @create-layer-above="startBoundaryAssist"
       @delete-annotation="deleteAnnotation"
+      @hide-all="hideAllAnnotations"
+      @show-all="showAllAnnotations"
       @select-annotation="selectAnnotation"
+      @commit-polygon-smoothing="commitPolygonSmoothing"
+      @reset-polygon-smoothing="resetPolygonSmoothing"
       @toggle-visibility="toggleAnnotationVisibility"
       @update-annotation-label="updateAnnotationLabel"
+      @update-polygon-smoothing="updatePolygonSmoothing"
     />
 
     <div v-if="labelManagerVisible" class="app-modal-backdrop" @click.self="closeLabelManager">
@@ -1208,67 +1393,81 @@ function isTextEntryTarget(target: EventTarget | null) {
       </section>
     </div>
 
-    <div v-if="deleteLabelModalVisible" class="app-modal-backdrop label-delete-backdrop" @click.self="closeDeleteLabelModal">
-      <section class="app-modal delete-label-modal" @click.stop>
-        <header class="delete-label-modal-header">
-          <p class="eyebrow">Delete label</p>
-          <h2>{{ pendingDeleteLabel?.name }}</h2>
-        </header>
+    <Teleport to="body">
+      <div
+        v-if="deleteLabelModalVisible"
+        class="label-delete-dialog-backdrop"
+        @click.self="closeDeleteLabelModal"
+      >
+        <section class="label-delete-dialog" @click.stop>
+          <button class="label-delete-dialog-close" type="button" @click="closeDeleteLabelModal">×</button>
 
-        <div class="delete-label-modal-body">
-          <p>
-            This label is used by
-            <strong>{{ pendingDeleteUsage?.annotation_count ?? 0 }}</strong>
-            annotations in
-            <strong>{{ pendingDeleteUsage?.frame_count ?? 0 }}</strong>
-            frames. Please choose how to handle these annotations.
-          </p>
+          <h3>Delete Label</h3>
 
-          <label class="delete-label-option">
-            <input v-model="deleteLabelStrategy" type="radio" value="reassign" />
-            <span>
-              <strong>Reassign annotations to another label</strong>
-              <small>Move all annotations using this label to a different existing label.</small>
-            </span>
-          </label>
-          <select
-            v-if="deleteLabelStrategy === 'reassign'"
-            v-model.number="reassignTargetLabelId"
-            class="delete-label-select"
-          >
-            <option
-              v-for="label in labelDrafts.filter((item) => item.id !== pendingDeleteLabel?.id)"
-              :key="label.id"
-              :value="label.id"
+          <template v-if="pendingDeleteUsage?.annotation_count === 0">
+            <p>Delete label "{{ pendingDeleteLabel?.name }}"?</p>
+
+            <div class="modal-actions">
+              <el-button @click="closeDeleteLabelModal">Cancel</el-button>
+              <el-button type="danger" :loading="labelActionLoading" @click="confirmDeleteUnusedLabel">
+                Delete Label
+              </el-button>
+            </div>
+          </template>
+
+          <template v-else>
+            <p>
+              This label is used by {{ pendingDeleteUsage?.annotation_count ?? 0 }}
+              annotations in {{ pendingDeleteUsage?.frame_count ?? 0 }} frames.
+              Please choose how to handle these annotations.
+            </p>
+
+            <el-radio-group v-model="deleteLabelStrategy" class="delete-label-strategy-group">
+              <el-radio label="reassign" value="reassign">
+                Reassign annotations to another label
+              </el-radio>
+
+              <el-radio
+                v-if="pendingDeleteLabel && !isUndefinedLabel(pendingDeleteLabel)"
+                label="move_to_undefined"
+                value="move_to_undefined"
+              >
+                Move annotations to undefined
+              </el-radio>
+
+              <el-radio label="delete_annotations" value="delete_annotations">
+                Delete annotations using this label
+              </el-radio>
+            </el-radio-group>
+
+            <el-select
+              v-if="deleteLabelStrategy === 'reassign'"
+              v-model="reassignTargetLabelId"
+              teleported
+              class="delete-label-target-select"
+              placeholder="Select target label"
             >
-              {{ label.name }}
-            </option>
-          </select>
+              <el-option
+                v-for="label in labelDrafts.filter((item) => item.id !== pendingDeleteLabel?.id)"
+                :key="label.id"
+                :label="label.name"
+                :value="label.id"
+              />
+            </el-select>
 
-          <label v-if="pendingDeleteLabel && !isUndefinedLabel(pendingDeleteLabel)" class="delete-label-option">
-            <input v-model="deleteLabelStrategy" type="radio" value="move_to_undefined" />
-            <span>
-              <strong>Move annotations to undefined</strong>
-              <small>Keep annotation shapes and change their label to undefined.</small>
-            </span>
-          </label>
+            <div v-if="deleteLabelStrategy === 'delete_annotations'" class="danger-warning">
+              This will permanently delete all annotations using this label. This action cannot be undone.
+            </div>
 
-          <label class="delete-label-option delete-label-option-danger">
-            <input v-model="deleteLabelStrategy" type="radio" value="delete_annotations" />
-            <span>
-              <strong>Delete annotations using this label</strong>
-              <small>This is destructive and requires another confirmation.</small>
-            </span>
-          </label>
-        </div>
-
-        <footer class="delete-label-modal-footer">
-          <el-button :disabled="labelActionLoading" @click="closeDeleteLabelModal">Cancel</el-button>
-          <el-button type="danger" :loading="labelActionLoading" @click="confirmDeleteManagedLabel">
-            Confirm
-          </el-button>
-        </footer>
-      </section>
-    </div>
+            <div class="modal-actions">
+              <el-button @click="closeDeleteLabelModal">Cancel</el-button>
+              <el-button type="danger" :loading="labelActionLoading" @click="confirmDeleteUsedLabel">
+                Confirm Delete
+              </el-button>
+            </div>
+          </template>
+        </section>
+      </div>
+    </Teleport>
   </main>
 </template>

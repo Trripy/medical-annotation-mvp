@@ -11,6 +11,7 @@ import {
   useJobsStore,
   type JobCard,
   type JobExportFormat,
+  type JobExportScope,
   type JobImportFormat,
   type JobImportMode,
   type JobImportReport,
@@ -38,6 +39,17 @@ const importMode = ref<JobImportMode>('append')
 const missingLabelPolicy = ref<MissingLabelPolicy>('auto_create')
 const importingLabels = ref(false)
 const importReport = ref<JobImportReport | null>(null)
+const exportDialogVisible = ref(false)
+const exportTargetJob = ref<JobCard | null>(null)
+const exportTargetType = ref<JobExportFormat>('labelme')
+const exportScope = ref<JobExportScope>('all')
+
+const exportTypeTitles: Record<JobExportFormat, string> = {
+  labelme: 'Export LabelMe',
+  overlay: 'Export Overlay Images',
+  'indexed-mask': 'Export Indexed Masks',
+  'color-mask': 'Export Color Masks',
+}
 
 const importFormatOptions: Array<{ label: string; value: JobImportFormat }> = [
   { label: 'Auto detect', value: 'auto' },
@@ -166,17 +178,50 @@ function openJob(job: JobCard) {
 }
 
 async function exportJob(job: JobCard, format: JobExportFormat) {
-  const exported = await jobsStore.exportJob(job.id, format)
+  const exported = await jobsStore.exportJob(job, format, exportScope.value)
   if (exported) {
+    closeExportOptions()
     ElMessage.success('Export completed')
     return
   }
 
-  ElMessage.error('Export failed')
+  ElMessage.error(jobsStore.error || 'Export failed')
 }
 
 function handleExportCommand(job: JobCard, command: string | number | object) {
-  void exportJob(job, command as JobExportFormat)
+  openExportOptions(job, command as JobExportFormat)
+}
+
+const exportDialogTitle = computed(() => exportTypeTitles[exportTargetType.value])
+const exportAnnotatedImagesCount = computed(() => exportTargetJob.value?.annotated_images_count ?? 0)
+const exportEmptyImagesCount = computed(() =>
+  Math.max((exportTargetJob.value?.frames ?? 0) - exportAnnotatedImagesCount.value, 0),
+)
+
+function openExportOptions(job: JobCard, format: JobExportFormat) {
+  exportTargetJob.value = job
+  exportTargetType.value = format
+  exportScope.value = 'all'
+  exportDialogVisible.value = true
+}
+
+function closeExportOptions() {
+  if (exportTargetJob.value && jobsStore.isExporting(exportTargetJob.value.id)) {
+    return
+  }
+
+  exportDialogVisible.value = false
+  exportTargetJob.value = null
+  exportTargetType.value = 'labelme'
+  exportScope.value = 'all'
+}
+
+async function submitExportOptions() {
+  if (!exportTargetJob.value) {
+    return
+  }
+
+  await exportJob(exportTargetJob.value, exportTargetType.value)
 }
 
 function openImportModal(job: JobCard) {
@@ -644,12 +689,25 @@ async function confirmDeleteJob(job: JobCard) {
               <span>Matched images: {{ importReport.matched_images }}</span>
               <span>Created annotations: {{ importReport.created_annotations }}</span>
               <span>Created labels: {{ importReport.created_labels.length }}</span>
+              <span>Reassigned conflicting colors: {{ importReport.reassigned_conflicting_colors ?? 0 }}</span>
               <span>Skipped: {{ importReport.skipped_items.length }}</span>
               <span>Errors: {{ importReport.errors.length }}</span>
             </div>
-            <details v-if="importReport.skipped_items.length || importReport.errors.length">
+            <details
+              v-if="
+                importReport.skipped_items.length ||
+                importReport.errors.length ||
+                (importReport.created_label_details?.some((label) => label.color_changed) ?? false)
+              "
+            >
               <summary>Details</summary>
               <ul>
+                <li
+                  v-for="label in importReport.created_label_details?.filter((item) => item.color_changed) ?? []"
+                  :key="`${label.name}-${label.color}`"
+                >
+                  {{ label.name }}: requested {{ label.requested_color ?? 'default' }}, assigned {{ label.color }}
+                </li>
                 <li v-for="item in importReport.skipped_items" :key="`${item.source}-${item.reason}`">
                   {{ item.source }}: {{ item.reason }}
                 </li>
@@ -670,6 +728,57 @@ async function confirmDeleteJob(job: JobCard) {
             @click="submitImportLabels"
           >
             Import
+          </el-button>
+        </footer>
+      </section>
+    </div>
+
+    <div v-if="exportDialogVisible" class="app-modal-backdrop" @click.self="closeExportOptions">
+      <section class="app-modal export-options-modal" @click.stop>
+        <header class="export-options-modal-header">
+          <div>
+            <p class="eyebrow">Export options</p>
+            <span class="import-current-job-label">Current Job</span>
+            <h2>{{ exportDialogTitle }}</h2>
+          </div>
+          <el-tag size="small" type="info">Job #{{ exportTargetJob?.id }}</el-tag>
+        </header>
+
+        <div class="export-options-modal-body">
+          <section class="export-options-section">
+            <h3>Export range</h3>
+            <el-radio-group v-model="exportScope" class="import-radio-stack">
+              <el-radio value="all">
+                <span class="import-radio-label">All images</span>
+                <small>Export labels or masks for all images in this job.</small>
+              </el-radio>
+              <el-radio value="annotated_only">
+                <span class="import-radio-label">Annotated images only</span>
+                <small>Export only images that have at least one annotation.</small>
+              </el-radio>
+            </el-radio-group>
+          </section>
+
+          <section v-if="exportTargetJob" class="export-options-summary">
+            <span>All images: {{ exportTargetJob.frames }}</span>
+            <span>Annotated images: {{ exportAnnotatedImagesCount }}</span>
+            <span>Empty images: {{ exportEmptyImagesCount }}</span>
+          </section>
+        </div>
+
+        <footer class="export-options-modal-footer">
+          <el-button
+            :disabled="exportTargetJob ? jobsStore.isExporting(exportTargetJob.id) : false"
+            @click="closeExportOptions"
+          >
+            Cancel
+          </el-button>
+          <el-button
+            type="primary"
+            :loading="exportTargetJob ? jobsStore.isExporting(exportTargetJob.id) : false"
+            @click="submitExportOptions"
+          >
+            Export
           </el-button>
         </footer>
       </section>

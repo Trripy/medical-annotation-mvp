@@ -33,6 +33,7 @@ class AnnotationRead(BaseModel):
     label_id: int
     shape_type: ShapeType
     points: list[Point]
+    attributes: dict | None = None
 
     model_config = {"from_attributes": True}
 
@@ -41,6 +42,7 @@ class AnnotationWrite(BaseModel):
     label_id: int
     shape_type: ShapeType
     points: list[Point] = Field(min_length=1)
+    attributes: dict | None = None
 
 
 class AnnotationSaveRequest(BaseModel):

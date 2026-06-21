@@ -19,6 +19,7 @@ from app.schemas.annotation import (
     LabelRead,
 )
 from app.schemas.job import (
+    ExportScope,
     JobImportRequest,
     JobImportResponse,
     JobLabelCreate,
@@ -29,8 +30,14 @@ from app.schemas.job import (
     JobLabelUsageRead,
     JobRead,
 )
+from app.services.download_filenames import (
+    build_attachment_content_disposition,
+    build_job_export_filename,
+)
+from app.services.export_scope import get_annotated_image_counts
 from app.services.image_storage import InvalidImageError, save_uploaded_image
 from app.services.importers import import_labels_for_job
+from app.services.label_colors import is_color_conflict, normalize_hex_color, pick_distinct_label_color
 from app.services.labelme_export import build_job_labelme_zip
 from app.services.export_visual import (
     build_job_color_mask_zip,
@@ -56,6 +63,7 @@ def list_jobs(db: Session = Depends(get_db)) -> list[JobRead]:
         .order_by(Job.id.desc())
     ).all()
 
+    annotated_counts = get_annotated_image_counts(db, [job.id for job in jobs])
     result: list[JobRead] = []
     for job in jobs:
         images = _job_images(job)
@@ -68,6 +76,7 @@ def list_jobs(db: Session = Depends(get_db)) -> list[JobRead]:
                 status=job.status,
                 task_id=job.task_id,
                 frames=len(images),
+                annotated_images_count=annotated_counts.get(job.id, 0),
                 thumbnail_url=f"/api/images/{images[0].id}/thumbnail" if images else None,
             )
         )
@@ -100,16 +109,20 @@ def create_job(
 
     task = Task(project=project, name=normalized_job_name, status="pending")
     job = Job(project=project, task=task, name=normalized_job_name, status="annotation")
-    job.labels = [
-        Label(
-            job=job,
-            name=label.name.strip(),
-            color=label.color,
-            shape_type=label.shape_type,
-            sort_order=index,
+    used_colors: list[str] = []
+    job.labels = []
+    for index, label in enumerate(labels):
+        color = pick_distinct_label_color(label.color, used_colors)
+        used_colors.append(color)
+        job.labels.append(
+            Label(
+                job=job,
+                name=label.name.strip(),
+                color=color,
+                shape_type=label.shape_type,
+                sort_order=index,
+            )
         )
-        for index, label in enumerate(labels)
-    ]
     db.add(job)
     db.flush()
 
@@ -204,11 +217,12 @@ def create_job_label(
     job = _get_job_for_label_management(job_id, db)
     labels, _ = _ensure_job_label_scope(job, db)
     _validate_unique_label_name(payload.name, labels)
+    _validate_distinct_label_color(payload.color, labels)
     sort_order = max((label.sort_order for label in labels), default=-1) + 1
     label = Label(
         job_id=job.id,
         name=payload.name,
-        color=payload.color,
+        color=normalize_hex_color(payload.color) or payload.color,
         shape_type=payload.shape_type,
         sort_order=sort_order,
     )
@@ -235,8 +249,9 @@ def update_job_label(
         )
 
     _validate_unique_label_name(payload.name, labels, exclude_label_id=label.id)
+    _validate_distinct_label_color(payload.color, labels, exclude_label_id=label.id)
     label.name = payload.name
-    label.color = payload.color
+    label.color = normalize_hex_color(payload.color) or payload.color
     label.shape_type = payload.shape_type
     db.commit()
     db.refresh(label)
@@ -354,6 +369,7 @@ def save_image_annotations(
             label_id=annotation.label_id,
             shape_type=annotation.shape_type,
             points=annotation.points,
+            attributes=annotation.attributes,
         )
         for annotation in payload.annotations
     ]
@@ -451,66 +467,91 @@ def delete_job(job_id: int, db: Session = Depends(get_db)) -> None:
 
 
 @router.get("/{job_id}/export/labelme")
-def export_job_labelme(job_id: int, db: Session = Depends(get_db)) -> StreamingResponse:
-    job = db.get(Job, job_id)
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-
-    archive = build_job_labelme_zip(job, db)
-    filename = f"job_{job.id}_labelme.zip"
-    return StreamingResponse(
-        archive,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@router.get("/{job_id}/export/overlay")
-def export_job_overlay_images(job_id: int, db: Session = Depends(get_db)) -> StreamingResponse:
-    job = db.get(Job, job_id)
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-
-    archive = build_job_overlay_zip(job, db)
-    filename = f"job_{job.id}_overlay_images.zip"
-    return StreamingResponse(
-        archive,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@router.get("/{job_id}/export/indexed-mask")
-def export_job_indexed_masks(job_id: int, db: Session = Depends(get_db)) -> StreamingResponse:
+def export_job_labelme(
+    job_id: int,
+    export_scope: ExportScope = "all",
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
     try:
-        archive = build_job_indexed_mask_zip(job, db)
+        archive = build_job_labelme_zip(job, db, export_scope=export_scope)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    filename = f"job_{job.id}_indexed_masks.zip"
+    filename = build_job_export_filename(job, "labelme", export_scope=export_scope)
     return StreamingResponse(
         archive,
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": build_attachment_content_disposition(filename, "export_labelme.zip")},
     )
 
 
-@router.get("/{job_id}/export/color-mask")
-def export_job_color_masks(job_id: int, db: Session = Depends(get_db)) -> StreamingResponse:
+@router.get("/{job_id}/export/overlay")
+def export_job_overlay_images(
+    job_id: int,
+    export_scope: ExportScope = "all",
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
-    archive = build_job_color_mask_zip(job, db)
-    filename = f"job_{job.id}_color_masks.zip"
+    try:
+        archive = build_job_overlay_zip(job, db, export_scope=export_scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    filename = build_job_export_filename(job, "overlay", export_scope=export_scope)
     return StreamingResponse(
         archive,
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": build_attachment_content_disposition(filename, "export_overlay.zip")},
+    )
+
+
+@router.get("/{job_id}/export/indexed-mask")
+def export_job_indexed_masks(
+    job_id: int,
+    export_scope: ExportScope = "all",
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    try:
+        archive = build_job_indexed_mask_zip(job, db, export_scope=export_scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    filename = build_job_export_filename(job, "mask_indexed", export_scope=export_scope)
+    return StreamingResponse(
+        archive,
+        media_type="application/zip",
+        headers={"Content-Disposition": build_attachment_content_disposition(filename, "export_mask_indexed.zip")},
+    )
+
+
+@router.get("/{job_id}/export/color-mask")
+def export_job_color_masks(
+    job_id: int,
+    export_scope: ExportScope = "all",
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    try:
+        archive = build_job_color_mask_zip(job, db, export_scope=export_scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    filename = build_job_export_filename(job, "mask_color", export_scope=export_scope)
+    return StreamingResponse(
+        archive,
+        media_type="application/zip",
+        headers={"Content-Disposition": build_attachment_content_disposition(filename, "export_mask_color.zip")},
     )
 
 
@@ -625,6 +666,26 @@ def _validate_unique_label_name(
             )
 
 
+def _validate_distinct_label_color(
+    color: str,
+    labels: list[Label],
+    *,
+    exclude_label_id: int | None = None,
+) -> None:
+    normalized = normalize_hex_color(color)
+    if normalized is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Label color must be a 6-digit hex color")
+
+    for label in labels:
+        if label.id == exclude_label_id:
+            continue
+        if is_color_conflict(normalized, [label.color]):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f'Label color is too similar to "{label.name}"',
+            )
+
+
 def _is_undefined_label(label: Label) -> bool:
     return label.name.strip().lower() == UNDEFINED_LABEL_NAME
 
@@ -638,7 +699,7 @@ def _get_or_create_undefined_label(job: Job, db: Session) -> Label:
     label = Label(
         job_id=job.id,
         name=UNDEFINED_LABEL_NAME,
-        color=UNDEFINED_LABEL_COLOR,
+        color=pick_distinct_label_color(UNDEFINED_LABEL_COLOR, [item.color for item in labels if item.color]),
         shape_type="polygon",
         sort_order=max((item.sort_order for item in labels), default=-1) + 1,
     )

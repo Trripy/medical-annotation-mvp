@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import Annotation, Image, Job, Task
+from app.services.export_scope import load_job_export_bundle
 
 
 def build_labelme_zip(task: Task, db: Session) -> BytesIO:
@@ -19,22 +20,10 @@ def build_labelme_zip(task: Task, db: Session) -> BytesIO:
     return build_labelme_zip_for_images(_ordered_images(images))
 
 
-def build_job_labelme_zip(job: Job, db: Session) -> BytesIO:
-    images = db.scalars(select(Image).where(Image.job_id == job.id)).all()
-    if not images and job.task_id is not None:
-        images = db.scalars(select(Image).where(Image.task_id == job.task_id)).all()
-    image_ids = [image.id for image in images]
-    annotations = db.scalars(
-        select(Annotation)
-        .where(Annotation.job_id == job.id, Annotation.image_id.in_(image_ids))
-        .options(selectinload(Annotation.label))
-    ).all()
-    annotations_by_image: dict[int, list[Annotation]] = {}
-    for annotation in annotations:
-        annotations_by_image.setdefault(annotation.image_id, []).append(annotation)
-
+def build_job_labelme_zip(job: Job, db: Session, *, export_scope: str | None = "all") -> BytesIO:
+    images, annotations_by_image = load_job_export_bundle(job, db, export_scope=export_scope)
     return build_labelme_zip_for_images(
-        _ordered_images(images),
+        images,
         annotations_by_image=annotations_by_image,
     )
 

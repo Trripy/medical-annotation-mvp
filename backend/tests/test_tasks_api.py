@@ -1,10 +1,11 @@
 from io import BytesIO
 import json
 from pathlib import Path
+from urllib.parse import quote
 from zipfile import ZipFile
 
 import pytest
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from PIL import Image as PILImage
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -17,12 +18,22 @@ from app.api.v1 import projects as projects_api
 from app.api.v1 import tasks as tasks_api
 from app.core.config import settings
 from app.db.base import Base
-from app.models import Label, Project, User
+from app.models import Job, Label, Project, User
 from app.schemas.annotation import AnnotationSaveRequest
 from app.schemas.job import JobRead
 from app.schemas.project import ProjectCreate
 from app.schemas.task import TaskCreate
-from app.services.labelme_export import build_labelme_zip
+from app.services.download_filenames import (
+    build_attachment_content_disposition,
+    build_job_export_filename,
+    sanitize_filename,
+)
+from app.services.export_visual import (
+    build_job_color_mask_zip,
+    build_job_indexed_mask_zip,
+    build_job_overlay_zip,
+)
+from app.services.labelme_export import build_job_labelme_zip, build_labelme_zip
 
 
 @pytest.fixture()
@@ -116,6 +127,7 @@ def test_upload_images_creates_images_thumbnails_and_job(db_session: Session, tm
             status="pending",
             task_id=task.id,
             frames=2,
+            annotated_images_count=0,
             thumbnail_url=jobs[0].thumbnail_url,
         )
     ]
@@ -154,6 +166,10 @@ def test_get_job_detail_and_save_annotations(db_session: Session) -> None:
                         "label_id": detail.labels[1].id,
                         "shape_type": "polygon",
                         "points": [[20, 20], [40, 22], [35, 50]],
+                        "attributes": {
+                            "raw_points": [[20, 20], [38, 21], [41, 24], [35, 50]],
+                            "smooth_value": 28,
+                        },
                     },
                 ]
             }
@@ -163,6 +179,18 @@ def test_get_job_detail_and_save_annotations(db_session: Session) -> None:
 
     assert len(annotations) == 2
     assert annotations[0].points == [[10.0, 12.0], [50.0, 44.0]]
+    assert annotations[0].attributes is None
+    assert annotations[1].attributes == {
+        "raw_points": [[20.0, 20.0], [38.0, 21.0], [41.0, 24.0], [35.0, 50.0]],
+        "smooth_value": 28,
+    }
+    assert annotations[1].points != annotations[1].attributes["raw_points"]
+
+    refreshed_detail = jobs_api.get_job(job_id, db_session)
+    assert refreshed_detail.annotations[1].attributes == {
+        "raw_points": [[20.0, 20.0], [38.0, 21.0], [41.0, 24.0], [35.0, 50.0]],
+        "smooth_value": 28,
+    }
 
 
 def test_export_task_as_labelme_zip(db_session: Session) -> None:
@@ -219,6 +247,131 @@ def test_export_task_as_labelme_zip(db_session: Session) -> None:
     assert [shape["shape_type"] for shape in labelme["shapes"]] == ["polygon", "polygon", "point"]
     assert labelme["shapes"][0]["label"] == "Nodule"
     assert labelme["shapes"][0]["points"] == [[10, 12], [50, 12], [50, 44], [10, 44]]
+
+
+def test_sanitize_filename_rules() -> None:
+    assert sanitize_filename("20260428_13_22_28q_test", fallback="job_1") == "20260428_13_22_28q_test"
+    assert sanitize_filename("张玉柱 OCT job", fallback="job_1") == "张玉柱_OCT_job"
+    assert sanitize_filename("case:001/test", fallback="job_1") == "case_001_test"
+    assert sanitize_filename("   ", fallback="job_1") == "job_1"
+    content_disposition = build_attachment_content_disposition("张玉柱_labelme.zip", "export_labelme.zip")
+    assert content_disposition.startswith('attachment; filename="')
+    assert "filename*=UTF-8''%E5%BC%A0%E7%8E%89%E6%9F%B1_labelme.zip" in content_disposition
+
+
+def test_build_job_export_filename_uses_job_name_for_all_export_types(db_session: Session) -> None:
+    task = tasks_api.create_task(TaskCreate(project_id=1, name="20260428_13_28_25q"), db_session)
+    upload_response = tasks_api.upload_task_data(
+        task.id,
+        files=[make_upload("slice.png", (100, 80))],
+        db=db_session,
+    )
+    job = db_session.get(Job, upload_response.job_id)
+    assert job is not None
+
+    assert build_job_export_filename(job, "labelme") == "20260428_13_28_25q_labelme.zip"
+    assert build_job_export_filename(job, "overlay") == "20260428_13_28_25q_overlay.zip"
+    assert build_job_export_filename(job, "mask_indexed") == "20260428_13_28_25q_mask_indexed.zip"
+    assert build_job_export_filename(job, "mask_color") == "20260428_13_28_25q_mask_color.zip"
+    assert build_job_export_filename(job, "labelme", export_scope="annotated_only") == (
+        "20260428_13_28_25q_labelme_annotated_only.zip"
+    )
+
+
+def test_export_job_labelme_content_disposition_uses_job_name(db_session: Session) -> None:
+    task = tasks_api.create_task(TaskCreate(project_id=1, name="张玉柱 OCT job"), db_session)
+    upload_response = tasks_api.upload_task_data(
+        task.id,
+        files=[make_upload("slice.png", (100, 80))],
+        db=db_session,
+    )
+
+    export_response = jobs_api.export_job_labelme(upload_response.job_id, db=db_session)
+    content_disposition = export_response.headers["Content-Disposition"]
+    expected_filename = "张玉柱_OCT_job_labelme.zip"
+
+    assert content_disposition == build_attachment_content_disposition(expected_filename, "export_labelme.zip")
+    assert 'filename="OCT_job_labelme.zip"' in content_disposition
+    assert f"filename*=UTF-8''{quote(expected_filename, safe='')}" in content_disposition
+
+
+def test_job_exports_support_annotated_only_scope(db_session: Session) -> None:
+    task = tasks_api.create_task(TaskCreate(project_id=1, name="Scoped Export"), db_session)
+    upload_response = tasks_api.upload_task_data(
+        task.id,
+        files=[
+            make_upload("0.png", (100, 80)),
+            make_upload("1.png", (100, 80)),
+            make_upload("2.png", (100, 80)),
+            make_upload("3.png", (100, 80)),
+            make_upload("4.png", (100, 80)),
+        ],
+        db=db_session,
+    )
+    detail = jobs_api.get_job(upload_response.job_id, db_session)
+    labels = detail.labels
+    annotated_image_ids = {detail.images[0].id, detail.images[3].id}
+
+    for image in detail.images:
+        annotations_payload = []
+        if image.id in annotated_image_ids:
+            annotations_payload = [
+                {
+                    "label_id": labels[0].id,
+                    "shape_type": "polygon",
+                    "points": [[10, 10], [40, 12], [38, 50], [12, 45]],
+                }
+            ]
+        jobs_api.save_image_annotations(
+            upload_response.job_id,
+            image.id,
+            AnnotationSaveRequest.model_validate({"annotations": annotations_payload}),
+            db_session,
+        )
+
+    job = db_session.get(Job, upload_response.job_id)
+    assert job is not None
+
+    with ZipFile(build_job_labelme_zip(job, db_session)) as archive:
+        assert len([name for name in archive.namelist() if name.endswith(".json")]) == 5
+    with ZipFile(build_job_labelme_zip(job, db_session, export_scope="annotated_only")) as archive:
+        assert len([name for name in archive.namelist() if name.endswith(".json")]) == 2
+
+    with ZipFile(build_job_overlay_zip(job, db_session)) as archive:
+        assert len([name for name in archive.namelist() if name.endswith(".png")]) == 5
+    with ZipFile(build_job_overlay_zip(job, db_session, export_scope="annotated_only")) as archive:
+        assert len([name for name in archive.namelist() if name.endswith(".png")]) == 2
+
+    with ZipFile(build_job_indexed_mask_zip(job, db_session)) as archive:
+        assert len([name for name in archive.namelist() if name.endswith(".png")]) == 5
+    with ZipFile(build_job_indexed_mask_zip(job, db_session, export_scope="annotated_only")) as archive:
+        assert len([name for name in archive.namelist() if name.endswith(".png")]) == 2
+
+    with ZipFile(build_job_color_mask_zip(job, db_session)) as archive:
+        assert len([name for name in archive.namelist() if name.endswith(".png")]) == 5
+    with ZipFile(build_job_color_mask_zip(job, db_session, export_scope="annotated_only")) as archive:
+        assert len([name for name in archive.namelist() if name.endswith(".png")]) == 2
+
+    export_response = jobs_api.export_job_labelme(upload_response.job_id, "annotated_only", db_session)
+    assert export_response.headers["Content-Disposition"] == build_attachment_content_disposition(
+        "Scoped_Export_labelme_annotated_only.zip",
+        "export_labelme.zip",
+    )
+
+
+def test_annotated_only_export_without_annotations_returns_error(db_session: Session) -> None:
+    task = tasks_api.create_task(TaskCreate(project_id=1, name="No Annotations"), db_session)
+    upload_response = tasks_api.upload_task_data(
+        task.id,
+        files=[make_upload("slice.png", (100, 80))],
+        db=db_session,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        jobs_api.export_job_labelme(upload_response.job_id, "annotated_only", db_session)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "No annotated images found in this job."
 
 
 def test_image_file_and_thumbnail_are_inline_images(db_session: Session) -> None:

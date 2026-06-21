@@ -28,8 +28,10 @@ from app.services.importers.utils import (
     ensure_import_label,
     job_images_for_import,
     job_labels_for_import,
+    label_color_changed,
     match_image_for_name,
 )
+from app.services.label_colors import normalize_hex_color
 from app.services.importers.via_importer import parse_via
 from app.services.importers.voc_importer import parse_voc
 from app.services.importers.yolo_importer import parse_yolo
@@ -60,6 +62,7 @@ def import_labels_for_job(
     annotations_by_image: dict[int, list[tuple[Label, str, list[list[float]], str]]] = defaultdict(list)
     matched_image_ids: set[int] = set()
     created_labels: list[str] = []
+    created_label_details: list[dict[str, object]] = []
     skipped_items = list(parse_result.skipped_items)
     prefer_job_scope = db.scalar(select(Label.id).where(Label.job_id == job.id).limit(1)) is not None
 
@@ -92,6 +95,17 @@ def import_labels_for_job(
             )
             existing_labels[label_key] = label
             created_labels.append(label.name)
+            requested_color = normalize_hex_color(imported.label_color)
+            changed = label_color_changed(imported.label_color, label.color)
+            created_label_details.append(
+                {
+                    "name": label.name,
+                    "color": label.color,
+                    "requested_color": requested_color,
+                    "color_changed": changed,
+                    "reason": "requested color conflicts with an existing label color" if changed else None,
+                }
+            )
 
         clamped_points = [clamp_point(point, image.width, image.height) for point in imported.points]
         annotations_by_image[image.id].append((label, imported.shape_type, clamped_points, imported.source_file))
@@ -130,9 +144,18 @@ def import_labels_for_job(
         "unmatched_items": sum(1 for item in skipped_items if "image not matched" in item.reason),
         "created_annotations": created_annotation_count,
         "created_labels": list(dict.fromkeys(created_labels)),
+        "created_label_details": _dedupe_created_label_details(created_label_details),
+        "reassigned_conflicting_colors": sum(1 for item in created_label_details if item["color_changed"]),
         "skipped_items": [{"source": item.source, "reason": item.reason} for item in skipped_items],
         "errors": parse_result.errors,
     }
+
+
+def _dedupe_created_label_details(details: list[dict[str, object]]) -> list[dict[str, object]]:
+    deduped: dict[str, dict[str, object]] = {}
+    for detail in details:
+        deduped.setdefault(str(detail["name"]).lower(), detail)
+    return list(deduped.values())
 
 
 def _expand_source_files(uploads: list[tuple[str, bytes]]) -> list[ImportSourceFile]:

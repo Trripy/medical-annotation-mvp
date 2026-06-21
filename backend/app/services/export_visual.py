@@ -5,17 +5,18 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from PIL import Image as PILImage
 from PIL import ImageDraw
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from app.models import Annotation, Image, Job, Label, Task
+from app.services.export_scope import load_job_export_bundle
 
 OVERLAY_ALPHA = 90
 OVERLAY_OUTLINE_WIDTH = 2
 POINT_RADIUS = 4
 
 
-def build_job_overlay_zip(job: Job, db: Session) -> BytesIO:
-    images, annotations_by_image, _labels = _load_export_data(job, db)
+def build_job_overlay_zip(job: Job, db: Session, *, export_scope: str | None = "all") -> BytesIO:
+    images, annotations_by_image, _labels = _load_export_data(job, db, export_scope=export_scope)
     buffer = BytesIO()
 
     with ZipFile(buffer, mode="w", compression=ZIP_DEFLATED) as zip_file:
@@ -34,8 +35,8 @@ def build_job_overlay_zip(job: Job, db: Session) -> BytesIO:
     return buffer
 
 
-def build_job_indexed_mask_zip(job: Job, db: Session) -> BytesIO:
-    images, annotations_by_image, labels = _load_export_data(job, db)
+def build_job_indexed_mask_zip(job: Job, db: Session, *, export_scope: str | None = "all") -> BytesIO:
+    images, annotations_by_image, labels = _load_export_data(job, db, export_scope=export_scope)
     if len(labels) > 255:
         raise ValueError("Indexed mask export supports up to 255 labels")
 
@@ -59,8 +60,8 @@ def build_job_indexed_mask_zip(job: Job, db: Session) -> BytesIO:
     return buffer
 
 
-def build_job_color_mask_zip(job: Job, db: Session) -> BytesIO:
-    images, annotations_by_image, labels = _load_export_data(job, db)
+def build_job_color_mask_zip(job: Job, db: Session, *, export_scope: str | None = "all") -> BytesIO:
+    images, annotations_by_image, labels = _load_export_data(job, db, export_scope=export_scope)
     label_colors = {label.id: _hex_to_rgb(label.color) for label in labels}
     buffer = BytesIO()
 
@@ -81,30 +82,14 @@ def build_job_color_mask_zip(job: Job, db: Session) -> BytesIO:
     return buffer
 
 
-def _load_export_data(job: Job, db: Session) -> tuple[list[Image], dict[int, list[Annotation]], list[Label]]:
-    images = _job_images(job, db)
-    image_ids = [image.id for image in images]
-    if image_ids:
-        annotations = db.scalars(
-            select(Annotation)
-            .where(Annotation.job_id == job.id, Annotation.image_id.in_(image_ids))
-            .options(selectinload(Annotation.label))
-        ).all()
-    else:
-        annotations = []
-
-    annotations_by_image: dict[int, list[Annotation]] = {}
-    for annotation in annotations:
-        annotations_by_image.setdefault(annotation.image_id, []).append(annotation)
-
+def _load_export_data(
+    job: Job,
+    db: Session,
+    *,
+    export_scope: str | None = "all",
+) -> tuple[list[Image], dict[int, list[Annotation]], list[Label]]:
+    images, annotations_by_image = load_job_export_bundle(job, db, export_scope=export_scope)
     return images, annotations_by_image, _job_labels(job, db)
-
-
-def _job_images(job: Job, db: Session) -> list[Image]:
-    images = list(db.scalars(select(Image).where(Image.job_id == job.id)).all())
-    if not images and job.task_id is not None:
-        images = list(db.scalars(select(Image).where(Image.task_id == job.task_id)).all())
-    return _ordered_images(images)
 
 
 def _job_labels(job: Job, db: Session) -> list[Label]:

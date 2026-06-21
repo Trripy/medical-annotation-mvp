@@ -111,6 +111,34 @@ def test_create_and_update_job_label(session: Session) -> None:
     assert updated.shape_type == "polygon"
 
 
+def test_create_or_update_job_label_rejects_conflicting_color(session: Session) -> None:
+    job = create_job(session)
+    created = jobs_api.create_job_label(
+        job.id,
+        JobLabelPayload(name="new layer", color="#f97316", shape_type="polygon"),
+        session,
+    )
+
+    with pytest.raises(HTTPException) as create_error:
+        jobs_api.create_job_label(
+            job.id,
+            JobLabelPayload(name="too close", color="#24c760", shape_type="polygon"),
+            session,
+        )
+    assert create_error.value.status_code == 400
+    assert "too similar" in create_error.value.detail
+
+    with pytest.raises(HTTPException) as update_error:
+        jobs_api.update_job_label(
+            job.id,
+            created.id,
+            JobLabelPayload(name="new layer", color="#0fa5e8", shape_type="polygon"),
+            session,
+        )
+    assert update_error.value.status_code == 400
+    assert "too similar" in update_error.value.detail
+
+
 def test_delete_unused_job_label(session: Session) -> None:
     job = create_job(session)
     label = jobs_api.create_job_label(

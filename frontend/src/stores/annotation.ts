@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 
 import { apiUrl, resolveApiUrl } from '../utils/api'
+import { normalizeAnnotationObject, normalizeAnnotationObjects } from '../utils/polygon'
 
 export type Label = {
   id: number
@@ -29,6 +30,7 @@ export type AnnotationObject = {
   label_id: number
   shape_type: ShapeType
   points: number[][]
+  attributes?: Record<string, unknown> | null
 }
 
 export type JobDetail = {
@@ -81,6 +83,7 @@ function normalizeJobDetail(job: JobDetail): JobDetail {
       image_url: withCacheBuster(resolveStorageUrl(image.image_url), image.id),
       thumbnail_url: withCacheBuster(resolveStorageUrl(image.thumbnail_url), image.id),
     })),
+    annotations: normalizeAnnotationObjects(job.annotations),
   }
 }
 
@@ -124,16 +127,18 @@ export const useAnnotationStore = defineStore('annotation', {
       this.error = ''
 
       try {
+        const normalizedAnnotations = annotations.map((annotation) => normalizeAnnotationObject(annotation))
         const response = await fetch(apiUrl(`/api/jobs/${this.job.id}/images/${imageId}/annotations`), {
           method: 'PUT',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            annotations: annotations.map((annotation) => ({
+            annotations: normalizedAnnotations.map((annotation) => ({
               label_id: annotation.label_id,
               shape_type: annotation.shape_type,
               points: annotation.points,
+              attributes: annotation.attributes ?? null,
             })),
           }),
         })
@@ -142,7 +147,7 @@ export const useAnnotationStore = defineStore('annotation', {
           throw new Error(`Save failed: ${response.status}`)
         }
 
-        const saved: AnnotationObject[] = await response.json()
+        const saved = normalizeAnnotationObjects(await response.json() as AnnotationObject[])
         this.job.annotations = [
           ...this.job.annotations.filter((annotation) => annotation.image_id !== imageId),
           ...saved,

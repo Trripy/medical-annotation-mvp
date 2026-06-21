@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.services.importers.base import ImportParseResult, ImportSkippedItem, ImportSourceFile, ImportedAnnotation
 from app.services.importers.utils import bbox_to_rectangle, safe_json_loads
+from app.services.label_colors import normalize_hex_color
 
 
 def parse_coco(files: list[ImportSourceFile]) -> ImportParseResult:
@@ -19,7 +20,10 @@ def parse_coco(files: list[ImportSourceFile]) -> ImportParseResult:
             continue
 
         categories = {
-            int(category["id"]): str(category.get("name") or f"class_{category['id']}")
+            int(category["id"]): (
+                str(category.get("name") or f"class_{category['id']}"),
+                _parse_coco_color(category.get("color") or category.get("rgb")),
+            )
             for category in data.get("categories", [])
             if isinstance(category, dict) and "id" in category
         }
@@ -39,7 +43,7 @@ def parse_coco(files: list[ImportSourceFile]) -> ImportParseResult:
                 result.skipped_items.append(ImportSkippedItem(source.name, f"annotation {annotation.get('id')}: image not found"))
                 continue
 
-            label_name = categories.get(int(category_id), f"class_{category_id}")
+            label_name, label_color = categories.get(int(category_id), (f"class_{category_id}", None))
             segmentation = annotation.get("segmentation")
             bbox = annotation.get("bbox")
 
@@ -55,6 +59,7 @@ def parse_coco(files: list[ImportSourceFile]) -> ImportParseResult:
                         shape_type="polygon",
                         points=polygon,
                         source_file=source.name,
+                        label_color=label_color,
                     )
                 )
                 continue
@@ -67,6 +72,7 @@ def parse_coco(files: list[ImportSourceFile]) -> ImportParseResult:
                         shape_type="rectangle",
                         points=bbox_to_rectangle(bbox[:4]),
                         source_file=source.name,
+                        label_color=label_color,
                     )
                 )
                 continue
@@ -74,6 +80,18 @@ def parse_coco(files: list[ImportSourceFile]) -> ImportParseResult:
             result.skipped_items.append(ImportSkippedItem(source.name, f"annotation {annotation.get('id')}: no usable segmentation or bbox"))
 
     return result
+
+
+def _parse_coco_color(value: object) -> str | None:
+    if isinstance(value, str):
+        return normalize_hex_color(value)
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        try:
+            r, g, b = [max(0, min(255, int(float(part)))) for part in value[:3]]
+        except (TypeError, ValueError):
+            return None
+        return f"#{r:02x}{g:02x}{b:02x}"
+    return None
 
 
 def _parse_coco_segmentation(segmentation: list, image: dict) -> list[list[float]] | None:

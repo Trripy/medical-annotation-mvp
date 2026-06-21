@@ -11,6 +11,7 @@ from sqlalchemy import create_engine
 from app.db.base import Base
 from app.models import Annotation, Image, Job, Label, Project, Task, User
 from app.services.importers import import_labels_for_job
+from app.services.label_colors import MIN_LABEL_COLOR_DISTANCE, color_distance
 
 
 @pytest.fixture()
@@ -69,6 +70,29 @@ def labelme_payload(image_path: str, label: str = "layer_up") -> bytes:
     ).encode("utf-8")
 
 
+def labelme_multi_payload(image_path: str, labels: list[tuple[str, str]]) -> bytes:
+    shapes = []
+    for index, (label, color) in enumerate(labels):
+        offset = index * 3
+        shapes.append(
+            {
+                "label": label,
+                "shape_type": "polygon",
+                "line_color": color,
+                "points": [[10 + offset, 10], [30 + offset, 10], [30 + offset, 30], [10 + offset, 30]],
+            }
+        )
+    return json.dumps(
+        {
+            "version": "5.0.0",
+            "imagePath": image_path,
+            "imageHeight": 48,
+            "imageWidth": 64,
+            "shapes": shapes,
+        }
+    ).encode("utf-8")
+
+
 def make_mask_bmp() -> bytes:
     image = PILImage.new("L", (64, 48), 0)
     for x in range(4, 18):
@@ -76,6 +100,16 @@ def make_mask_bmp() -> bytes:
             image.putpixel((x, y), 1)
     buffer = BytesIO()
     image.save(buffer, format="BMP")
+    return buffer.getvalue()
+
+
+def make_color_mask_png(color: tuple[int, int, int]) -> bytes:
+    image = PILImage.new("RGB", (64, 48), (0, 0, 0))
+    for x in range(4, 18):
+        for y in range(5, 20):
+            image.putpixel((x, y), color)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
     return buffer.getvalue()
 
 
@@ -104,6 +138,67 @@ def test_import_labelme_appends_annotations_and_preserves_existing_job_labels(se
     annotations = session.scalars(select(Annotation).where(Annotation.job_id == job.id)).all()
     assert len(annotations) == 1
     assert annotations[0].shape_type == "polygon"
+
+
+def test_import_new_labels_get_distinct_colors_when_requested_colors_conflict(session: Session) -> None:
+    job = create_job(session)
+
+    report = import_labels_for_job(
+        job=job,
+        db=session,
+        uploads=[
+            (
+                "0.json",
+                labelme_multi_payload(
+                    "0.png",
+                    [
+                        ("needle", "#22c55e"),
+                        ("lesion", "#22c55e"),
+                    ],
+                ),
+            )
+        ],
+        import_format="labelme",
+        import_mode="append",
+        missing_label_policy="auto_create",
+    )
+    session.commit()
+
+    labels = {
+        label.name: label
+        for label in session.scalars(select(Label).where(Label.job_id == job.id)).all()
+    }
+    assert labels["layer_up"].color == "#22c55e"
+    assert labels["needle"].color != "#22c55e"
+    assert labels["lesion"].color != "#22c55e"
+    assert color_distance(labels["needle"].color, labels["lesion"].color) >= MIN_LABEL_COLOR_DISTANCE
+    assert color_distance(labels["needle"].color, labels["layer_up"].color) >= MIN_LABEL_COLOR_DISTANCE
+    assert color_distance(labels["lesion"].color, labels["layer_up"].color) >= MIN_LABEL_COLOR_DISTANCE
+    assert report["reassigned_conflicting_colors"] == 2
+    assert {detail["name"] for detail in report["created_label_details"] if detail["color_changed"]} == {
+        "needle",
+        "lesion",
+    }
+
+
+def test_import_existing_label_keeps_existing_color(session: Session) -> None:
+    job = create_job(session)
+
+    report = import_labels_for_job(
+        job=job,
+        db=session,
+        uploads=[("0.json", labelme_multi_payload("0.png", [("layer_up", "#ef4444")]))],
+        import_format="labelme",
+        import_mode="append",
+        missing_label_policy="auto_create",
+    )
+    session.commit()
+
+    label = session.scalar(select(Label).where(Label.job_id == job.id, Label.name == "layer_up"))
+    assert label is not None
+    assert label.color == "#22c55e"
+    assert report["created_labels"] == []
+    assert report["created_label_details"] == []
 
 
 def test_import_skip_unknown_label_keeps_existing_labels_unchanged(session: Session) -> None:
@@ -210,6 +305,53 @@ def test_import_indexed_mask_converts_to_polygon(session: Session) -> None:
     assert label is not None
     assert annotation.shape_type == "polygon"
     assert annotation.label_id == label.id
+
+
+def test_import_color_mask_reassigns_display_color_without_breaking_mask_parsing(session: Session) -> None:
+    job = create_job(session)
+
+    report = import_labels_for_job(
+        job=job,
+        db=session,
+        uploads=[("0_color_mask.png", make_color_mask_png((36, 199, 96)))],
+        import_format="mask",
+        import_mode="append",
+        missing_label_policy="auto_create",
+    )
+    session.commit()
+
+    label = session.scalar(select(Label).where(Label.job_id == job.id, Label.name == "color_24c760"))
+    existing = session.scalar(select(Label).where(Label.job_id == job.id, Label.name == "layer_up"))
+    assert label is not None
+    assert existing is not None
+    annotation = session.scalar(select(Annotation).where(Annotation.job_id == job.id, Annotation.label_id == label.id))
+    assert annotation is not None
+    assert label.color != "#24c760"
+    assert color_distance(label.color, existing.color) >= MIN_LABEL_COLOR_DISTANCE
+    assert report["created_annotations"] >= 1
+    assert report["reassigned_conflicting_colors"] == 1
+
+
+def test_import_new_label_avoids_existing_undefined_color(session: Session) -> None:
+    job = create_job(session)
+    session.add(Label(job_id=job.id, name="undefined", color="#9ca3af", shape_type="polygon", sort_order=3))
+    session.commit()
+
+    import_labels_for_job(
+        job=job,
+        db=session,
+        uploads=[("0.json", labelme_multi_payload("0.png", [("ambiguous", "#9CA3AF")]))],
+        import_format="labelme",
+        import_mode="append",
+        missing_label_policy="auto_create",
+    )
+    session.commit()
+
+    undefined = session.scalar(select(Label).where(Label.job_id == job.id, Label.name == "undefined"))
+    ambiguous = session.scalar(select(Label).where(Label.job_id == job.id, Label.name == "ambiguous"))
+    assert undefined is not None
+    assert ambiguous is not None
+    assert color_distance(undefined.color, ambiguous.color) >= MIN_LABEL_COLOR_DISTANCE
 
 
 def test_import_yolo_zip_uses_classes_txt_names(session: Session) -> None:

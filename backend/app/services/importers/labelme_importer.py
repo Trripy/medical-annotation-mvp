@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.services.importers.base import ImportParseResult, ImportSkippedItem, ImportSourceFile, ImportedAnnotation
 from app.services.importers.utils import points_to_rectangle, safe_json_loads
+from app.services.label_colors import normalize_hex_color
 
 
 def parse_labelme(files: list[ImportSourceFile]) -> ImportParseResult:
@@ -60,10 +61,23 @@ def parse_labelme(files: list[ImportSourceFile]) -> ImportParseResult:
                     shape_type=imported_shape_type,  # type: ignore[arg-type]
                     points=imported_points,
                     source_file=source.name,
+                    label_color=_parse_labelme_color(shape.get("line_color") or shape.get("fill_color")),
                 )
             )
 
     return result
+
+
+def _parse_labelme_color(value: object) -> str | None:
+    if isinstance(value, str):
+        return normalize_hex_color(value)
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        try:
+            r, g, b = [max(0, min(255, int(float(part)))) for part in value[:3]]
+        except (TypeError, ValueError):
+            return None
+        return f"#{r:02x}{g:02x}{b:02x}"
+    return None
 
 
 def _parse_points(points: object) -> list[list[float]]:

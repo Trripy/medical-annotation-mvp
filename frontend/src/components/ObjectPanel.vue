@@ -4,6 +4,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
 
 import type { AnnotationObject, Label } from '../stores/annotation'
+import { getPolygonSmoothValue } from '../utils/polygon'
 
 const props = defineProps<{
   annotations: AnnotationObject[]
@@ -17,11 +18,25 @@ const emit = defineEmits<{
   selectAnnotation: [id: number | string]
   toggleVisibility: [id: number | string]
   updateAnnotationLabel: [id: number | string, labelId: number]
+  createLayerAbove: [id: number | string]
+  showAll: []
+  hideAll: []
+  updatePolygonSmoothing: [id: number | string, value: number]
+  commitPolygonSmoothing: [id: number | string, value: number]
+  resetPolygonSmoothing: [id: number | string]
 }>()
 
 const cardRefs = ref(new Map<number | string, HTMLElement>())
+const polygonSmoothingValue = ref(0)
 
 const objectCount = computed(() => props.annotations.length)
+const hiddenCount = computed(() => props.annotations.filter((annotation) => isHidden(annotation.id)).length)
+const selectedAnnotation = computed(() =>
+  props.annotations.find((annotation) => annotation.id === props.selectedAnnotationId) ?? null,
+)
+const selectedPolygonAnnotation = computed(() =>
+  selectedAnnotation.value?.shape_type === 'polygon' ? selectedAnnotation.value : null,
+)
 
 watch(
   () => props.selectedAnnotationId,
@@ -33,6 +48,14 @@ watch(
     await nextTick()
     cardRefs.value.get(id)?.scrollIntoView({ block: 'nearest' })
   },
+)
+
+watch(
+  () => selectedPolygonAnnotation.value,
+  (annotation) => {
+    polygonSmoothingValue.value = annotation ? getPolygonSmoothValue(annotation) : 0
+  },
+  { immediate: true },
 )
 
 function labelFor(labelId: number): Label | undefined {
@@ -55,6 +78,22 @@ function setCardRef(id: number | string, element: Element | ComponentPublicInsta
 function updateLabel(id: number | string, labelId: string | number) {
   emit('updateAnnotationLabel', id, Number(labelId))
 }
+
+function updateSmoothing(value: number | null) {
+  if (!selectedPolygonAnnotation.value || value === null) {
+    return
+  }
+  polygonSmoothingValue.value = Number(value)
+  emit('updatePolygonSmoothing', selectedPolygonAnnotation.value.id, polygonSmoothingValue.value)
+}
+
+function commitSmoothing(value: number | null) {
+  if (!selectedPolygonAnnotation.value || value === null) {
+    return
+  }
+  polygonSmoothingValue.value = Number(value)
+  emit('commitPolygonSmoothing', selectedPolygonAnnotation.value.id, polygonSmoothingValue.value)
+}
 </script>
 
 <template>
@@ -64,9 +103,49 @@ function updateLabel(id: number | string, labelId: string | number) {
         <p class="panel-label">Objects</p>
         <h2>Objects {{ objectCount }}</h2>
       </div>
+      <div class="objects-panel-bulk-actions">
+        <el-button size="small" :disabled="annotations.length === 0 || hiddenCount === 0" @click="emit('showAll')">
+          Show All
+        </el-button>
+        <el-button size="small" :disabled="annotations.length === 0 || hiddenCount === annotations.length" @click="emit('hideAll')">
+          Hide All
+        </el-button>
+      </div>
     </header>
 
     <section class="objects-list">
+      <section v-if="selectedPolygonAnnotation" class="object-smoothing-panel">
+        <div class="object-smoothing-header">
+          <div>
+            <p class="panel-label">Polygon smoothing</p>
+            <h3>Selected polygon</h3>
+          </div>
+          <el-button size="small" text @click="emit('resetPolygonSmoothing', selectedPolygonAnnotation.id)">
+            Reset to original
+          </el-button>
+        </div>
+        <div class="object-smoothing-scale">
+          <span>Fine outline</span>
+          <span>Coarse outline</span>
+        </div>
+        <el-slider
+          :model-value="polygonSmoothingValue"
+          :min="0"
+          :max="100"
+          :step="1"
+          @input="updateSmoothing"
+          @change="commitSmoothing"
+        />
+        <el-button
+          size="small"
+          type="primary"
+          plain
+          @click="emit('createLayerAbove', selectedPolygonAnnotation.id)"
+        >
+          Create layer above
+        </el-button>
+      </section>
+
       <article
         v-for="(annotation, index) in annotations"
         :key="annotation.id"

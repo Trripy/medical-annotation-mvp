@@ -10,6 +10,7 @@ from app.db.session import get_db
 from app.models import Annotation, Image, Job, Label, Project, Task, User
 from app.schemas.job import JobRead
 from app.schemas.project import ProjectCreate, ProjectRead
+from app.services.export_scope import get_annotated_image_counts
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -97,7 +98,9 @@ def delete_project(project_id: int, db: Session = Depends(get_db)) -> None:
 @router.get("/{project_id}/jobs", response_model=list[JobRead])
 def list_project_jobs(project_id: int, db: Session = Depends(get_db)) -> list[JobRead]:
     if project_id == 0:
-        return [_job_to_read(job) for job in _load_unassigned_jobs(db)]
+        jobs = _load_unassigned_jobs(db)
+        annotated_counts = get_annotated_image_counts(db, [job.id for job in jobs])
+        return [_job_to_read(job, annotated_counts.get(job.id, 0)) for job in jobs]
 
     project = db.scalar(
         select(Project)
@@ -111,7 +114,9 @@ def list_project_jobs(project_id: int, db: Session = Depends(get_db)) -> list[Jo
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    return [_job_to_read(job) for job in sorted(project.jobs, key=lambda job: job.id, reverse=True)]
+    jobs = sorted(project.jobs, key=lambda job: job.id, reverse=True)
+    annotated_counts = get_annotated_image_counts(db, [job.id for job in jobs])
+    return [_job_to_read(job, annotated_counts.get(job.id, 0)) for job in jobs]
 
 
 def _get_or_create_default_user(db: Session) -> User:
@@ -163,7 +168,7 @@ def _synthetic_unassigned_project(jobs: list[Job]) -> ProjectRead:
     )
 
 
-def _job_to_read(job: Job) -> JobRead:
+def _job_to_read(job: Job, annotated_images_count: int = 0) -> JobRead:
     images = _job_images(job)
     return JobRead(
         id=job.id,
@@ -173,6 +178,7 @@ def _job_to_read(job: Job) -> JobRead:
         status=job.status,
         task_id=job.task_id,
         frames=len(images),
+        annotated_images_count=annotated_images_count,
         thumbnail_url=f"/api/images/{images[0].id}/thumbnail" if images else None,
     )
 

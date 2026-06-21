@@ -10,6 +10,7 @@ export type JobCard = {
   status: string
   task_id?: number | null
   frames: number
+  annotated_images_count: number
   thumbnail_url: string | null
 }
 
@@ -22,6 +23,7 @@ export type ProjectCard = {
 }
 
 export type JobExportFormat = 'labelme' | 'overlay' | 'indexed-mask' | 'color-mask'
+export type JobExportScope = 'all' | 'annotated_only'
 export type JobImportFormat = 'auto' | 'labelme' | 'coco' | 'cvat' | 'yolo' | 'mask' | 'voc' | 'via' | 'supervisely'
 export type JobImportMode = 'append' | 'replace_matched_images' | 'replace_all_job'
 export type MissingLabelPolicy = 'auto_create' | 'skip'
@@ -32,6 +34,14 @@ export type JobImportReport = {
   unmatched_items: number
   created_annotations: number
   created_labels: string[]
+  created_label_details?: Array<{
+    name: string
+    color: string
+    requested_color: string | null
+    color_changed: boolean
+    reason: string | null
+  }>
+  reassigned_conflicting_colors?: number
   skipped_items: Array<{ source: string; reason: string }>
   errors: string[]
 }
@@ -43,20 +53,78 @@ const exportConfigs: Record<JobExportFormat, { endpoint: string; filenameSuffix:
   },
   overlay: {
     endpoint: 'overlay',
-    filenameSuffix: 'overlay_images',
+    filenameSuffix: 'overlay',
   },
   'indexed-mask': {
     endpoint: 'indexed-mask',
-    filenameSuffix: 'indexed_masks',
+    filenameSuffix: 'mask_indexed',
   },
   'color-mask': {
     endpoint: 'color-mask',
-    filenameSuffix: 'color_masks',
+    filenameSuffix: 'mask_color',
   },
 }
 
 function resolveThumbnailUrl(path: string | null): string {
   return resolveApiUrl(path)
+}
+
+function sanitizeFilename(name: string | null | undefined, fallback: string): string {
+  const rawName = (name ?? '').trim()
+  if (!rawName) {
+    return fallback
+  }
+
+  const normalizedCharacters = Array.from(rawName, (character) => {
+    if (/[/\\:*?"<>|]/.test(character)) {
+      return '_'
+    }
+    if (/\s/.test(character)) {
+      return '_'
+    }
+    return character
+  })
+
+  const normalized = normalizedCharacters.join('')
+    .replace(/_+/g, '_')
+    .replace(/^[_\.]+|[_\.]+$/g, '')
+
+  return normalized || fallback
+}
+
+function buildExportFilename(
+  job: Pick<JobCard, 'id' | 'name'>,
+  format: JobExportFormat,
+  scope: JobExportScope,
+): string {
+  const config = exportConfigs[format]
+  const safeJobName = sanitizeFilename(job.name, `job_${job.id}`)
+  const scopeSuffix = scope === 'annotated_only' ? '_annotated_only' : ''
+  return `${safeJobName}_${config.filenameSuffix}${scopeSuffix}.zip`
+}
+
+function parseContentDispositionFilename(contentDisposition: string | null): string | null {
+  if (!contentDisposition) {
+    return null
+  }
+
+  const encodedMatch = contentDisposition.match(/filename\*\s*=\s*([^;]+)/i)
+  if (encodedMatch) {
+    const encodedValue = encodedMatch[1].trim().replace(/^"|"$/g, '')
+    const normalizedValue = encodedValue.replace(/^UTF-8''/i, '')
+    try {
+      return decodeURIComponent(normalizedValue)
+    } catch {
+      return normalizedValue
+    }
+  }
+
+  const basicMatch = contentDisposition.match(/filename\s*=\s*([^;]+)/i)
+  if (!basicMatch) {
+    return null
+  }
+
+  return basicMatch[1].trim().replace(/^"|"$/g, '')
 }
 
 export const useJobsStore = defineStore('jobs', {
@@ -159,23 +227,27 @@ export const useJobsStore = defineStore('jobs', {
         return false
       }
     },
-    async exportJob(jobId: number, format: JobExportFormat) {
-      this.exportingJobIds = [...this.exportingJobIds, jobId]
+    async exportJob(job: Pick<JobCard, 'id' | 'name'>, format: JobExportFormat, scope: JobExportScope = 'all') {
+      this.exportingJobIds = [...this.exportingJobIds, job.id]
       this.error = ''
 
       try {
         const config = exportConfigs[format]
-        const response = await fetch(apiUrl(`/api/jobs/${jobId}/export/${config.endpoint}`))
+        const searchParams = new URLSearchParams({ export_scope: scope })
+        const response = await fetch(apiUrl(`/api/jobs/${job.id}/export/${config.endpoint}?${searchParams.toString()}`))
 
         if (!response.ok) {
-          throw new Error(`Export failed: ${response.status}`)
+          const payload = await response.json().catch(() => null)
+          const detail = typeof payload?.detail === 'string' ? payload.detail : `Export failed: ${response.status}`
+          throw new Error(detail)
         }
 
         const blob = await response.blob()
         const url = URL.createObjectURL(blob)
         const link = document.createElement('a')
         link.href = url
-        link.download = `job_${jobId}_${config.filenameSuffix}.zip`
+        link.download = parseContentDispositionFilename(response.headers.get('Content-Disposition'))
+          ?? buildExportFilename(job, format, scope)
         document.body.appendChild(link)
         link.click()
         link.remove()
@@ -185,11 +257,11 @@ export const useJobsStore = defineStore('jobs', {
         this.error = error instanceof Error ? error.message : 'Unknown error'
         return false
       } finally {
-        this.exportingJobIds = this.exportingJobIds.filter((id) => id !== jobId)
+        this.exportingJobIds = this.exportingJobIds.filter((id) => id !== job.id)
       }
     },
-    async exportLabelMe(jobId: number) {
-      return this.exportJob(jobId, 'labelme')
+    async exportLabelMe(job: Pick<JobCard, 'id' | 'name'>, scope: JobExportScope = 'all') {
+      return this.exportJob(job, 'labelme', scope)
     },
     async importLabels(jobId: number, formData: FormData): Promise<JobImportReport | null> {
       this.error = ''

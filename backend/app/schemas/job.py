@@ -8,6 +8,7 @@ ImportFormat = Literal["auto", "labelme", "coco", "cvat", "yolo", "mask", "voc",
 ImportMode = Literal["append", "replace_matched_images", "replace_all_job"]
 MissingLabelPolicy = Literal["auto_create", "skip"]
 LabelDeleteStrategy = Literal["reassign", "move_to_undefined", "delete_annotations"]
+ExportScope = Literal["all", "annotated_only"]
 
 
 class JobLabelCreate(BaseModel):
@@ -68,6 +69,7 @@ class JobRead(BaseModel):
     status: str
     task_id: int | None = None
     frames: int
+    annotated_images_count: int = 0
     thumbnail_url: str | None
 
 
@@ -82,6 +84,14 @@ class ImportSkippedItemRead(BaseModel):
     reason: str
 
 
+class CreatedLabelDetailRead(BaseModel):
+    name: str
+    color: str
+    requested_color: str | None = None
+    color_changed: bool = False
+    reason: str | None = None
+
+
 class JobImportResponse(BaseModel):
     job_id: int
     format_detected: str
@@ -89,5 +99,7 @@ class JobImportResponse(BaseModel):
     unmatched_items: int
     created_annotations: int
     created_labels: list[str]
+    created_label_details: list[CreatedLabelDetailRead] = Field(default_factory=list)
+    reassigned_conflicting_colors: int = 0
     skipped_items: list[ImportSkippedItemRead]
     errors: list[str]

@@ -6,6 +6,8 @@ import type { AnnotationObject, JobImage, Label } from '../stores/annotation'
 import type { Shortcut, UserSettings } from '../stores/userSettings'
 import { apiUrl } from '../utils/api'
 import { generateClientId } from '../utils/id'
+import { extractTopBoundaryFromPolygon, removeDuplicatePoints, resamplePolylineByX } from '../utils/layerBoundary'
+import { buildPolygonSmoothingAttributes, clonePoints } from '../utils/polygon'
 
 type ToolType = 'cursor' | 'rectangle' | 'polygon' | 'sam2'
 type Sam2PointLabel = 0 | 1
@@ -42,6 +44,7 @@ type Sam2PredictResponse = {
   num_contours: number
   mask_area: number
 }
+type BoundaryAssistPhase = 'idle' | 'edit_generated_boundary'
 
 const props = defineProps<{
   image: JobImage
@@ -50,6 +53,7 @@ const props = defineProps<{
   hiddenAnnotationIds: Array<number | string>
   selectedLabelId: number | null
   selectedAnnotationId: number | string | null
+  boundaryAssistReferenceAnnotationId: number | string | null
   sam2Settings: Sam2Settings
   tool: ToolType
   userSettings: UserSettings
@@ -57,6 +61,12 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   beforeChange: []
+  boundaryAssistCancel: []
+  boundaryAssistComplete: [id: number | string]
+  boundaryAssistContinuePolygon: [{
+    initialPoints: number[][]
+    attributes: Record<string, unknown> | null
+  }]
   change: [annotations: AnnotationObject[]]
   selectObject: [id: string | number | null]
   sam2PreviewChange: [available: boolean]
@@ -67,6 +77,12 @@ const canvasElement = ref<HTMLDivElement | null>(null)
 const containerSize = ref({ width: 1, height: 1 })
 const loadedImageUrl = ref('')
 const draftPoints = ref<number[][]>([])
+const draftPolygonAttributes = ref<Record<string, unknown> | null>(null)
+const boundaryAssistPhase = ref<BoundaryAssistPhase>('idle')
+const boundaryAssistGeneratedBoundary = ref<number[][]>([])
+const boundaryAssistEditedBoundary = ref<number[][]>([])
+const boundaryAssistInitializedReferenceId = ref<number | string | null>(null)
+const boundaryAssistEditUndoStack = ref<number[][][]>([])
 const mousePoint = ref<number[] | null>(null)
 const isPointerInside = ref(false)
 const rectangleStart = ref<number[] | null>(null)
@@ -84,6 +100,8 @@ const sam2Error = ref<string | null>(null)
 const hoveredSamPointId = ref<string | null>(null)
 const hoveredPolygonVertexIndex = ref<number | null>(null)
 const hoveredPolygonSegmentIndex = ref<number | null>(null)
+const hoveredBoundaryAssistVertexIndex = ref<number | null>(null)
+const hoveredBoundaryAssistSegmentIndex = ref<number | null>(null)
 const viewScale = ref(1)
 const offsetX = ref(0)
 const offsetY = ref(0)
@@ -99,6 +117,9 @@ type RectangleHandle = 'tl' | 'tr' | 'br' | 'bl'
 type DraggingHandle = {
   type: 'polygon-vertex'
   annotationId: number | string
+  pointIndex: number
+} | {
+  type: 'boundary-assist-vertex'
   pointIndex: number
 } | {
   type: 'rectangle-handle'
@@ -125,6 +146,14 @@ const visibleAnnotations = computed(() =>
 const selectedAnnotation = computed(() =>
   currentAnnotations.value.find((annotation) => annotation.id === props.selectedAnnotationId) ?? null,
 )
+const boundaryAssistReferenceAnnotation = computed(() => {
+  if (props.boundaryAssistReferenceAnnotationId === null) {
+    return null
+  }
+
+  const annotation = currentAnnotations.value.find((item) => item.id === props.boundaryAssistReferenceAnnotationId)
+  return annotation?.shape_type === 'polygon' ? annotation : null
+})
 const displayedAnnotations = computed(() =>
   visibleAnnotations.value.map((annotation) => {
     const points = annotation.points.map(imageToCanvasPoint)
@@ -150,16 +179,33 @@ const displayedAnnotations = computed(() =>
 
 const activeLabel = computed(() => props.labels.find((label) => label.id === props.selectedLabelId))
 const activeColor = computed(() => activeLabel.value?.color ?? '#22c55e')
-const drawingToolActive = computed(() => props.tool === 'rectangle' || props.tool === 'polygon' || props.tool === 'sam2')
-const annotationGroupPointerEvents = computed(() => props.tool === 'cursor' ? 'all' : 'none')
-const annotationShapePointerEvents = computed(() => props.tool === 'cursor' ? 'visiblePainted' : 'none')
+const boundaryAssistActive = computed(() =>
+  props.boundaryAssistReferenceAnnotationId !== null &&
+  boundaryAssistReferenceAnnotation.value !== null &&
+  boundaryAssistPhase.value !== 'idle',
+)
+const boundaryAssistEditingGeneratedBoundary = computed(() =>
+  boundaryAssistActive.value && boundaryAssistPhase.value === 'edit_generated_boundary',
+)
+const drawingToolActive = computed(() =>
+  boundaryAssistActive.value || props.tool === 'rectangle' || props.tool === 'polygon' || props.tool === 'sam2',
+)
+const annotationGroupPointerEvents = computed(() =>
+  props.tool === 'cursor' && !boundaryAssistActive.value ? 'all' : 'none',
+)
+const annotationShapePointerEvents = computed(() =>
+  props.tool === 'cursor' && !boundaryAssistActive.value ? 'visiblePainted' : 'none',
+)
 const selectedAnnotationId = computed(() => props.selectedAnnotationId)
 const zoomPercent = computed(() => Math.round(viewScale.value * 100))
 const isDraggingHandle = computed(() => draggingHandle.value !== null)
 const isEditingExistingAnnotation = computed(() => draggingHandle.value !== null)
 const isPanModifierActive = computed(() => pressedKeys.value.has(props.userSettings.pan_modifier_shortcut))
+const polygonDraftStartedFromInitialPoints = computed(() =>
+  Boolean(draftPolygonAttributes.value?.polygon_started_from_initial_points),
+)
 const shouldShowCursorPoint = computed(() =>
-  drawingToolActive.value &&
+  (props.tool === 'rectangle' || props.tool === 'polygon' || props.tool === 'sam2') &&
   isPointerInside.value &&
   !isPanning.value &&
   !isCursorPanning.value &&
@@ -167,25 +213,32 @@ const shouldShowCursorPoint = computed(() =>
   displayedMousePoint.value !== null,
 )
 const shouldShowDraftDrawing = computed(() =>
-  !isEditingExistingAnnotation.value && (props.tool === 'rectangle' || props.tool === 'polygon'),
+  !boundaryAssistActive.value && !isEditingExistingAnnotation.value && (props.tool === 'rectangle' || props.tool === 'polygon'),
 )
 const showPolygonHint = computed(() => props.tool === 'polygon')
+const showBoundaryAssistHint = computed(() => boundaryAssistActive.value)
 const polygonHintStarted = computed(() => draftPoints.value.length >= 1)
 const polygonHintReady = computed(() => draftPoints.value.length >= 3)
 const polygonHintText = computed(() =>
-  polygonHintReady.value
-    ? `Press Enter to Complete Polygon · ${shortcutLabel(props.userSettings.polygon_confirm_point_shortcut)} to add point`
-    : `Press Enter to Finish Polygon · ${shortcutLabel(props.userSettings.polygon_confirm_point_shortcut)} to add point`,
+  polygonDraftStartedFromInitialPoints.value
+    ? `Continue polygon from generated boundary. Press Enter to finish polygon · ${shortcutLabel(props.userSettings.polygon_confirm_point_shortcut)} to add point`
+    : polygonHintReady.value
+      ? `Press Enter to Complete Polygon · ${shortcutLabel(props.userSettings.polygon_confirm_point_shortcut)} to add point`
+      : `Press Enter to Finish Polygon · ${shortcutLabel(props.userSettings.polygon_confirm_point_shortcut)} to add point`,
 )
 const showPolygonEditHint = computed(() =>
-  props.tool === 'cursor' && selectedAnnotation.value?.shape_type === 'polygon',
+  !boundaryAssistActive.value && props.tool === 'cursor' && selectedAnnotation.value?.shape_type === 'polygon',
 )
 const polygonEditHintText = computed(() =>
   `${shortcutLabel(props.userSettings.add_polygon_vertex_shortcut)} + click edge to add vertex · ${shortcutLabel(props.userSettings.delete_polygon_vertex_shortcut)} + click vertex to delete`,
 )
+const boundaryAssistHintText = computed(() =>
+  `Edit generated boundary. Drag points to adjust. ${shortcutLabel(props.userSettings.add_polygon_vertex_shortcut)} + click edge to add vertex. ${shortcutLabel(props.userSettings.delete_polygon_vertex_shortcut)} + click vertex to delete. Press Enter to continue.`,
+)
 const shouldShowSam2PromptPoints = computed(() => props.tool === 'sam2' && props.sam2Settings.show_prompt_points)
 const displayedMousePoint = computed(() => (mousePoint.value ? imageToCanvasPoint(mousePoint.value) : null))
 const displayedDraftPoints = computed(() => draftPoints.value.map(imageToCanvasPoint))
+const displayedBoundaryAssistEditedBoundary = computed(() => boundaryAssistEditedBoundary.value.map(imageToCanvasPoint))
 const displayedRectangleStart = computed(() => (rectangleStart.value ? imageToCanvasPoint(rectangleStart.value) : null))
 const displayedRectangleEnd = computed(() => (rectanglePreviewEnd.value ? imageToCanvasPoint(rectanglePreviewEnd.value) : null))
 const displayedSam2Points = computed(() =>
@@ -209,6 +262,14 @@ const displayedSam2BoxPreview = computed(() => {
   return rectFromCanvasPoints(start, end)
 })
 const selectedControlPoints = computed(() => {
+  if (boundaryAssistEditingGeneratedBoundary.value) {
+    return boundaryAssistEditedBoundary.value.map((point, index) => ({
+      key: String(index),
+      point: imageToCanvasPoint(point),
+      kind: 'boundary-assist',
+    }))
+  }
+
   const annotation = selectedAnnotation.value
   if (!annotation || props.hiddenAnnotationIds.includes(annotation.id)) {
     return []
@@ -231,9 +292,27 @@ const selectedControlPoints = computed(() => {
   }))
 })
 const hoveredPolygonSegment = computed(() => {
+  if (boundaryAssistEditingGeneratedBoundary.value) {
+    const segmentIndex = hoveredBoundaryAssistSegmentIndex.value
+    if (segmentIndex === null) {
+      return null
+    }
+
+    const start = boundaryAssistEditedBoundary.value[segmentIndex]
+    const end = boundaryAssistEditedBoundary.value[segmentIndex + 1]
+    if (!start || !end) {
+      return null
+    }
+
+    return {
+      start: imageToCanvasPoint(start),
+      end: imageToCanvasPoint(end),
+    }
+  }
+
   const annotation = selectedAnnotation.value
   const segmentIndex = hoveredPolygonSegmentIndex.value
-  if (props.tool !== 'cursor' || !annotation || annotation.shape_type !== 'polygon' || segmentIndex === null) {
+  if (boundaryAssistActive.value || props.tool !== 'cursor' || !annotation || annotation.shape_type !== 'polygon' || segmentIndex === null) {
     return null
   }
 
@@ -260,6 +339,10 @@ const cursorStyle = computed(() => {
 
   if (draggingHandle.value) {
     return 'move'
+  }
+
+  if (boundaryAssistEditingGeneratedBoundary.value) {
+    return 'default'
   }
 
   if (drawingToolActive.value && isPanModifierActive.value) {
@@ -291,6 +374,7 @@ watch(
   () => props.image,
   () => {
     draftPoints.value = []
+    clearBoundaryAssistState()
     resetRectangleDraft()
     clearSam2State()
     mousePoint.value = null
@@ -329,6 +413,48 @@ watch(
   () => props.selectedAnnotationId,
   () => {
     clearPolygonEditHover()
+  },
+)
+
+watch(
+  () => [
+    props.boundaryAssistReferenceAnnotationId,
+    boundaryAssistReferenceAnnotation.value?.points,
+    props.image.width,
+    props.image.height,
+  ],
+  () => {
+    if (!props.boundaryAssistReferenceAnnotationId) {
+      clearBoundaryAssistState()
+      return
+    }
+
+    if (!boundaryAssistReferenceAnnotation.value) {
+      clearBoundaryAssistState()
+      emit('boundaryAssistCancel')
+      return
+    }
+
+    if (
+      boundaryAssistInitializedReferenceId.value === props.boundaryAssistReferenceAnnotationId &&
+      boundaryAssistPhase.value !== 'idle'
+    ) {
+      return
+    }
+
+    const referenceBoundary = extractTopBoundaryFromPolygon(
+      boundaryAssistReferenceAnnotation.value.points,
+      props.image.width || 1,
+      props.image.height || 1,
+    )
+    if (referenceBoundary.length < 2) {
+      ElMessage.warning('Cannot extract the top boundary from the selected lower polygon.')
+      clearBoundaryAssistState()
+      emit('boundaryAssistCancel')
+      return
+    }
+
+    initializeBoundaryAssist(referenceBoundary)
   },
 )
 
@@ -593,7 +719,13 @@ function onPointerMove(event: PointerEvent) {
 
   isPointerInside.value = true
   mousePoint.value = point
-  updatePolygonEditHover(canvasPoint)
+  if (boundaryAssistEditingGeneratedBoundary.value) {
+    updatePolygonEditHover(canvasPoint)
+  } else if (boundaryAssistActive.value) {
+    clearPolygonEditHover()
+  } else {
+    updatePolygonEditHover(canvasPoint)
+  }
 
   if (drawingRectangle.value) {
     rectanglePreviewEnd.value = point
@@ -637,6 +769,10 @@ function onPointerDown(event: PointerEvent) {
   }
 
   if (isDraggingHandle.value) {
+    return
+  }
+
+  if (boundaryAssistActive.value) {
     return
   }
 
@@ -764,6 +900,15 @@ function onCanvasClick(event: MouseEvent) {
     return
   }
 
+  if (boundaryAssistActive.value) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (boundaryAssistEditingGeneratedBoundary.value && isShortcutPressed(event, props.userSettings.add_polygon_vertex_shortcut)) {
+      insertBoundaryAssistVertexAtHoveredSegment(event)
+    }
+    return
+  }
+
   if (props.tool === 'cursor') {
     event.preventDefault()
     emit('selectObject', null)
@@ -797,26 +942,162 @@ function addDraftPolygonPoint(point: number[]) {
   draftPoints.value = [...draftPoints.value, point]
 }
 
+function clearBoundaryAssistState() {
+  boundaryAssistPhase.value = 'idle'
+  boundaryAssistGeneratedBoundary.value = []
+  boundaryAssistEditedBoundary.value = []
+  boundaryAssistInitializedReferenceId.value = null
+  boundaryAssistEditUndoStack.value = []
+  clearPolygonEditHover()
+}
+
+function initializeBoundaryAssist(referenceBoundary: number[][]) {
+  const normalizedBoundary = prepareBoundaryAssistPointsForEditing(referenceBoundary)
+  if (normalizedBoundary.length < 2) {
+    throw new Error('Cannot extract the top boundary from the selected lower polygon.')
+  }
+
+  boundaryAssistPhase.value = 'edit_generated_boundary'
+  boundaryAssistGeneratedBoundary.value = clonePoints(normalizedBoundary)
+  boundaryAssistEditedBoundary.value = clonePoints(normalizedBoundary)
+  boundaryAssistInitializedReferenceId.value = props.boundaryAssistReferenceAnnotationId
+  boundaryAssistEditUndoStack.value = []
+  clearPolygonEditHover()
+}
+
+function prepareBoundaryAssistPointsForEditing(points: number[][]): number[][] {
+  const sortedPoints = clonePoints(points)
+    .filter((point) => Array.isArray(point) && point.length >= 2)
+    .map((point) => [Number(point[0]), Number(point[1])])
+    .filter((point) => Number.isFinite(point[0]) && Number.isFinite(point[1]))
+    .sort((left, right) => left[0] - right[0] || left[1] - right[1])
+
+  if (sortedPoints.length < 2) {
+    return sortedPoints
+  }
+
+  const startX = sortedPoints[0][0]
+  const endX = sortedPoints[sortedPoints.length - 1][0]
+  const simplifiedPoints = resamplePolylineByX(sortedPoints, startX, endX, 4)
+  return removeDuplicatePoints(simplifiedPoints.length >= 2 ? simplifiedPoints : sortedPoints)
+}
+
+function normalizeEditedBoundaryPoints(points: number[][]): number[][] {
+  return removeDuplicatePoints(
+    clonePoints(points)
+      .filter((point) => Array.isArray(point) && point.length >= 2)
+      .map((point) => [Number(point[0]), Number(point[1])])
+      .filter((point) => Number.isFinite(point[0]) && Number.isFinite(point[1]))
+      .sort((left, right) => left[0] - right[0] || left[1] - right[1]),
+  )
+}
+
+function pushBoundaryAssistUndoSnapshot() {
+  if (!boundaryAssistEditingGeneratedBoundary.value || boundaryAssistEditedBoundary.value.length < 2) {
+    return
+  }
+
+  boundaryAssistEditUndoStack.value = [
+    ...boundaryAssistEditUndoStack.value,
+    clonePoints(boundaryAssistEditedBoundary.value),
+  ].slice(-50)
+}
+
+function undoBoundaryAssistStep() {
+  if (!boundaryAssistActive.value) {
+    return false
+  }
+
+  if (boundaryAssistEditUndoStack.value.length === 0) {
+    return false
+  }
+
+  const previousBoundary = boundaryAssistEditUndoStack.value[boundaryAssistEditUndoStack.value.length - 1]
+  boundaryAssistEditUndoStack.value = boundaryAssistEditUndoStack.value.slice(0, -1)
+  boundaryAssistEditedBoundary.value = clonePoints(previousBoundary)
+  clearPolygonEditHover()
+  return true
+}
+
+function removeLastBoundaryAssistPoint() {
+  return undoBoundaryAssistStep()
+}
+
+function cancelBoundaryAssistMode() {
+  if (!boundaryAssistActive.value) {
+    return
+  }
+
+  clearBoundaryAssistState()
+  emit('boundaryAssistCancel')
+}
+
+function confirmBoundaryAssistBoundary() {
+  if (!boundaryAssistEditingGeneratedBoundary.value) {
+    return false
+  }
+
+  const normalizedBoundary = normalizeEditedBoundaryPoints(boundaryAssistEditedBoundary.value)
+  if (normalizedBoundary.length < 2) {
+    ElMessage.warning('The generated boundary must keep at least 2 points.')
+    return false
+  }
+
+  const polygonDraftAttributes = {
+    generated_by: 'boundary_assisted_polygon',
+    workflow: 'edit_boundary_then_continue_polygon',
+    reference_annotation_id: props.boundaryAssistReferenceAnnotationId,
+    reference_boundary: 'top',
+    generated_boundary: clonePoints(boundaryAssistGeneratedBoundary.value),
+    edited_boundary: clonePoints(normalizedBoundary),
+    polygon_started_from_initial_points: true,
+  } satisfies Record<string, unknown>
+
+  clearBoundaryAssistState()
+  clearPolygonEditHover()
+  emit('boundaryAssistContinuePolygon', {
+    initialPoints: clonePoints(normalizedBoundary),
+    attributes: polygonDraftAttributes,
+  })
+  return true
+}
+
 function finishPolygon() {
   if (props.tool !== 'polygon' || !props.selectedLabelId || draftPoints.value.length < 3) {
     return
   }
 
-  commitAnnotation({
+  const annotation = {
     id: generateClientId('local'),
     image_id: props.image.id,
     label_id: props.selectedLabelId,
-    shape_type: 'polygon',
+    shape_type: 'polygon' as const,
     points: draftPoints.value,
-  })
+    attributes: buildPolygonSmoothingAttributes(draftPoints.value, 0, draftPolygonAttributes.value),
+  }
+  commitAnnotation(annotation)
+  if (draftPolygonAttributes.value?.generated_by === 'boundary_assisted_polygon') {
+    emit('boundaryAssistComplete', annotation.id)
+  }
 }
 
 function commitAnnotation(annotation: AnnotationObject) {
   emit('beforeChange')
   draftPoints.value = []
+  draftPolygonAttributes.value = null
   resetRectangleDraft()
   emit('change', [...currentAnnotations.value, annotation])
   emit('selectObject', annotation.id)
+}
+
+function startPolygonDraftWithInitialPoints(
+  initialPoints: number[][],
+  attributes: Record<string, unknown> | null = null,
+) {
+  draftPoints.value = clonePoints(initialPoints)
+  draftPolygonAttributes.value = attributes ? { ...attributes } : null
+  resetRectangleDraft()
+  hideCursorPoint()
 }
 
 function startSam2Prompt(event: PointerEvent) {
@@ -983,6 +1264,7 @@ function acceptSam2Preview() {
     label_id: props.selectedLabelId,
     shape_type: 'polygon',
     points: sam2PreviewPoints.value,
+    attributes: buildPolygonSmoothingAttributes(sam2PreviewPoints.value, 0),
   })
   clearSam2State()
   return true
@@ -993,6 +1275,10 @@ function selectObject(id: string | number) {
 }
 
 function selectObjectFromShape(event: MouseEvent | PointerEvent, id: string | number) {
+  if (boundaryAssistActive.value) {
+    return
+  }
+
   if (props.tool !== 'cursor') {
     return
   }
@@ -1125,10 +1411,35 @@ function startDragRectangleHandle(annotationId: number | string, handle: Rectang
   emit('selectObject', annotationId)
 }
 
+function startDragBoundaryAssistVertex(pointIndex: number, event: PointerEvent) {
+  event.preventDefault()
+  event.stopPropagation()
+  console.log('[handle] start boundary vertex drag', pointIndex)
+  suppressNextCanvasClick.value = true
+  pushBoundaryAssistUndoSnapshot()
+  draggingHandle.value = { type: 'boundary-assist-vertex', pointIndex }
+  hideCursorPoint()
+  window.addEventListener('pointermove', handleGlobalPointerMove)
+  window.addEventListener('pointerup', stopDragHandle, { once: true })
+}
+
 function startControlPointDrag(event: PointerEvent, controlPoint: { key: string; kind: string }) {
   if (props.tool !== 'cursor') {
     event.preventDefault()
     event.stopPropagation()
+    return
+  }
+
+  if (controlPoint.kind === 'boundary-assist') {
+    if (
+      isShortcutPressed(event, props.userSettings.delete_polygon_vertex_shortcut) ||
+      event.button === 2
+    ) {
+      deleteBoundaryAssistVertex(Number(controlPoint.key), event)
+      return
+    }
+
+    startDragBoundaryAssistVertex(Number(controlPoint.key), event)
     return
   }
 
@@ -1153,7 +1464,16 @@ function startControlPointDrag(event: PointerEvent, controlPoint: { key: string;
 }
 
 function handleControlPointContextMenu(event: MouseEvent, controlPoint: { key: string; kind: string }) {
-  if (props.selectedAnnotationId === null || props.tool !== 'cursor' || controlPoint.kind !== 'polygon') {
+  if (props.tool !== 'cursor') {
+    return
+  }
+
+  if (controlPoint.kind === 'boundary-assist') {
+    deleteBoundaryAssistVertex(Number(controlPoint.key), event)
+    return
+  }
+
+  if (props.selectedAnnotationId === null || controlPoint.kind !== 'polygon') {
     return
   }
 
@@ -1180,6 +1500,11 @@ function handleGlobalPointerMove(event: PointerEvent) {
       draggingHandle.value.pointIndex,
       imagePoint,
     )
+    return
+  }
+
+  if (draggingHandle.value.type === 'boundary-assist-vertex') {
+    updateBoundaryAssistVertex(draggingHandle.value.pointIndex, imagePoint)
     return
   }
 
@@ -1219,6 +1544,29 @@ function updatePolygonVertex(
   })
 }
 
+function updateBoundaryAssistVertex(
+  pointIndex: number,
+  imagePoint: { x: number; y: number },
+) {
+  boundaryAssistEditedBoundary.value = boundaryAssistEditedBoundary.value.map((point, index, currentPoints) => {
+    if (index !== pointIndex) {
+      return point
+    }
+
+    const previousPoint = currentPoints[index - 1]
+    const nextPoint = currentPoints[index + 1]
+    let nextX = imagePoint.x
+    if (previousPoint) {
+      nextX = Math.max(nextX, previousPoint[0])
+    }
+    if (nextPoint) {
+      nextX = Math.min(nextX, nextPoint[0])
+    }
+
+    return [nextX, imagePoint.y]
+  })
+}
+
 function insertPolygonVertexAtHoveredSegment(annotationId: number | string, event: MouseEvent | PointerEvent): boolean {
   const annotation = selectedAnnotation.value
   if (!annotation || annotation.id !== annotationId || annotation.shape_type !== 'polygon') {
@@ -1250,6 +1598,31 @@ function insertPolygonVertexAtHoveredSegment(annotationId: number | string, even
   return true
 }
 
+function insertBoundaryAssistVertexAtHoveredSegment(event: MouseEvent | PointerEvent): boolean {
+  if (!boundaryAssistEditingGeneratedBoundary.value) {
+    return false
+  }
+
+  const canvasPoint = pointerToCanvas(event)
+  const imagePoint = fromPointer(event)
+  if (!canvasPoint || !imagePoint) {
+    return false
+  }
+
+  const segmentIndex = hoveredBoundaryAssistSegmentIndex.value
+  if (segmentIndex === null) {
+    return false
+  }
+
+  pushBoundaryAssistUndoSnapshot()
+  suppressNextCanvasClick.value = true
+  const nextPoints = [...boundaryAssistEditedBoundary.value]
+  nextPoints.splice(segmentIndex + 1, 0, imagePoint)
+  boundaryAssistEditedBoundary.value = nextPoints
+  void nextTick(() => updatePolygonEditHover(canvasPoint))
+  return true
+}
+
 function deletePolygonVertex(annotationId: number | string, pointIndex: number, event: MouseEvent | PointerEvent) {
   event.preventDefault()
   event.stopPropagation()
@@ -1273,19 +1646,40 @@ function deletePolygonVertex(annotationId: number | string, pointIndex: number, 
   ))
 }
 
+function deleteBoundaryAssistVertex(pointIndex: number, event: MouseEvent | PointerEvent) {
+  event.preventDefault()
+  event.stopPropagation()
+  suppressNextCanvasClick.value = true
+
+  if (!boundaryAssistEditingGeneratedBoundary.value) {
+    return
+  }
+
+  if (boundaryAssistEditedBoundary.value.length <= 2) {
+    ElMessage.warning('The generated boundary must keep at least 2 points.')
+    return
+  }
+
+  pushBoundaryAssistUndoSnapshot()
+  boundaryAssistEditedBoundary.value = boundaryAssistEditedBoundary.value.filter((_point, index) => index !== pointIndex)
+}
+
 function findNearestSegment(
   canvasPoint: { x: number; y: number },
   polygonPointsImage: number[][],
+  closed = true,
 ): number | null {
-  if (polygonPointsImage.length < 3) {
+  const minimumPointCount = closed ? 3 : 2
+  if (polygonPointsImage.length < minimumPointCount) {
     return null
   }
 
   let nearestIndex: number | null = null
   let nearestDistance = Number.POSITIVE_INFINITY
   const canvasPoints = polygonPointsImage.map(imageToCanvasPoint)
+  const segmentCount = closed ? canvasPoints.length : canvasPoints.length - 1
 
-  for (let index = 0; index < canvasPoints.length; index += 1) {
+  for (let index = 0; index < segmentCount; index += 1) {
     const start = canvasPoints[index]
     const end = canvasPoints[(index + 1) % canvasPoints.length]
     const distance = distanceToSegment(canvasPoint, start, end)
@@ -1299,15 +1693,60 @@ function findNearestSegment(
 }
 
 function updatePolygonEditHover(canvasPoint: { x: number; y: number } | null) {
-  const annotation = selectedAnnotation.value
-  if (!canvasPoint || props.tool !== 'cursor' || !annotation || annotation.shape_type !== 'polygon') {
+  if (!canvasPoint || props.tool !== 'cursor') {
     clearPolygonEditHover()
     return
   }
 
+  if (boundaryAssistEditingGeneratedBoundary.value) {
+    const nearestVertexIndex = findNearestVertexIndex(canvasPoint, boundaryAssistEditedBoundary.value)
+    if (nearestVertexIndex !== null) {
+      hoveredBoundaryAssistVertexIndex.value = nearestVertexIndex
+      hoveredBoundaryAssistSegmentIndex.value = null
+      hoveredPolygonVertexIndex.value = null
+      hoveredPolygonSegmentIndex.value = null
+      return
+    }
+
+    hoveredBoundaryAssistVertexIndex.value = null
+    hoveredBoundaryAssistSegmentIndex.value = findNearestSegment(canvasPoint, boundaryAssistEditedBoundary.value, false)
+    hoveredPolygonVertexIndex.value = null
+    hoveredPolygonSegmentIndex.value = null
+    return
+  }
+
+  const annotation = selectedAnnotation.value
+  if (!annotation || annotation.shape_type !== 'polygon') {
+    clearPolygonEditHover()
+    return
+  }
+
+  const nearestVertexIndex = findNearestVertexIndex(canvasPoint, annotation.points)
+  if (nearestVertexIndex !== null) {
+    hoveredPolygonVertexIndex.value = nearestVertexIndex
+    hoveredPolygonSegmentIndex.value = null
+    hoveredBoundaryAssistVertexIndex.value = null
+    hoveredBoundaryAssistSegmentIndex.value = null
+    return
+  }
+
+  hoveredPolygonVertexIndex.value = null
+  hoveredPolygonSegmentIndex.value = findNearestSegment(canvasPoint, annotation.points)
+  hoveredBoundaryAssistVertexIndex.value = null
+  hoveredBoundaryAssistSegmentIndex.value = null
+}
+
+function findNearestVertexIndex(
+  canvasPoint: { x: number; y: number },
+  pointsImage: number[][],
+): number | null {
+  if (pointsImage.length === 0) {
+    return null
+  }
+
   let nearestVertexIndex: number | null = null
   let nearestVertexDistance = Number.POSITIVE_INFINITY
-  const canvasPoints = annotation.points.map(imageToCanvasPoint)
+  const canvasPoints = pointsImage.map(imageToCanvasPoint)
   for (let index = 0; index < canvasPoints.length; index += 1) {
     const point = canvasPoints[index]
     const distance = Math.hypot(canvasPoint.x - point[0], canvasPoint.y - point[1])
@@ -1317,19 +1756,14 @@ function updatePolygonEditHover(canvasPoint: { x: number; y: number } | null) {
     }
   }
 
-  if (nearestVertexDistance <= 8) {
-    hoveredPolygonVertexIndex.value = nearestVertexIndex
-    hoveredPolygonSegmentIndex.value = null
-    return
-  }
-
-  hoveredPolygonVertexIndex.value = null
-  hoveredPolygonSegmentIndex.value = findNearestSegment(canvasPoint, annotation.points)
+  return nearestVertexDistance <= 8 ? nearestVertexIndex : null
 }
 
 function clearPolygonEditHover() {
   hoveredPolygonVertexIndex.value = null
   hoveredPolygonSegmentIndex.value = null
+  hoveredBoundaryAssistVertexIndex.value = null
+  hoveredBoundaryAssistSegmentIndex.value = null
 }
 
 function distanceToSegment(
@@ -1392,9 +1826,24 @@ function updateRectangleHandle(
 }
 
 function updateAnnotationPoints(id: number | string, pointFactory: (annotation: AnnotationObject) => number[][]) {
-  emit('change', currentAnnotations.value.map((annotation) => (
-    annotation.id === id ? { ...annotation, points: pointFactory(annotation) } : annotation
-  )))
+  emit('change', currentAnnotations.value.map((annotation) => {
+    if (annotation.id !== id) {
+      return annotation
+    }
+
+    const nextPoints = pointFactory(annotation)
+    return {
+      ...annotation,
+      points: clonePoints(nextPoints),
+      attributes: annotation.shape_type === 'polygon'
+        ? buildPolygonSmoothingAttributes(
+            nextPoints,
+            0,
+            annotation.attributes && typeof annotation.attributes === 'object' ? annotation.attributes : null,
+          )
+        : annotation.attributes,
+    }
+  }))
 }
 
 function clampAnnotationPoint(point: { x: number; y: number }) {
@@ -1539,6 +1988,7 @@ function hideCursorPoint() {
 
 function clearDraftDrawing() {
   draftPoints.value = []
+  draftPolygonAttributes.value = null
   resetRectangleDraft()
 }
 
@@ -1617,6 +2067,11 @@ function clearSamPointDeleteTimer() {
 }
 
 function cancelDraft() {
+  if (boundaryAssistActive.value) {
+    cancelBoundaryAssistMode()
+    return
+  }
+
   clearDraftDrawing()
 }
 
@@ -1659,6 +2114,24 @@ function onKeydown(event: KeyboardEvent) {
       addDraftPolygonPoint(mousePoint.value)
       return
     }
+  }
+
+  if (event.key === 'Enter' && boundaryAssistEditingGeneratedBoundary.value) {
+    event.preventDefault()
+    confirmBoundaryAssistBoundary()
+    return
+  }
+
+  if (event.key === 'Escape' && boundaryAssistActive.value) {
+    event.preventDefault()
+    cancelBoundaryAssistMode()
+    return
+  }
+
+  if (event.key === 'Backspace' && boundaryAssistActive.value) {
+    event.preventDefault()
+    undoBoundaryAssistStep()
+    return
   }
 
   if (event.key === 'Enter' && props.tool === 'polygon' && draftPoints.value.length > 0) {
@@ -1797,15 +2270,20 @@ function clamp(value: number, min: number, max: number): number {
 
 defineExpose({
   acceptSam2Preview,
+  cancelBoundaryAssistMode,
   deleteSelected,
   fitToScreen,
   getSam2Prompt,
+  isBoundaryAssistActive: boundaryAssistActive,
   isDrawingPolygon,
+  removeLastBoundaryAssistPoint,
   removeLastPolygonPoint,
   rejectSam2Preview,
   resetView,
   runSamPrediction,
   setSam2Preview,
+  startPolygonDraftWithInitialPoints,
+  undoBoundaryAssistStep,
   zoomIn,
   zoomOut,
   zoomPercent,
@@ -1834,6 +2312,9 @@ defineExpose({
         :class="{ started: polygonHintStarted, ready: polygonHintReady }"
       >
         {{ polygonHintText }}
+      </div>
+      <div v-if="showBoundaryAssistHint" class="polygon-mode-hint boundary-assist-hint">
+        {{ boundaryAssistHintText }}
       </div>
       <div v-if="showPolygonEditHint" class="polygon-mode-hint polygon-edit-hint">
         {{ polygonEditHintText }}
@@ -1893,6 +2374,13 @@ defineExpose({
           pointer-events="none"
         />
 
+        <polyline
+          v-if="displayedBoundaryAssistEditedBoundary.length >= 2"
+          class="boundary-assist-reference"
+          :points="displayedBoundaryAssistEditedBoundary.map((point) => point.join(',')).join(' ')"
+          pointer-events="none"
+        />
+
         <line
           v-if="hoveredPolygonSegment"
           class="polygon-hover-segment"
@@ -1906,16 +2394,23 @@ defineExpose({
         <template v-if="props.tool === 'cursor'">
           <circle
             v-for="controlPoint in selectedControlPoints"
-            :key="`${selectedAnnotationId}-${controlPoint.kind === 'rect' ? 'rect-handle' : 'polygon-handle'}-${controlPoint.key}`"
+            :key="`${selectedAnnotationId}-${controlPoint.kind === 'rect' ? 'rect-handle' : controlPoint.kind === 'boundary-assist' ? 'boundary-assist-handle' : 'polygon-handle'}-${controlPoint.key}`"
             class="annotation-control-point annotation-handle"
-            :class="{ 'polygon-vertex-hovered': controlPoint.kind === 'polygon' && hoveredPolygonVertexIndex === Number(controlPoint.key) }"
-            :data-name="`annotation-handle ${controlPoint.kind === 'rect' ? 'rectangle-handle' : 'polygon-handle'}`"
+            :class="{
+              'polygon-vertex-hovered':
+                (controlPoint.kind === 'polygon' && hoveredPolygonVertexIndex === Number(controlPoint.key)) ||
+                (controlPoint.kind === 'boundary-assist' && hoveredBoundaryAssistVertexIndex === Number(controlPoint.key)),
+            }"
+            :data-name="`annotation-handle ${controlPoint.kind === 'rect' ? 'rectangle-handle' : controlPoint.kind === 'boundary-assist' ? 'boundary-assist-handle' : 'polygon-handle'}`"
             :data-annotation-id="selectedAnnotationId"
             :data-handle="controlPoint.kind === 'rect' ? controlPoint.key : undefined"
-            :data-point-index="controlPoint.kind === 'polygon' ? controlPoint.key : undefined"
+            :data-point-index="controlPoint.kind !== 'rect' ? controlPoint.key : undefined"
             :cx="controlPoint.point[0]"
             :cy="controlPoint.point[1]"
-            :r="controlPoint.kind === 'polygon' && hoveredPolygonVertexIndex === Number(controlPoint.key) ? 7 : 6"
+            :r="(
+              (controlPoint.kind === 'polygon' && hoveredPolygonVertexIndex === Number(controlPoint.key)) ||
+              (controlPoint.kind === 'boundary-assist' && hoveredBoundaryAssistVertexIndex === Number(controlPoint.key))
+            ) ? 7 : 6"
             pointer-events="all"
             @click.stop.prevent="suppressControlPointClick"
             @contextmenu.stop.prevent="handleControlPointContextMenu($event, controlPoint)"
