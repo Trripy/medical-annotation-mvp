@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 
-ShapeType = Literal["rectangle", "polygon", "point"]
+ShapeType = Literal["rectangle", "polygon", "point", "classification"]
 ImportFormat = Literal["auto", "labelme", "coco", "cvat", "yolo", "mask", "voc", "via", "supervisely"]
 ImportMode = Literal["append", "replace_matched_images", "replace_all_job"]
 MissingLabelPolicy = Literal["auto_create", "skip"]
@@ -38,6 +38,7 @@ class JobLabelRead(BaseModel):
     shape_type: ShapeType = "polygon"
     sort_order: int = 0
     annotation_count: int = 0
+    frame_count: int = 0
 
     model_config = {"from_attributes": True}
 

@@ -4,13 +4,46 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import Request
 
 from app.api.routes import api_router
-from app.api.v1 import datasets, images, jobs, projects, sam2, tasks, users
+from app.api.v1 import datasets, images, jobs, projects, research, sam2, tasks, users
 from app.core.config import settings
+from app.core.upload_limits import MAX_JOB_UPLOAD_FILES, MAX_MULTIPART_FORM_FIELDS
 from app.services.sam2_service import get_sam2_service
 
 logger = logging.getLogger(__name__)
+
+
+def patch_multipart_form_limits() -> None:
+    if getattr(Request, "_medical_annotation_upload_limits_patched", False):
+        return
+
+    original_get_form = Request._get_form
+    original_form = Request.form
+
+    async def _get_form_with_limits(
+        self: Request,
+        *,
+        max_files: int | float = MAX_JOB_UPLOAD_FILES,
+        max_fields: int | float = MAX_MULTIPART_FORM_FIELDS,
+    ):
+        return await original_get_form(self, max_files=max_files, max_fields=max_fields)
+
+    def form_with_limits(
+        self: Request,
+        *,
+        max_files: int | float = MAX_JOB_UPLOAD_FILES,
+        max_fields: int | float = MAX_MULTIPART_FORM_FIELDS,
+    ):
+        return original_form(self, max_files=max_files, max_fields=max_fields)
+
+    Request._get_form = _get_form_with_limits
+    Request.form = form_with_limits
+    Request._medical_annotation_upload_limits_patched = True
+
+
+patch_multipart_form_limits()
 
 app = FastAPI(title=settings.app_name)
 
@@ -43,6 +76,7 @@ app.include_router(datasets.router, prefix="/api/datasets", tags=["datasets"])
 app.include_router(images.router, prefix="/api", tags=["images"])
 app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
+app.include_router(research.router, prefix="/api/research", tags=["research"])
 app.include_router(sam2.router, prefix="/api/sam2", tags=["sam2"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(users.router, prefix="/api/users", tags=["users"])

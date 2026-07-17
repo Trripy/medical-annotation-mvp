@@ -9,7 +9,7 @@ import { generateClientId } from '../utils/id'
 import { extractTopBoundaryFromPolygon, removeDuplicatePoints, resamplePolylineByX } from '../utils/layerBoundary'
 import { buildPolygonSmoothingAttributes, clonePoints } from '../utils/polygon'
 
-type ToolType = 'cursor' | 'rectangle' | 'polygon' | 'sam2'
+type ToolType = 'cursor' | 'rectangle' | 'polygon' | 'sam2' | 'classify'
 type Sam2PointLabel = 0 | 1
 type Sam2ModelName = 'sam2_hiera_tiny' | 'sam2_hiera_small' | 'sam2_hiera_base_plus' | 'sam2_hiera_large'
 type Sam2PromptPoint = {
@@ -44,7 +44,33 @@ type Sam2PredictResponse = {
   num_contours: number
   mask_area: number
 }
+type ResearchSam2Context = {
+  research_video_id: number
+  research_frame_index: number
+}
+type Sam2RefinePolygonResponse = {
+  image_id: number
+  annotation_id: number | string | null
+  score: number
+  points: number[][]
+  area: number
+  source: 'refine_polygon'
+  model_name: Sam2ModelName
+  candidate: 'best' | '0' | '1' | '2'
+  polygon_epsilon: number
+  mask_threshold: number
+  max_hole_area: number
+  num_contours: number
+}
+type Sam2PreviewSource = 'prompt' | 'refine_annotation'
+type Sam2PreviewAcceptPayload = {
+  points: number[][]
+  score: number | null
+  source: Sam2PreviewSource
+  targetAnnotationId: number | string | null
+}
 type BoundaryAssistPhase = 'idle' | 'edit_generated_boundary'
+type TrackingPreviewVariant = 'pending' | 'accepted' | 'needs_fix' | null
 
 const props = defineProps<{
   image: JobImage
@@ -54,7 +80,10 @@ const props = defineProps<{
   selectedLabelId: number | null
   selectedAnnotationId: number | string | null
   boundaryAssistReferenceAnnotationId: number | string | null
+  trackingPreviewPoints: number[][] | null
+  trackingPreviewVariant: TrackingPreviewVariant
   sam2Settings: Sam2Settings
+  researchSam2Context?: ResearchSam2Context | null
   tool: ToolType
   userSettings: UserSettings
 }>()
@@ -96,6 +125,8 @@ const sam2PointerLabel = ref<Sam2PointLabel>(1)
 const drawingSam2Box = ref(false)
 const sam2PreviewPoints = ref<number[][] | null>(null)
 const sam2Prediction = ref<Sam2PredictResponse | null>(null)
+const sam2PreviewSource = ref<Sam2PreviewSource>('prompt')
+const sam2PreviewTargetAnnotationId = ref<number | string | null>(null)
 const sam2Error = ref<string | null>(null)
 const hoveredSamPointId = ref<string | null>(null)
 const hoveredPolygonVertexIndex = ref<number | null>(null)
@@ -136,9 +167,10 @@ const maxScale = 10
 const scaleBy = 1.1
 let samPredictionDebounceTimer: ReturnType<typeof window.setTimeout> | null = null
 let samPointDeleteHideTimer: ReturnType<typeof window.setTimeout> | null = null
+let sam2RequestSequence = 0
 
 const currentAnnotations = computed(() =>
-  props.annotations.filter((annotation) => annotation.image_id === props.image.id),
+  props.annotations.filter((annotation) => annotation.image_id === props.image.id && !isClassificationAnnotation(annotation)),
 )
 const visibleAnnotations = computed(() =>
   currentAnnotations.value.filter((annotation) => !props.hiddenAnnotationIds.includes(annotation.id)),
@@ -251,6 +283,8 @@ const displayedSam2Points = computed(() =>
 )
 const displayedSam2PreviewPoints = computed(() => sam2PreviewPoints.value?.map(imageToCanvasPoint) ?? [])
 const displayedSam2PreviewValue = computed(() => displayedSam2PreviewPoints.value.map((point) => point.join(',')).join(' '))
+const displayedTrackingPreviewPoints = computed(() => props.trackingPreviewPoints?.map(imageToCanvasPoint) ?? [])
+const displayedTrackingPreviewValue = computed(() => displayedTrackingPreviewPoints.value.map((point) => point.join(',')).join(' '))
 const displayedSam2Box = computed(() => (sam2Box.value ? rectFromImageBox(sam2Box.value) : null))
 const displayedSam2BoxPreview = computed(() => {
   if (!sam2BoxStart.value || !sam2BoxPreviewEnd.value) {
@@ -594,6 +628,10 @@ function preserveCurrentViewTransform() {
 
 function labelFor(labelId: number): Label | undefined {
   return props.labels.find((label) => label.id === labelId)
+}
+
+function isClassificationAnnotation(annotation: AnnotationObject): boolean {
+  return annotation.shape_type === 'classification' || annotation.attributes?.classification === true
 }
 
 function normalizedRectangle(points: number[][]) {
@@ -1189,10 +1227,13 @@ async function runSamPrediction(): Promise<boolean> {
     clearSam2Preview()
     return false
   }
+  const request = beginSam2Request()
 
   const endpoint = apiUrl('/api/sam2/predict')
   const payload = {
     image_id: props.image.id,
+    research_video_id: props.researchSam2Context?.research_video_id ?? null,
+    research_frame_index: props.researchSam2Context?.research_frame_index ?? null,
     model_name: props.sam2Settings.model_name,
     point_coords: prompt.point_coords,
     point_labels: prompt.point_labels,
@@ -1217,24 +1258,44 @@ async function runSamPrediction(): Promise<boolean> {
 
     if (!response.ok) {
       const body = await response.json().catch(() => null)
+      if (isStaleSam2Request(request)) {
+        return false
+      }
       sam2Error.value = body?.detail ?? `SAM2 request failed: ${response.status}`
       console.error('sam predict failed', sam2Error.value)
       return false
     }
 
     const result: Sam2PredictResponse = await response.json()
+    if (isStaleSam2Request(request)) {
+      return false
+    }
     console.log('sam predict', result)
-    setSam2Preview(result)
+    setSam2Preview(result, {
+      source: 'prompt',
+      targetAnnotationId: null,
+    })
     return true
   } catch (error) {
+    if (isStaleSam2Request(request)) {
+      return false
+    }
     sam2Error.value = error instanceof Error ? error.message : 'SAM2 prediction failed'
     console.error('sam predict failed', error)
     return false
   }
 }
 
-function setSam2Preview(result: Sam2PredictResponse) {
+function setSam2Preview(
+  result: Sam2PredictResponse,
+  options: {
+    source?: Sam2PreviewSource
+    targetAnnotationId?: number | string | null
+  } = {},
+) {
   sam2Prediction.value = result
+  sam2PreviewSource.value = options.source ?? 'prompt'
+  sam2PreviewTargetAnnotationId.value = options.targetAnnotationId ?? null
   sam2Error.value = null
   sam2PreviewPoints.value = applySamResultEdgeSnapToPolygon(result.points)
   emit('sam2PreviewChange', true)
@@ -1246,28 +1307,123 @@ function clearSam2Preview() {
   }
   sam2PreviewPoints.value = null
   sam2Prediction.value = null
+  sam2PreviewSource.value = 'prompt'
+  sam2PreviewTargetAnnotationId.value = null
   sam2Error.value = null
 }
 
 function rejectSam2Preview() {
+  if (sam2PreviewSource.value === 'refine_annotation') {
+    invalidateSam2Requests()
+    clearSam2Preview()
+    return
+  }
   clearSam2State()
 }
 
-function acceptSam2Preview() {
-  if (!sam2PreviewPoints.value || !props.selectedLabelId || sam2PreviewPoints.value.length < 3) {
-    return false
+function acceptSam2Preview(): Sam2PreviewAcceptPayload | null {
+  if (!sam2PreviewPoints.value || sam2PreviewPoints.value.length < 3) {
+    return null
   }
 
-  commitAnnotation({
-    id: generateClientId('local'),
+  const preview = {
+    points: clonePoints(sam2PreviewPoints.value),
+    score: sam2Prediction.value?.score ?? null,
+    source: sam2PreviewSource.value,
+    targetAnnotationId: sam2PreviewTargetAnnotationId.value,
+  } satisfies Sam2PreviewAcceptPayload
+
+  if (sam2PreviewSource.value === 'refine_annotation') {
+    invalidateSam2Requests()
+    clearSam2Preview()
+  } else {
+    clearSam2State()
+  }
+
+  return preview
+}
+
+async function refineSelectedPolygonWithSam2(annotation: AnnotationObject): Promise<boolean> {
+  if (annotation.shape_type !== 'polygon') {
+    throw new Error('Only polygon annotations can be refined with SAM2.')
+  }
+
+  if (annotation.points.length < 3) {
+    throw new Error('Polygon must have at least 3 points.')
+  }
+
+  clearSamPredictionDebounce()
+  clearSam2Preview()
+  hideCursorPoint()
+
+  const request = beginSam2Request()
+  const endpoint = apiUrl('/api/sam2/refine-polygon')
+  const payload = {
     image_id: props.image.id,
-    label_id: props.selectedLabelId,
-    shape_type: 'polygon',
-    points: sam2PreviewPoints.value,
-    attributes: buildPolygonSmoothingAttributes(sam2PreviewPoints.value, 0),
-  })
-  clearSam2State()
-  return true
+    research_video_id: props.researchSam2Context?.research_video_id ?? null,
+    research_frame_index: props.researchSam2Context?.research_frame_index ?? null,
+    annotation_id: annotation.id,
+    points: clonePoints(annotation.points),
+    model_name: props.sam2Settings.model_name,
+    multimask_output: props.sam2Settings.multimask_output,
+    candidate: props.sam2Settings.candidate,
+    polygon_epsilon: props.sam2Settings.polygon_epsilon,
+    min_mask_area: props.sam2Settings.min_mask_area,
+    mask_threshold: props.sam2Settings.mask_threshold,
+    max_hole_area: props.sam2Settings.max_hole_area,
+  }
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    })
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => null)
+      if (isStaleSam2Request(request)) {
+        return false
+      }
+      throw new Error(body?.detail ?? `SAM2 refine failed: ${response.status}`)
+    }
+
+    const result: Sam2RefinePolygonResponse = await response.json()
+    if (isStaleSam2Request(request)) {
+      return false
+    }
+    if (!Array.isArray(result.points) || result.points.length < 3) {
+      throw new Error('Refined mask is invalid.')
+    }
+
+    setSam2Preview(
+      {
+        image_id: result.image_id,
+        score: result.score,
+        points: result.points,
+        model_name: result.model_name,
+        candidate: result.candidate,
+        polygon_epsilon: result.polygon_epsilon,
+        mask_threshold: result.mask_threshold,
+        max_hole_area: result.max_hole_area,
+        num_contours: result.num_contours,
+        mask_area: result.area,
+      },
+      {
+        source: 'refine_annotation',
+        targetAnnotationId: annotation.id,
+      },
+    )
+    return true
+  } catch (error) {
+    if (isStaleSam2Request(request)) {
+      return false
+    }
+    sam2Error.value = error instanceof Error ? error.message : 'SAM2 refine failed'
+    throw error instanceof Error ? error : new Error('SAM2 refine failed')
+  }
 }
 
 function selectObject(id: string | number) {
@@ -2012,6 +2168,22 @@ function clearSamPredictionDebounce() {
   }
 }
 
+function beginSam2Request(imageId = props.image.id) {
+  sam2RequestSequence += 1
+  return {
+    id: sam2RequestSequence,
+    imageId,
+  }
+}
+
+function invalidateSam2Requests() {
+  sam2RequestSequence += 1
+}
+
+function isStaleSam2Request(request: { id: number; imageId: number }) {
+  return request.id !== sam2RequestSequence || request.imageId !== props.image.id
+}
+
 function resetSam2BoxDraft() {
   sam2BoxStart.value = null
   sam2BoxPreviewEnd.value = null
@@ -2020,6 +2192,7 @@ function resetSam2BoxDraft() {
 
 function clearSam2State() {
   clearSamPredictionDebounce()
+  invalidateSam2Requests()
   clearSamPointDeleteTimer()
   hoveredSamPointId.value = null
   sam2Points.value = []
@@ -2276,6 +2449,7 @@ defineExpose({
   getSam2Prompt,
   isBoundaryAssistActive: boundaryAssistActive,
   isDrawingPolygon,
+  refineSelectedPolygonWithSam2,
   removeLastBoundaryAssistPoint,
   removeLastPolygonPoint,
   rejectSam2Preview,
@@ -2371,6 +2545,13 @@ defineExpose({
           v-if="displayedSam2PreviewValue"
           class="sam2-mask-preview"
           :points="displayedSam2PreviewValue"
+          pointer-events="none"
+        />
+
+        <polygon
+          v-if="displayedTrackingPreviewValue"
+          :class="['tracking-mask-preview', props.trackingPreviewVariant]"
+          :points="displayedTrackingPreviewValue"
           pointer-events="none"
         />
 

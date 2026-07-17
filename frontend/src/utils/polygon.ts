@@ -56,6 +56,14 @@ export function normalizeAnnotationObject(annotation: AnnotationObject): Annotat
     ? { ...annotation.attributes }
     : annotation.attributes ?? null
 
+  if (annotation.shape_type === 'classification') {
+    return {
+      ...annotation,
+      points: [],
+      attributes,
+    }
+  }
+
   if (annotation.shape_type !== 'polygon') {
     return {
       ...annotation,

@@ -49,6 +49,7 @@ const activeMenu = computed(() => {
   if (route.path.startsWith('/datasets')) return 'datasets'
   if (route.path.startsWith('/jobs')) return 'projects'
   if (route.path.startsWith('/review')) return 'review'
+  if (route.path.startsWith('/research')) return 'research'
   return 'projects'
 })
 const hasShortcutConflict = computed(() =>
@@ -92,6 +93,7 @@ function navigate(index: string) {
     datasets: '/datasets',
     projects: '/jobs',
     review: '/review',
+    research: '/research',
   }
 
   void router.push(routes[index])
@@ -338,6 +340,10 @@ function closeSettingHelp() {
       <el-menu-item index="review">
         <el-icon><DataAnalysis /></el-icon>
         <span>Review</span>
+      </el-menu-item>
+      <el-menu-item index="research">
+        <el-icon><DataAnalysis /></el-icon>
+        <span>Research</span>
       </el-menu-item>
     </el-menu>
 

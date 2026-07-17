@@ -4,6 +4,9 @@ import AnnotationLandingPage from './views/AnnotationLandingPage.vue'
 import AnnotatePage from './views/AnnotatePage.vue'
 import DatasetsPage from './views/DatasetsPage.vue'
 import JobsPage from './views/JobsPage.vue'
+import ResearchPage from './views/ResearchPage.vue'
+import ResearchVideoAnnotatePage from './views/ResearchVideoAnnotatePage.vue'
+import ResearchVideosPage from './views/ResearchVideosPage.vue'
 import ReviewPage from './views/ReviewPage.vue'
 
 const router = createRouter({
@@ -33,6 +36,19 @@ const router = createRouter({
     {
       path: '/review',
       component: ReviewPage,
+    },
+    {
+      path: '/research',
+      component: ResearchPage,
+    },
+    {
+      path: '/research/videos',
+      component: ResearchVideosPage,
+    },
+    {
+      path: '/research/videos/:videoId/annotate',
+      component: ResearchVideoAnnotatePage,
+      props: true,
     },
     {
       path: '/jobs/:jobId/annotate',

@@ -10,6 +10,7 @@ export type Label = {
   shape_type: ShapeType
   sort_order: number
   annotation_count?: number
+  frame_count?: number
 }
 
 export type JobImage = {
@@ -22,7 +23,7 @@ export type JobImage = {
   thumbnail_url: string
 }
 
-export type ShapeType = 'rectangle' | 'polygon' | 'point'
+export type ShapeType = 'rectangle' | 'polygon' | 'point' | 'classification'
 
 export type AnnotationObject = {
   id: number | string
@@ -69,6 +70,54 @@ export type LabelDeleteResult = {
   strategy: LabelDeleteStrategy | null
   affected_annotations: number
   target_label: string | null
+}
+
+export type Sam2TrackDirection = 'forward' | 'backward' | 'both'
+export type Sam2ExistingAnnotationPolicy = 'skip_same_label' | 'replace_same_label' | 'append'
+
+export type Sam2TrackVideoFrameResult = {
+  image_id: number
+  frame_index: number
+  filename: string
+  points: number[][] | null
+  score: number | null
+  area: number | null
+  status: 'source' | 'tracked' | 'failed'
+  propagation_direction: 'source' | 'forward' | 'backward'
+  detail?: string | null
+}
+
+export type Sam2TrackVideoResponse = {
+  job_id: number
+  source_annotation_id: number | string | null
+  start_frame_index: number
+  end_frame_index: number
+  backward_end_frame_index?: number | null
+  forward_end_frame_index?: number | null
+  direction: Sam2TrackDirection
+  model_name: string
+  results: Sam2TrackVideoFrameResult[]
+  review_frames: number[]
+  warnings: string[]
+}
+
+export type Sam2TrackVideoPayload = {
+  start_image_id: number
+  start_frame_index: number | null
+  annotation_id: number | string | null
+  label_id: number
+  points: number[][]
+  direction: Sam2TrackDirection
+  end_frame_index?: number | null
+  backward_end_frame_index?: number | null
+  forward_end_frame_index?: number | null
+  review_interval: number
+  existing_annotation_policy: Sam2ExistingAnnotationPolicy
+  model_name: 'sam2_hiera_tiny' | 'sam2_hiera_small' | 'sam2_hiera_base_plus' | 'sam2_hiera_large'
+  polygon_epsilon: number
+  min_mask_area: number
+  mask_threshold: number
+  max_hole_area: number
 }
 
 function resolveStorageUrl(path: string): string {
@@ -158,6 +207,36 @@ export const useAnnotationStore = defineStore('annotation', {
         return false
       } finally {
         this.saving = false
+      }
+    },
+    async trackVideoWithSam2(payload: Sam2TrackVideoPayload): Promise<Sam2TrackVideoResponse | null> {
+      if (!this.job) {
+        return null
+      }
+
+      this.error = ''
+
+      try {
+        const response = await fetch(apiUrl('/api/sam2/track-video'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            job_id: this.job.id,
+            ...payload,
+          }),
+        })
+
+        if (!response.ok) {
+          const errorPayload = await response.json().catch(() => null)
+          throw new Error(typeof errorPayload?.detail === 'string' ? errorPayload.detail : `Track with SAM2 failed: ${response.status}`)
+        }
+
+        return await response.json() as Sam2TrackVideoResponse
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
       }
     },
     async fetchJobLabels(jobId: string | number): Promise<Label[] | null> {

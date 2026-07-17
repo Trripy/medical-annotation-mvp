@@ -10,6 +10,10 @@ import ObjectPanel from '../components/ObjectPanel.vue'
 import {
   useAnnotationStore,
   type AnnotationObject,
+  type Sam2ExistingAnnotationPolicy,
+  type Sam2TrackDirection,
+  type Sam2TrackVideoFrameResult,
+  type Sam2TrackVideoResponse,
   type Label,
   type LabelDeleteStrategy,
   type LabelUsage,
@@ -39,7 +43,8 @@ import {
   sliderValueToSmoothEpsilon,
 } from '../utils/polygon'
 
-type ToolType = 'cursor' | 'rectangle' | 'polygon' | 'sam2'
+type ToolType = 'cursor' | 'rectangle' | 'polygon' | 'sam2' | 'classify'
+type LabelKind = 'object_annotation' | 'image_classification'
 type Sam2Settings = {
   model_name: Sam2ModelName
   multimask_output: boolean
@@ -50,12 +55,69 @@ type Sam2Settings = {
   max_hole_area: number
   candidate: Sam2Candidate
 }
+type Sam2PreviewAcceptPayload = {
+  points: number[][]
+  score: number | null
+  source: 'prompt' | 'refine_annotation'
+  targetAnnotationId: number | string | null
+}
+type TrackOutputMode = 'preview_first' | 'direct_create'
+type TrackingReviewStatus = 'pending' | 'accepted' | 'rejected' | 'needs_fix'
+type TrackingCommitOutcome = 'saved' | 'skipped' | 'failed' | 'already_committed' | 'invalid'
+type TrackWithSam2FormState = {
+  direction: Sam2TrackDirection
+  forwardEndFrameIndex: number
+  backwardEndFrameIndex: number
+  reviewInterval: number
+  existingAnnotationPolicy: Sam2ExistingAnnotationPolicy
+  outputMode: TrackOutputMode
+}
+type TrackingPreviewFrameResult = Sam2TrackVideoFrameResult & {
+  review_status: TrackingReviewStatus
+  committed: boolean
+  fix_annotation_id?: number | string | null
+}
+type TrackingPreviewState = {
+  jobId: number
+  sourceAnnotationId: number | string | null
+  sourceFrameIndex: number
+  startFrameIndex: number
+  endFrameIndex: number
+  direction: Sam2TrackDirection
+  existingAnnotationPolicy: Sam2ExistingAnnotationPolicy
+  labelId: number
+  modelName: string
+  reviewInterval: number
+  results: TrackingPreviewFrameResult[]
+  reviewFrames: number[]
+  warnings: string[]
+}
+type TrackingCommitContext = {
+  jobId: number
+  sourceAnnotationId: number | string | null
+  sourceFrameIndex: number
+  direction: Sam2TrackDirection
+  existingAnnotationPolicy: Sam2ExistingAnnotationPolicy
+  labelId: number
+  modelName: string
+  outputMode: TrackOutputMode
+}
+type PreparedTrackingCommit =
+  | {
+      outcome: 'invalid' | 'skipped'
+    }
+  | {
+      outcome: 'prepared'
+      nextAnnotations: AnnotationObject[]
+      removedSameLabelCount: number
+    }
 type LabelDraft = {
   id: number
   name: string
   color: string
   shape_type: ShapeType
   annotation_count: number
+  frame_count: number
 }
 
 const props = defineProps<{
@@ -92,6 +154,7 @@ const labelManagerLoading = ref(false)
 const labelActionLoading = ref(false)
 const newLabelName = ref('')
 const newLabelColor = ref('#22c55e')
+const newLabelKind = ref<LabelKind>('object_annotation')
 const newLabelShapeType = ref<ShapeType>('polygon')
 const deleteLabelModalVisible = ref(false)
 const pendingDeleteLabel = ref<LabelDraft | null>(null)
@@ -100,12 +163,35 @@ const deleteLabelStrategy = ref<LabelDeleteStrategy>('move_to_undefined')
 const reassignTargetLabelId = ref<number | null>(null)
 const activePolygonSmoothingAnnotationId = ref<number | string | null>(null)
 const boundaryAssistReferenceAnnotationId = ref<number | string | null>(null)
+const refiningSelectedPolygonWithSam2 = ref(false)
+const trackWithSam2DialogVisible = ref(false)
+const trackingReviewDialogVisible = ref(false)
+const trackingWithSam2 = ref(false)
+const acceptingTrackingPreview = ref(false)
+const trackingDialogAnnotationId = ref<number | string | null>(null)
+const trackingReviewRangeStart = ref(0)
+const trackingReviewRangeEnd = ref(0)
+const isRightPanelOpen = ref(false)
+const trackWithSam2Form = ref<TrackWithSam2FormState>({
+  direction: 'forward',
+  forwardEndFrameIndex: 0,
+  backwardEndFrameIndex: 0,
+  reviewInterval: 10,
+  existingAnnotationPolicy: 'skip_same_label',
+  outputMode: 'preview_first',
+})
+const trackingPreviewState = ref<TrackingPreviewState | null>(null)
 
 const currentImage = computed(() => job.value?.images[selectedImageIndex.value] ?? null)
 const totalImages = computed(() => job.value?.images.length ?? 0)
 const currentImageNumber = computed(() => (currentImage.value ? selectedImageIndex.value + 1 : 0))
 const isFirstImage = computed(() => selectedImageIndex.value <= 0)
 const isLastImage = computed(() => selectedImageIndex.value >= totalImages.value - 1)
+const canTrackForwardFromCurrentFrame = computed(() => totalImages.value > 1 && !isLastImage.value)
+const canTrackBackwardFromCurrentFrame = computed(() => totalImages.value > 1 && !isFirstImage.value)
+const canTrackBothDirectionsFromCurrentFrame = computed(() =>
+  canTrackForwardFromCurrentFrame.value || canTrackBackwardFromCurrentFrame.value,
+)
 const jobsBackRoute = computed(() =>
   job.value?.project_id !== null && job.value?.project_id !== undefined
     ? `/jobs/projects/${job.value.project_id}`
@@ -118,7 +204,170 @@ const currentImageAnnotations = computed(() => {
 
   return job.value.annotations.filter((annotation) => annotation.image_id === currentImage.value?.id)
 })
+const objectLabels = computed(() => (job.value?.labels ?? []).filter((label) => !isClassificationLabel(label)))
+const classificationLabels = computed(() => (job.value?.labels ?? []).filter((label) => isClassificationLabel(label)))
+const classificationLabelIds = computed(() => new Set(classificationLabels.value.map((label) => label.id)))
+const currentImageObjectAnnotations = computed(() =>
+  currentImageAnnotations.value.filter((annotation) => !isClassificationAnnotation(annotation)),
+)
+const objectLabelDrafts = computed(() => labelDrafts.value.filter((label) => !isClassificationLabel(label)))
+const classificationLabelDrafts = computed(() => labelDrafts.value.filter((label) => isClassificationLabel(label)))
+const canUseClassificationTool = computed(() => classificationLabels.value.length > 0)
+const classificationAnnotationsByImageId = computed(() => {
+  const map = new Map<number, AnnotationObject>()
+  if (!job.value) {
+    return map
+  }
+
+  for (const annotation of job.value.annotations) {
+    if (!isClassificationAnnotation(annotation)) {
+      continue
+    }
+    map.set(annotation.image_id, annotation)
+  }
+  return map
+})
+const currentImageClassificationAnnotation = computed(() =>
+  currentImage.value ? classificationAnnotationsByImageId.value.get(currentImage.value.id) ?? null : null,
+)
+const currentImageClassificationLabelId = computed(() => currentImageClassificationAnnotation.value?.label_id ?? null)
+const currentImageClassificationLabel = computed(() =>
+  currentImageClassificationLabelId.value !== null
+    ? classificationLabels.value.find((label) => label.id === currentImageClassificationLabelId.value) ?? null
+    : null,
+)
+const classificationFrameBadges = computed(() => {
+  const map = new Map<number, { label: string; color: string }>()
+  for (const [imageId, annotation] of classificationAnnotationsByImageId.value.entries()) {
+    const label = classificationLabels.value.find((item) => item.id === annotation.label_id)
+    if (label) {
+      map.set(imageId, { label: label.name, color: label.color })
+    }
+  }
+  return map
+})
 const canUndo = computed(() => undoStack.value.length > 0)
+const trackingDialogTargetAnnotation = computed(() =>
+  currentImageAnnotations.value.find((annotation) => annotation.id === trackingDialogAnnotationId.value) ?? null,
+)
+const trackingDialogTargetLabel = computed(() => {
+  const labelId = trackingDialogTargetAnnotation.value?.label_id ?? null
+  return job.value?.labels.find((label) => label.id === labelId) ?? null
+})
+const trackingPreviewMap = computed(() =>
+  new Map((trackingPreviewState.value?.results ?? []).map((result) => [result.image_id, result])),
+)
+const currentTrackingPreviewResult = computed(() =>
+  currentImage.value ? trackingPreviewMap.value.get(currentImage.value.id) ?? null : null,
+)
+const currentTrackingFixAnnotation = computed(() => {
+  const result = currentTrackingPreviewResult.value
+  if (!result?.fix_annotation_id) {
+    return null
+  }
+  return currentImageAnnotations.value.find((annotation) => annotation.id === result.fix_annotation_id) ?? null
+})
+const currentTrackingPreviewPoints = computed(() => {
+  const result = currentTrackingPreviewResult.value
+  if (!result || result.status !== 'tracked' || !result.points || result.points.length < 3 || result.committed) {
+    return null
+  }
+  if (result.review_status === 'needs_fix' && currentTrackingFixAnnotation.value) {
+    return null
+  }
+  if (result.review_status === 'rejected') {
+    return null
+  }
+  return result.points
+})
+const currentTrackingPreviewVariant = computed<'pending' | 'accepted' | 'needs_fix' | null>(() => {
+  const result = currentTrackingPreviewResult.value
+  if (!result || !currentTrackingPreviewPoints.value) {
+    return null
+  }
+  if (result.review_status === 'accepted') {
+    return 'accepted'
+  }
+  if (result.review_status === 'needs_fix') {
+    return 'needs_fix'
+  }
+  return 'pending'
+})
+const trackingReviewFrameSet = computed(() => new Set(trackingPreviewState.value?.reviewFrames ?? []))
+const trackingPreviewFailedCount = computed(() =>
+  trackingPreviewState.value?.results.filter((result) => result.status === 'failed').length ?? 0,
+)
+const trackingPreviewProcessedCount = computed(() => trackingPreviewState.value?.results.length ?? 0)
+const trackingPreviewPendingCount = computed(() =>
+  trackingPreviewState.value?.results.filter((result) => result.status === 'tracked' && result.review_status === 'pending').length ?? 0,
+)
+const trackingPreviewAcceptedCount = computed(() =>
+  trackingPreviewState.value?.results.filter((result) => result.status !== 'failed' && result.review_status === 'accepted').length ?? 0,
+)
+const trackingPreviewRejectedCount = computed(() =>
+  trackingPreviewState.value?.results.filter((result) => result.status !== 'failed' && result.review_status === 'rejected').length ?? 0,
+)
+const trackingPreviewNeedsFixCount = computed(() =>
+  trackingPreviewState.value?.results.filter((result) => result.status === 'tracked' && result.review_status === 'needs_fix').length ?? 0,
+)
+const trackingPreviewReviewFramesText = computed(() => {
+  const reviewFrames = trackingPreviewState.value?.reviewFrames ?? []
+  if (reviewFrames.length === 0) {
+    return 'none'
+  }
+  if (reviewFrames.length <= 3) {
+    return reviewFrames.join(', ')
+  }
+  return `${reviewFrames.slice(0, 3).join(', ')} ...`
+})
+const trackingPreviewDirectionText = computed(() =>
+  trackingPreviewState.value ? formatTrackingDirection(trackingPreviewState.value.direction) : '',
+)
+const trackingPreviewCompactText = computed(() => {
+  if (!trackingPreviewState.value) {
+    return ''
+  }
+  return `Tracking preview · ${trackingPreviewDirectionText.value} · Pending ${trackingPreviewPendingCount.value} · Accepted ${trackingPreviewAcceptedCount.value} · Fix ${trackingPreviewNeedsFixCount.value} · Review ${trackingPreviewState.value.reviewFrames.length}`
+})
+const trackingPreviewMinFrameIndex = computed(() => {
+  const results = trackingPreviewState.value?.results ?? []
+  if (results.length === 0) {
+    return 0
+  }
+  return Math.min(...results.map((result) => result.frame_index))
+})
+const trackingPreviewMaxFrameIndex = computed(() => {
+  const results = trackingPreviewState.value?.results ?? []
+  if (results.length === 0) {
+    return 0
+  }
+  return Math.max(...results.map((result) => result.frame_index))
+})
+const currentTrackingFixAnnotationIsAcceptable = computed(() =>
+  Boolean(
+    currentTrackingPreviewResult.value?.review_status === 'needs_fix' &&
+    currentTrackingFixAnnotation.value &&
+    currentTrackingFixAnnotation.value.shape_type === 'polygon' &&
+    currentTrackingFixAnnotation.value.points.length >= 3,
+  ),
+)
+const currentTrackingFrameCanAccept = computed(() =>
+  Boolean(
+    currentTrackingPreviewResult.value &&
+    !currentTrackingPreviewResult.value.committed &&
+    (
+      (
+        trackingResultHasValidPolygon(currentTrackingPreviewResult.value) &&
+        currentTrackingPreviewResult.value.review_status !== 'rejected' &&
+        currentTrackingPreviewResult.value.review_status !== 'needs_fix'
+      ) ||
+      currentTrackingFixAnnotationIsAcceptable.value
+    ),
+  ),
+)
+const currentTrackingFrameCanFlag = computed(() =>
+  Boolean(currentTrackingPreviewResult.value?.status === 'tracked' && !currentTrackingPreviewResult.value.committed),
+)
 
 onMounted(async () => {
   if (currentUsername.value) {
@@ -135,7 +384,7 @@ onMounted(async () => {
   applyInitialFrameSelection()
   frameQueryReady.value = true
   persistLastFrame()
-  selectedLabelId.value = job.value?.labels[0]?.id ?? null
+  selectedLabelId.value = objectLabels.value[0]?.id ?? null
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('beforeunload', onBeforeUnload)
 })
@@ -166,6 +415,16 @@ watch(currentImageAnnotations, (annotations) => {
     !annotations.some((annotation) => annotation.id === boundaryAssistReferenceAnnotationId.value && annotation.shape_type === 'polygon')
   ) {
     boundaryAssistReferenceAnnotationId.value = null
+  }
+})
+
+watch(objectLabels, () => {
+  reconcileSelectedLabel()
+})
+
+watch(canUseClassificationTool, (available) => {
+  if (!available && tool.value === 'classify') {
+    tool.value = 'cursor'
   }
 })
 
@@ -232,6 +491,10 @@ function applyDefaultTool() {
 }
 
 function setTool(nextTool: ToolType) {
+  if (nextTool === 'classify' && !canUseClassificationTool.value) {
+    ElMessage.info('Add image classification labels in Manage Labels first.')
+    return
+  }
   hasUserChangedTool.value = true
   tool.value = nextTool
 }
@@ -268,7 +531,37 @@ function labelToDraft(label: Label): LabelDraft {
     color: label.color,
     shape_type: label.shape_type,
     annotation_count: label.annotation_count ?? 0,
+    frame_count: label.frame_count ?? 0,
   }
+}
+
+function isClassificationLabel(label: Pick<Label, 'shape_type'> | Pick<LabelDraft, 'shape_type'>) {
+  return label.shape_type === 'classification'
+}
+
+function isClassificationAnnotation(annotation: AnnotationObject) {
+  if (annotation.shape_type === 'classification') {
+    return true
+  }
+  const attributes = annotation.attributes as Record<string, unknown> | null | undefined
+  if (attributes?.classification === true || attributes?.annotation_kind === 'image_classification') {
+    return true
+  }
+  return classificationLabelIds.value.has(annotation.label_id)
+}
+
+function labelUsedCount(label: LabelDraft) {
+  return isClassificationLabel(label) ? label.frame_count : label.annotation_count
+}
+
+function compatibleReassignLabelOptions(sourceLabel: LabelDraft | null) {
+  if (!sourceLabel) {
+    return []
+  }
+  return labelDrafts.value.filter((label) => (
+    label.id !== sourceLabel.id &&
+    isClassificationLabel(label) === isClassificationLabel(sourceLabel)
+  ))
 }
 
 function isUndefinedLabel(label: { name: string }) {
@@ -285,6 +578,7 @@ function nextLabelColor() {
 function resetNewLabelForm() {
   newLabelName.value = ''
   newLabelColor.value = nextLabelColor()
+  newLabelKind.value = 'object_annotation'
   newLabelShapeType.value = 'polygon'
 }
 
@@ -326,7 +620,7 @@ async function loadManagedLabels() {
 }
 
 function reconcileSelectedLabel(preferredLabelId: number | null = selectedLabelId.value) {
-  const labels = job.value?.labels ?? []
+  const labels = objectLabels.value
   if (preferredLabelId !== null && labels.some((label) => label.id === preferredLabelId)) {
     selectedLabelId.value = preferredLabelId
     return
@@ -373,11 +667,13 @@ async function addManagedLabel() {
     ElMessage.warning(`Label color is too similar to another label color. Using ${color} instead.`)
   }
 
+  const shapeType = newLabelKind.value === 'image_classification' ? 'classification' : newLabelShapeType.value
+
   labelActionLoading.value = true
   const created = await annotationStore.createJobLabel(props.jobId, {
     name,
     color,
-    shape_type: newLabelShapeType.value,
+    shape_type: shapeType,
   })
   labelActionLoading.value = false
 
@@ -411,11 +707,13 @@ async function saveManagedLabel(label: LabelDraft) {
     return
   }
 
+  const nextShapeType = isClassificationLabel(label) ? 'classification' : label.shape_type
+
   labelActionLoading.value = true
   const updated = await annotationStore.updateJobLabel(props.jobId, label.id, {
     name,
     color: normalizedColor,
-    shape_type: label.shape_type,
+    shape_type: nextShapeType,
   })
   labelActionLoading.value = false
 
@@ -441,9 +739,11 @@ async function requestDeleteManagedLabel(label: LabelDraft) {
 
   pendingDeleteLabel.value = label
   pendingDeleteUsage.value = usage
-  reassignTargetLabelId.value = labelDrafts.value.find((item) => item.id !== label.id)?.id ?? null
+  reassignTargetLabelId.value = compatibleReassignLabelOptions(label)[0]?.id ?? null
   if (usage.annotation_count === 0) {
     deleteLabelStrategy.value = 'delete_annotations'
+  } else if (isClassificationLabel(label)) {
+    deleteLabelStrategy.value = reassignTargetLabelId.value ? 'reassign' : 'delete_annotations'
   } else if (isUndefinedLabel(label)) {
     deleteLabelStrategy.value = reassignTargetLabelId.value ? 'reassign' : 'delete_annotations'
   } else {
@@ -536,9 +836,17 @@ function updateCurrentImageAnnotations(nextAnnotations: AnnotationObject[]) {
     return
   }
 
+  updateAnnotationsForImage(currentImage.value.id, nextAnnotations)
+}
+
+function updateAnnotationsForImage(imageId: number, nextAnnotations: AnnotationObject[]) {
+  if (!job.value) {
+    return
+  }
+
   const normalizedAnnotations = nextAnnotations.map((annotation) => normalizeAnnotationObject(annotation))
   job.value.annotations = [
-    ...job.value.annotations.filter((annotation) => annotation.image_id !== currentImage.value?.id),
+    ...job.value.annotations.filter((annotation) => annotation.image_id !== imageId),
     ...normalizedAnnotations,
   ]
   hasUnsavedChanges.value = true
@@ -546,6 +854,104 @@ function updateCurrentImageAnnotations(nextAnnotations: AnnotationObject[]) {
 
 function cloneAnnotations(annotations: AnnotationObject[]): AnnotationObject[] {
   return JSON.parse(JSON.stringify(annotations)) as AnnotationObject[]
+}
+
+function buildClassificationAnnotation(imageId: number, labelId: number): AnnotationObject {
+  const timestamp = new Date().toISOString()
+  return normalizeAnnotationObject({
+    id: `local_classification_${imageId}_${Math.random().toString(36).slice(2, 10)}`,
+    image_id: imageId,
+    label_id: labelId,
+    shape_type: 'classification',
+    points: [],
+    attributes: {
+      annotation_kind: 'image_classification',
+      classification: true,
+      created_by_tool: 'classify',
+      classified_at: timestamp,
+    },
+  })
+}
+
+function nextAnnotationsWithClassification(imageId: number, labelId: number | null): AnnotationObject[] {
+  const imageAnnotations = imageAnnotationsFor(imageId)
+  const nonClassificationAnnotations = imageAnnotations.filter((annotation) => !isClassificationAnnotation(annotation))
+  if (labelId === null) {
+    return nonClassificationAnnotations
+  }
+  return [...nonClassificationAnnotations, buildClassificationAnnotation(imageId, labelId)]
+}
+
+function nextImageIndexForClassification() {
+  if (isLastImage.value) {
+    return null
+  }
+  return selectedImageIndex.value + 1
+}
+
+async function saveClassificationForCurrentImage(labelId: number | null) {
+  if (!currentImage.value) {
+    return false
+  }
+  if (canvasRef.value?.isDrawingPolygon()) {
+    ElMessage.warning('Please finish or cancel the current polygon first.')
+    return false
+  }
+  if (canvasRef.value?.isBoundaryAssistActive) {
+    ElMessage.warning('Please finish or cancel the boundary-assisted polygon first.')
+    return false
+  }
+
+  const nextAnnotations = nextAnnotationsWithClassification(currentImage.value.id, labelId)
+  const saved = await annotationStore.saveImageAnnotations(currentImage.value.id, nextAnnotations)
+  if (!saved) {
+    return false
+  }
+
+  reconcileTrackingFixAnnotationsForImage(currentImage.value.id)
+  hasUnsavedChanges.value = false
+  selectedAnnotationId.value = null
+  hiddenAnnotationIds.value = hiddenAnnotationIds.value.filter((id) =>
+    nextAnnotations.some((annotation) => annotation.id === id),
+  )
+  return true
+}
+
+async function applyImageClassification(labelId: number) {
+  const label = classificationLabels.value.find((item) => item.id === labelId)
+  if (!label || !currentImage.value) {
+    return
+  }
+
+  const saved = await saveClassificationForCurrentImage(labelId)
+  if (!saved) {
+    ElMessage.error('Failed to save classification. Please retry.')
+    return
+  }
+
+  const nextIndex = nextImageIndexForClassification()
+  if (nextIndex === null) {
+    ElMessage.success('Classification saved. This is the last frame.')
+    return
+  }
+
+  selectedImageIndex.value = nextIndex
+  hasUnsavedChanges.value = false
+  ElMessage.success(`Classification saved: ${label.name}.`)
+}
+
+async function clearImageClassification() {
+  if (!currentImage.value || !currentImageClassificationAnnotation.value) {
+    return
+  }
+
+  const saved = await saveClassificationForCurrentImage(null)
+  if (!saved) {
+    ElMessage.error('Failed to clear classification. Please retry.')
+    return
+  }
+
+  ElMessage.success('Classification cleared.')
 }
 
 function pushUndoState() {
@@ -774,20 +1180,26 @@ async function generateSam2Mask() {
 }
 
 function acceptSam2Mask() {
-  suppressNextSelectToolSwitch.value = true
-  let accepted = false
-  try {
-    accepted = canvasRef.value?.acceptSam2Preview() ?? false
-  } finally {
-    suppressNextSelectToolSwitch.value = false
-  }
-
-  if (!accepted) {
+  const preview = canvasRef.value?.acceptSam2Preview?.() as Sam2PreviewAcceptPayload | null | undefined
+  if (!preview) {
     ElMessage.warning('No SAM2 mask preview to accept.')
     return
   }
 
   hasSam2Preview.value = false
+  if (preview.source === 'refine_annotation') {
+    if (applyRefinedSam2Polygon(preview)) {
+      ElMessage.success('Polygon refined with SAM2.')
+    }
+    return
+  }
+
+  if (!acceptSam2GeneratedPolygon(preview)) {
+    ElMessage.warning('No SAM2 mask preview to accept.')
+    return
+  }
+
+  ElMessage.success('SAM2 mask accepted.')
   applyToolAfterSamAccept()
 }
 
@@ -808,6 +1220,1357 @@ function applyToolAfterSamAccept() {
 function rejectSam2Mask() {
   canvasRef.value?.rejectSam2Preview()
   hasSam2Preview.value = false
+}
+
+function acceptSam2GeneratedPolygon(preview: Sam2PreviewAcceptPayload) {
+  if (!currentImage.value || !selectedLabelId.value || preview.points.length < 3) {
+    return false
+  }
+
+  pushUndoState()
+  const annotation = normalizeAnnotationObject({
+    id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+    image_id: currentImage.value.id,
+    label_id: selectedLabelId.value,
+    shape_type: 'polygon',
+    points: clonePoints(preview.points),
+    attributes: buildPolygonSmoothingAttributes(preview.points, 0),
+  })
+  updateCurrentImageAnnotations([...currentImageAnnotations.value, annotation])
+  suppressNextSelectToolSwitch.value = true
+  try {
+    selectAnnotation(annotation.id)
+  } finally {
+    suppressNextSelectToolSwitch.value = false
+  }
+  return true
+}
+
+function applyRefinedSam2Polygon(preview: Sam2PreviewAcceptPayload) {
+  if (!currentImage.value || preview.targetAnnotationId === null || preview.points.length < 3) {
+    return false
+  }
+
+  const target = currentImageAnnotations.value.find((annotation) => annotation.id === preview.targetAnnotationId)
+  if (!target || target.shape_type !== 'polygon') {
+    ElMessage.warning('Selected polygon is no longer available.')
+    return false
+  }
+
+  const refinedPoints = clonePoints(preview.points)
+  const existingAttributes = target.attributes && typeof target.attributes === 'object'
+    ? { ...target.attributes }
+    : null
+
+  pushUndoState()
+  updateCurrentImageAnnotations(
+    currentImageAnnotations.value.map((annotation) => {
+      if (annotation.id !== target.id) {
+        return annotation
+      }
+
+      return {
+        ...annotation,
+        points: clonePoints(refinedPoints),
+        attributes: buildPolygonSmoothingAttributes(refinedPoints, 0, {
+          ...(existingAttributes ?? {}),
+          refined_by: 'sam2',
+          refined_from: clonePoints(target.points),
+          refine_source: 'rough_polygon_mask',
+          refined_at: new Date().toISOString(),
+        }),
+      }
+    }),
+  )
+  activePolygonSmoothingAnnotationId.value = null
+  suppressNextSelectToolSwitch.value = true
+  try {
+    selectAnnotation(target.id)
+  } finally {
+    suppressNextSelectToolSwitch.value = false
+  }
+  return true
+}
+
+async function handleRefineSelectedPolygonWithSam2(annotationId: number | string) {
+  const annotation = currentImageAnnotations.value.find((item) => item.id === annotationId)
+  if (!annotation) {
+    ElMessage.warning('Please select a polygon annotation first.')
+    return
+  }
+
+  if (annotation.shape_type !== 'polygon') {
+    ElMessage.warning('Only polygon annotations can be refined with SAM2.')
+    return
+  }
+
+  if (annotation.points.length < 3) {
+    ElMessage.warning('Polygon must have at least 3 points.')
+    return
+  }
+
+  refiningSelectedPolygonWithSam2.value = true
+  try {
+    const refined = await canvasRef.value?.refineSelectedPolygonWithSam2?.(annotation)
+    if (!refined) {
+      throw new Error('Cannot refine selected polygon with SAM2.')
+    }
+    hasSam2Preview.value = true
+    ElMessage.success('SAM2 refine preview generated.')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'SAM2 refine failed')
+  } finally {
+    refiningSelectedPolygonWithSam2.value = false
+  }
+}
+
+function imageFrameIndex(image = currentImage.value, fallbackIndex = selectedImageIndex.value) {
+  if (!image) {
+    return fallbackIndex
+  }
+  return image.frame_index ?? fallbackIndex
+}
+
+function firstJobFrameIndex() {
+  const images = job.value?.images ?? []
+  if (images.length === 0) {
+    return 0
+  }
+  const firstImage = images[0]
+  return firstImage.frame_index ?? 0
+}
+
+function lastJobFrameIndex() {
+  const images = job.value?.images ?? []
+  if (images.length === 0) {
+    return 0
+  }
+  const lastImage = images[images.length - 1]
+  return lastImage.frame_index ?? (images.length - 1)
+}
+
+function defaultForwardTrackingEndFrameIndex() {
+  return Math.min(imageFrameIndex() + 20, lastJobFrameIndex())
+}
+
+function defaultBackwardTrackingEndFrameIndex() {
+  return Math.max(imageFrameIndex() - 20, firstJobFrameIndex())
+}
+
+function resetTrackWithSam2Form() {
+  const defaultDirection: Sam2TrackDirection = canTrackForwardFromCurrentFrame.value
+    ? 'forward'
+    : canTrackBackwardFromCurrentFrame.value
+      ? 'backward'
+      : 'forward'
+  trackWithSam2Form.value = {
+    direction: defaultDirection,
+    forwardEndFrameIndex: defaultForwardTrackingEndFrameIndex(),
+    backwardEndFrameIndex: defaultBackwardTrackingEndFrameIndex(),
+    reviewInterval: 10,
+    existingAnnotationPolicy: 'skip_same_label',
+    outputMode: 'preview_first',
+  }
+}
+
+function clearTrackingPreview() {
+  trackingPreviewState.value = null
+  trackingReviewDialogVisible.value = false
+  trackingReviewRangeStart.value = 0
+  trackingReviewRangeEnd.value = 0
+}
+
+function trackingResultInitialReviewStatus(result: Sam2TrackVideoFrameResult): TrackingReviewStatus {
+  if (result.status === 'source') {
+    return 'accepted'
+  }
+  if (result.status === 'failed') {
+    return 'rejected'
+  }
+  return 'pending'
+}
+
+function initializeTrackingReviewRange(targetFrameIndex = imageFrameIndex()) {
+  if (!trackingPreviewState.value) {
+    trackingReviewRangeStart.value = 0
+    trackingReviewRangeEnd.value = 0
+    return
+  }
+
+  const minFrameIndex = trackingPreviewMinFrameIndex.value
+  const maxFrameIndex = trackingPreviewMaxFrameIndex.value
+  const clampedTarget = Math.min(Math.max(targetFrameIndex, minFrameIndex), maxFrameIndex)
+  trackingReviewRangeStart.value = clampedTarget
+  trackingReviewRangeEnd.value = clampedTarget
+}
+
+function formatTrackingDirection(direction: Sam2TrackDirection) {
+  if (direction === 'backward') {
+    return 'Backward'
+  }
+  if (direction === 'both') {
+    return 'Both'
+  }
+  return 'Forward'
+}
+
+function formatPropagationDirection(direction: TrackingPreviewFrameResult['propagation_direction']) {
+  if (direction === 'backward') {
+    return 'Backward'
+  }
+  if (direction === 'forward') {
+    return 'Forward'
+  }
+  return 'Source'
+}
+
+function openRightPanel() {
+  isRightPanelOpen.value = true
+}
+
+function closeRightPanel() {
+  isRightPanelOpen.value = false
+}
+
+function toggleRightPanel() {
+  isRightPanelOpen.value = !isRightPanelOpen.value
+}
+
+function buildTrackingCommitContext(
+  options: {
+    jobId: number
+    sourceAnnotationId: number | string | null
+    sourceFrameIndex: number
+    direction: Sam2TrackDirection
+    existingAnnotationPolicy: Sam2ExistingAnnotationPolicy
+    labelId: number
+    modelName: string
+    outputMode: TrackOutputMode
+  },
+): TrackingCommitContext {
+  return {
+    jobId: options.jobId,
+    sourceAnnotationId: options.sourceAnnotationId,
+    sourceFrameIndex: options.sourceFrameIndex,
+    direction: options.direction,
+    existingAnnotationPolicy: options.existingAnnotationPolicy,
+    labelId: options.labelId,
+    modelName: options.modelName,
+    outputMode: options.outputMode,
+  }
+}
+
+function trackingCommitContextFromPreviewState(previewState: TrackingPreviewState): TrackingCommitContext {
+  return buildTrackingCommitContext({
+    jobId: previewState.jobId,
+    sourceAnnotationId: previewState.sourceAnnotationId,
+    sourceFrameIndex: previewState.sourceFrameIndex,
+    direction: previewState.direction,
+    existingAnnotationPolicy: previewState.existingAnnotationPolicy,
+    labelId: previewState.labelId,
+    modelName: previewState.modelName,
+    outputMode: 'preview_first',
+  })
+}
+
+function trackingCommitContextFromResponse(
+  response: Sam2TrackVideoResponse,
+  annotation: AnnotationObject,
+  outputMode: TrackOutputMode,
+): TrackingCommitContext {
+  return buildTrackingCommitContext({
+    jobId: response.job_id,
+    sourceAnnotationId: response.source_annotation_id ?? annotation.id ?? null,
+    sourceFrameIndex: response.start_frame_index,
+    direction: response.direction,
+    existingAnnotationPolicy: trackWithSam2Form.value.existingAnnotationPolicy,
+    labelId: annotation.label_id,
+    modelName: response.model_name,
+    outputMode,
+  })
+}
+
+function openTrackingReviewDialog() {
+  if (!trackingPreviewState.value) {
+    return
+  }
+
+  initializeTrackingReviewRange()
+  trackingReviewDialogVisible.value = true
+}
+
+function closeTrackingReviewDialog() {
+  if (acceptingTrackingPreview.value) {
+    return
+  }
+
+  trackingReviewDialogVisible.value = false
+}
+
+function trackingResultHasValidPolygon(result: TrackingPreviewFrameResult | Sam2TrackVideoFrameResult) {
+  return result.status === 'tracked' && Boolean(result.points && result.points.length >= 3)
+}
+
+function updateTrackingPreviewResult(
+  imageId: number,
+  updater: (result: TrackingPreviewFrameResult) => TrackingPreviewFrameResult,
+) {
+  if (!trackingPreviewState.value) {
+    return
+  }
+
+  trackingPreviewState.value = {
+    ...trackingPreviewState.value,
+    results: trackingPreviewState.value.results.map((result) => (
+      result.image_id === imageId ? updater(result) : result
+    )),
+  }
+}
+
+function findAnnotationById(annotationId: number | string | null | undefined) {
+  if (!annotationId || !job.value) {
+    return null
+  }
+  return job.value.annotations.find((annotation) => annotation.id === annotationId) ?? null
+}
+
+function existingFixAnnotationForResult(result: TrackingPreviewFrameResult) {
+  if (!result.fix_annotation_id) {
+    return null
+  }
+  const annotation = findAnnotationById(result.fix_annotation_id)
+  if (!annotation || annotation.image_id !== result.image_id || annotation.shape_type !== 'polygon') {
+    return null
+  }
+  return annotation
+}
+
+function canAcceptFixedTrackingResult(result: TrackingPreviewFrameResult) {
+  const fixAnnotation = existingFixAnnotationForResult(result)
+  return Boolean(
+    result.review_status === 'needs_fix' &&
+    !result.committed &&
+    fixAnnotation &&
+    fixAnnotation.shape_type === 'polygon' &&
+    fixAnnotation.points.length >= 3,
+  )
+}
+
+function canAcceptTrackingResult(result: TrackingPreviewFrameResult) {
+  if (result.committed) {
+    return false
+  }
+  if (canAcceptFixedTrackingResult(result)) {
+    return true
+  }
+  return (
+    trackingResultHasValidPolygon(result) &&
+    result.review_status !== 'rejected' &&
+    result.review_status !== 'needs_fix'
+  )
+}
+
+function trackingPreviewHasUnresolvedFrames(results: TrackingPreviewFrameResult[]) {
+  return results.some((result) =>
+    result.review_status === 'pending' || result.review_status === 'needs_fix',
+  )
+}
+
+function buildTrackingFixAnnotation(
+  result: TrackingPreviewFrameResult,
+  previewState: TrackingPreviewState,
+): AnnotationObject {
+  const trackedPoints = clonePoints(result.points ?? [])
+  return normalizeAnnotationObject({
+    id: `local_fix_${result.image_id}_${Math.random().toString(36).slice(2, 10)}`,
+    image_id: result.image_id,
+    label_id: previewState.labelId,
+    shape_type: 'polygon',
+    points: clonePoints(trackedPoints),
+    attributes: buildPolygonSmoothingAttributes(trackedPoints, 0, {
+      generated_by: 'sam2_video_tracking_needs_fix',
+      source_annotation_id: previewState.sourceAnnotationId,
+      source_frame_index: previewState.sourceFrameIndex,
+      tracked_frame_index: result.frame_index,
+      tracking_direction: previewState.direction,
+      propagation_direction: result.propagation_direction,
+      model_name: previewState.modelName,
+      tracking_score: result.score,
+      review_status: 'needs_fix',
+      editable_fix_candidate: true,
+    }),
+  })
+}
+
+function reconcileTrackingFixAnnotationsForImage(imageId: number) {
+  if (!trackingPreviewState.value || !job.value) {
+    return
+  }
+
+  const imageAnnotations = job.value.annotations.filter((annotation) => annotation.image_id === imageId)
+  trackingPreviewState.value = {
+    ...trackingPreviewState.value,
+    results: trackingPreviewState.value.results.map((result) => {
+      if (result.image_id !== imageId || result.review_status !== 'needs_fix') {
+        return result
+      }
+
+      const matchedAnnotation = imageAnnotations.find((annotation) => {
+        if (annotation.shape_type !== 'polygon') {
+          return false
+        }
+        const attributes = annotation.attributes as Record<string, unknown> | null | undefined
+        return Boolean(
+          attributes &&
+          attributes.editable_fix_candidate === true &&
+          attributes.tracked_frame_index === result.frame_index &&
+          annotation.label_id === trackingPreviewState.value?.labelId,
+        )
+      })
+
+      if (!matchedAnnotation) {
+        return result
+      }
+
+      return {
+        ...result,
+        fix_annotation_id: matchedAnnotation.id,
+      }
+    }),
+  }
+}
+
+async function ensureEditableFixAnnotation(imageId: number) {
+  if (!trackingPreviewState.value || !job.value) {
+    return null
+  }
+
+  const previewState = trackingPreviewState.value
+  const result = previewState.results.find((item) => item.image_id === imageId)
+  if (!result || !trackingResultHasValidPolygon(result)) {
+    return null
+  }
+
+  const existingFixAnnotation = existingFixAnnotationForResult(result)
+  if (existingFixAnnotation) {
+    updateTrackingPreviewResult(imageId, (currentResult) => ({
+      ...currentResult,
+      review_status: 'needs_fix',
+      fix_annotation_id: existingFixAnnotation.id,
+    }))
+    return {
+      annotationId: existingFixAnnotation.id,
+      created: false,
+    }
+  }
+
+  const targetImageIndex = findImageIndexById(imageId)
+  if (targetImageIndex < 0) {
+    return null
+  }
+
+  if (currentImage.value?.id !== imageId) {
+    await goToImage(targetImageIndex)
+  }
+
+  if (!currentImage.value || currentImage.value.id !== imageId) {
+    return null
+  }
+
+  pushUndoState()
+  const fixAnnotation = buildTrackingFixAnnotation(result, previewState)
+  updateCurrentImageAnnotations([...currentImageAnnotations.value, fixAnnotation])
+  updateTrackingPreviewResult(imageId, (currentResult) => ({
+    ...currentResult,
+    review_status: 'needs_fix',
+    fix_annotation_id: fixAnnotation.id,
+  }))
+  return {
+    annotationId: fixAnnotation.id,
+    created: true,
+  }
+}
+
+function setTrackingFrameReviewStatus(imageId: number, reviewStatus: TrackingReviewStatus) {
+  updateTrackingPreviewResult(imageId, (result) => {
+    if (result.status === 'source' || result.status === 'failed') {
+      return result
+    }
+    return {
+      ...result,
+      review_status: reviewStatus,
+    }
+  })
+}
+
+function rejectTrackingFrame(imageId: number) {
+  const result = trackingPreviewMap.value.get(imageId)
+  if (!result || result.status !== 'tracked') {
+    return
+  }
+  if (result.committed) {
+    ElMessage.info('This tracking result has already been accepted. Edit the saved annotation directly if it needs changes.')
+    return
+  }
+  setTrackingFrameReviewStatus(imageId, 'rejected')
+}
+
+async function markTrackingFrameNeedsFix(imageId: number) {
+  const result = trackingPreviewMap.value.get(imageId)
+  if (!result || result.status !== 'tracked') {
+    return
+  }
+  if (result.committed) {
+    ElMessage.info('This tracking result has already been accepted. Edit the saved annotation directly if it needs changes.')
+    return
+  }
+  if (!trackingPreviewState.value) {
+    return
+  }
+
+  trackingReviewDialogVisible.value = false
+  const ensuredFixAnnotation = await ensureEditableFixAnnotation(imageId)
+  if (!ensuredFixAnnotation) {
+    ElMessage.warning('Unable to create an editable fix annotation for this frame.')
+    return
+  }
+
+  if (currentImage.value?.id !== imageId) {
+    const targetImageIndex = findImageIndexById(imageId)
+    if (targetImageIndex >= 0) {
+      await goToImage(targetImageIndex)
+    }
+  }
+
+  if (currentImage.value?.id !== imageId) {
+    ElMessage.warning('Unable to switch to the fix frame.')
+    return
+  }
+
+  suppressNextSelectToolSwitch.value = true
+  try {
+    selectAnnotation(ensuredFixAnnotation.annotationId)
+  } finally {
+    suppressNextSelectToolSwitch.value = false
+  }
+  setTool('cursor')
+  ElMessage[ensuredFixAnnotation.created ? 'success' : 'info'](
+    ensuredFixAnnotation.created
+      ? 'Fix annotation created. You can now edit the polygon and save it.'
+      : 'This frame already has an editable fix annotation.',
+  )
+}
+
+function findImageIndexById(imageId: number) {
+  return job.value?.images.findIndex((image) => image.id === imageId) ?? -1
+}
+
+async function goToTrackingFrame(imageId: number) {
+  const index = findImageIndexById(imageId)
+  if (index < 0) {
+    ElMessage.warning('Tracking frame is no longer available in this job.')
+    return
+  }
+  trackingReviewDialogVisible.value = false
+  await goToImage(index)
+}
+
+function acceptTrackingRange() {
+  if (!trackingPreviewState.value) {
+    return
+  }
+
+  if (!Number.isFinite(trackingReviewRangeStart.value) || !Number.isFinite(trackingReviewRangeEnd.value)) {
+    ElMessage.warning('Enter a valid tracking frame range first.')
+    return
+  }
+
+  const startFrame = Math.min(trackingReviewRangeStart.value, trackingReviewRangeEnd.value)
+  const endFrame = Math.max(trackingReviewRangeStart.value, trackingReviewRangeEnd.value)
+  const candidates = trackingPreviewState.value.results.filter((result) => (
+    trackingResultHasValidPolygon(result) &&
+    !result.committed &&
+    result.review_status !== 'needs_fix' &&
+    result.review_status !== 'rejected' &&
+    result.frame_index >= startFrame &&
+    result.frame_index <= endFrame
+  ))
+
+  if (candidates.length === 0) {
+    ElMessage.warning('No valid tracked frames were found in the selected range.')
+    return
+  }
+
+  for (const result of candidates) {
+    setTrackingFrameReviewStatus(result.image_id, 'accepted')
+  }
+  ElMessage.success(`Marked ${candidates.length} frame(s) as accepted for review.`)
+}
+
+function openTrackWithSam2(annotationId: number | string) {
+  const annotation = currentImageAnnotations.value.find((item) => item.id === annotationId)
+  if (!annotation) {
+    ElMessage.warning('Please select a polygon annotation first.')
+    return
+  }
+  if (annotation.shape_type !== 'polygon') {
+    ElMessage.warning('Only polygon annotations can be tracked with SAM2.')
+    return
+  }
+  if (annotation.points.length < 3) {
+    ElMessage.warning('Polygon must have at least 3 points.')
+    return
+  }
+
+  trackingDialogAnnotationId.value = annotation.id
+  resetTrackWithSam2Form()
+  trackWithSam2DialogVisible.value = true
+}
+
+function closeTrackWithSam2Dialog() {
+  if (trackingWithSam2.value) {
+    return
+  }
+  trackWithSam2DialogVisible.value = false
+  trackingDialogAnnotationId.value = null
+}
+
+function applyTrackingPreview(response: Sam2TrackVideoResponse, annotation: AnnotationObject) {
+  const commitContext = trackingCommitContextFromResponse(response, annotation, 'preview_first')
+  const previewResults = response.results.map((result) => ({
+    ...result,
+    review_status: trackingResultInitialReviewStatus(result),
+    committed: result.status === 'source',
+    fix_annotation_id: null,
+  }))
+  const frameIndices = previewResults.map((result) => result.frame_index)
+  const minFrameIndex = frameIndices.length > 0 ? Math.min(...frameIndices) : response.start_frame_index
+  const maxFrameIndex = frameIndices.length > 0 ? Math.max(...frameIndices) : response.end_frame_index
+
+  trackingPreviewState.value = {
+    jobId: commitContext.jobId,
+    sourceAnnotationId: commitContext.sourceAnnotationId,
+    sourceFrameIndex: commitContext.sourceFrameIndex,
+    startFrameIndex: minFrameIndex,
+    endFrameIndex: maxFrameIndex,
+    direction: commitContext.direction,
+    existingAnnotationPolicy: commitContext.existingAnnotationPolicy,
+    labelId: commitContext.labelId,
+    modelName: commitContext.modelName,
+    reviewInterval: trackWithSam2Form.value.reviewInterval,
+    results: previewResults,
+    reviewFrames: response.review_frames,
+    warnings: response.warnings,
+  }
+  initializeTrackingReviewRange(response.start_frame_index)
+}
+
+async function saveDirectTrackingResults(
+  response: Sam2TrackVideoResponse,
+  annotation: AnnotationObject,
+) {
+  if (!(await ensureCurrentFrameSavedBeforeTrackingCommit())) {
+    return null
+  }
+
+  const commitContext = trackingCommitContextFromResponse(response, annotation, 'direct_create')
+  let savedCount = 0
+  let skippedCount = 0
+  let failedCount = 0
+  let saveFailedCount = 0
+
+  for (const result of response.results) {
+    if (result.status === 'source') {
+      continue
+    }
+    if (result.status === 'failed') {
+      failedCount += 1
+      continue
+    }
+
+    const timestamp = new Date().toISOString()
+    const preparedCommit = prepareTrackingResultCommit(result, commitContext, {
+      createdAt: timestamp,
+      savedAt: timestamp,
+    })
+
+    if (preparedCommit.outcome !== 'prepared') {
+      if (preparedCommit.outcome === 'skipped') {
+        skippedCount += 1
+      } else {
+        failedCount += 1
+      }
+      continue
+    }
+
+    const saved = await annotationStore.saveImageAnnotations(result.image_id, preparedCommit.nextAnnotations)
+    if (saved) {
+      savedCount += 1
+    } else {
+      saveFailedCount += 1
+    }
+  }
+
+  return {
+    savedCount,
+    skippedCount,
+    failedCount,
+    saveFailedCount,
+  }
+}
+
+async function startTrackWithSam2() {
+  if (!job.value || !currentImage.value) {
+    return
+  }
+
+  const annotation = trackingDialogTargetAnnotation.value
+  if (!annotation || annotation.shape_type !== 'polygon') {
+    ElMessage.warning('Select a polygon annotation to track it through frames with SAM2.')
+    return
+  }
+  if (annotation.points.length < 3) {
+    ElMessage.warning('Polygon must have at least 3 points.')
+    return
+  }
+
+  if (trackingPreviewState.value) {
+    const discardPreviewMessage = trackWithSam2Form.value.outputMode === 'direct_create'
+      ? 'A tracking preview is already active. Starting direct tracking will discard the current preview. Continue?'
+      : 'A tracking preview is already active. Starting a new tracking run will discard the current preview. Continue?'
+    if (!window.confirm(discardPreviewMessage)) {
+      return
+    }
+  }
+
+  if (trackWithSam2Form.value.outputMode === 'direct_create') {
+    const confirmed = window.confirm(
+      'Directly create annotations will skip the review step and automatically save generated annotations to the database. Continue?',
+    )
+    if (!confirmed) {
+      return
+    }
+  }
+
+  if (trackingPreviewState.value) {
+    clearTrackingPreview()
+  }
+
+  const startFrameIndex = imageFrameIndex()
+  const clampedForwardEndFrameIndex = Math.min(
+    Math.max(trackWithSam2Form.value.forwardEndFrameIndex, startFrameIndex),
+    lastJobFrameIndex(),
+  )
+  const clampedBackwardEndFrameIndex = Math.max(
+    Math.min(trackWithSam2Form.value.backwardEndFrameIndex, startFrameIndex),
+    firstJobFrameIndex(),
+  )
+
+  if (trackWithSam2Form.value.direction === 'forward') {
+    if (!canTrackForwardFromCurrentFrame.value) {
+      ElMessage.warning('Cannot track forward from the last frame.')
+      return
+    }
+    if (clampedForwardEndFrameIndex <= startFrameIndex) {
+      ElMessage.warning('End frame must be after the selected start frame.')
+      return
+    }
+  } else if (trackWithSam2Form.value.direction === 'backward') {
+    if (!canTrackBackwardFromCurrentFrame.value) {
+      ElMessage.warning('Cannot track backward from the first frame.')
+      return
+    }
+    if (clampedBackwardEndFrameIndex >= startFrameIndex) {
+      ElMessage.warning('End frame must be before the selected start frame.')
+      return
+    }
+  } else {
+    if (!canTrackBothDirectionsFromCurrentFrame.value) {
+      ElMessage.warning('No additional frames are available for bidirectional tracking.')
+      return
+    }
+    if (clampedBackwardEndFrameIndex > startFrameIndex) {
+      ElMessage.warning('Backward end frame must be before or equal to the selected start frame.')
+      return
+    }
+    if (clampedForwardEndFrameIndex < startFrameIndex) {
+      ElMessage.warning('Forward end frame must be after or equal to the selected start frame.')
+      return
+    }
+  }
+
+  trackingWithSam2.value = true
+  try {
+    const response = await annotationStore.trackVideoWithSam2({
+      start_image_id: currentImage.value.id,
+      start_frame_index: startFrameIndex,
+      annotation_id: annotation.id,
+      label_id: annotation.label_id,
+      points: clonePoints(annotation.points),
+      direction: trackWithSam2Form.value.direction,
+      end_frame_index: trackWithSam2Form.value.direction === 'forward'
+        ? clampedForwardEndFrameIndex
+        : trackWithSam2Form.value.direction === 'backward'
+          ? clampedBackwardEndFrameIndex
+          : null,
+      backward_end_frame_index: trackWithSam2Form.value.direction === 'both'
+        ? clampedBackwardEndFrameIndex
+        : null,
+      forward_end_frame_index: trackWithSam2Form.value.direction === 'both'
+        ? clampedForwardEndFrameIndex
+        : null,
+      review_interval: trackWithSam2Form.value.reviewInterval,
+      existing_annotation_policy: trackWithSam2Form.value.existingAnnotationPolicy,
+      model_name: sam2Settings.value.model_name,
+      polygon_epsilon: sam2Settings.value.polygon_epsilon,
+      min_mask_area: sam2Settings.value.min_mask_area,
+      mask_threshold: sam2Settings.value.mask_threshold,
+      max_hole_area: sam2Settings.value.max_hole_area,
+    })
+
+    if (!response) {
+      throw new Error(annotationStore.error || 'Track with SAM2 failed.')
+    }
+
+    if (trackWithSam2Form.value.outputMode === 'direct_create') {
+      const report = await saveDirectTrackingResults(response, annotation)
+      if (!report) {
+        return
+      }
+
+      trackWithSam2DialogVisible.value = false
+      trackingDialogAnnotationId.value = null
+
+      if (report.saveFailedCount > 0) {
+        if (report.savedCount > 0) {
+          ElMessage.error(
+            `Created ${report.savedCount + report.saveFailedCount} tracking annotation(s), saved ${report.savedCount}, failed to save ${report.saveFailedCount} frame(s).`,
+          )
+        } else {
+          ElMessage.error('Tracking annotations were generated but failed to save. Please retry or use Preview mode.')
+        }
+        return
+      }
+
+      if (report.savedCount === 0) {
+        if (report.skippedCount > 0 || report.failedCount > 0) {
+          ElMessage.warning(
+            `No tracking annotations were created.${report.skippedCount > 0 ? ` Skipped ${report.skippedCount}.` : ''}${report.failedCount > 0 ? ` Failed ${report.failedCount}.` : ''}`,
+          )
+        } else {
+          ElMessage.info('No tracking annotations were created.')
+        }
+        return
+      }
+
+      ElMessage.success(
+        `Created and saved ${report.savedCount} tracking annotation(s).${report.skippedCount > 0 ? ` Skipped ${report.skippedCount}.` : ''}${report.failedCount > 0 ? ` Failed ${report.failedCount}.` : ''}`,
+      )
+      return
+    }
+
+    applyTrackingPreview(response, annotation)
+    trackWithSam2DialogVisible.value = false
+    trackingDialogAnnotationId.value = null
+    if (response.warnings.length > 0) {
+      ElMessage.warning(`Tracking preview generated with ${response.warnings.length} warning(s).`)
+    } else {
+      ElMessage.success('Tracking preview generated.')
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'Track with SAM2 failed.')
+  } finally {
+    trackingWithSam2.value = false
+  }
+}
+
+function isTrackingReviewFrame(frameIndex: number) {
+  return trackingReviewFrameSet.value.has(frameIndex)
+}
+
+function trackingFrameBadge(imageId: number, frameIndex: number) {
+  const result = trackingPreviewMap.value.get(imageId)
+  if (result) {
+    if (result.status === 'failed') {
+      return { label: 'Failed', className: 'failed' }
+    }
+    if (result.review_status === 'needs_fix') {
+      return { label: 'Fix', className: 'needs-fix' }
+    }
+    if (result.review_status === 'accepted') {
+      return { label: 'Accepted', className: 'accepted' }
+    }
+    if (result.review_status === 'rejected') {
+      return { label: 'Rejected', className: 'rejected' }
+    }
+    if (trackingResultHasValidPolygon(result)) {
+      return { label: 'Preview', className: 'preview' }
+    }
+  }
+
+  if (isTrackingReviewFrame(frameIndex)) {
+    return { label: 'Review', className: 'review' }
+  }
+  return null
+}
+
+function trackingFrameButtonClasses(imageId: number, frameIndex: number) {
+  const badge = trackingFrameBadge(imageId, frameIndex)
+  return {
+    'has-tracking-preview': badge?.className === 'preview',
+    'is-tracking-review': badge?.className === 'review',
+    'has-tracking-accepted': badge?.className === 'accepted',
+    'has-tracking-rejected': badge?.className === 'rejected',
+    'has-tracking-needs-fix': badge?.className === 'needs-fix',
+    'has-tracking-failed': badge?.className === 'failed',
+  }
+}
+
+function classificationFrameBadge(imageId: number) {
+  return classificationFrameBadges.value.get(imageId) ?? null
+}
+
+function buildAnnotationFromTrackingResult(
+  result: TrackingPreviewFrameResult | Sam2TrackVideoFrameResult,
+  context: TrackingCommitContext,
+  options: {
+    createdAt?: string
+    savedAt?: string | null
+  } = {},
+): AnnotationObject {
+  const trackedPoints = clonePoints(result.points ?? [])
+  const createdAt = options.createdAt ?? new Date().toISOString()
+  const baseAttributes: Record<string, unknown> = {
+    source_annotation_id: context.sourceAnnotationId,
+    source_frame_index: context.sourceFrameIndex,
+    tracked_frame_index: result.frame_index,
+    tracking_direction: context.direction,
+    propagation_direction: result.propagation_direction,
+    model_name: context.modelName,
+    tracking_score: result.score,
+  }
+  const modeSpecificAttributes = context.outputMode === 'direct_create'
+    ? {
+        generated_by: 'sam2_video_tracking_direct',
+        direct_create: true,
+        auto_saved: Boolean(options.savedAt),
+        existing_annotation_policy_applied: context.existingAnnotationPolicy,
+        created_at: createdAt,
+        ...(options.savedAt ? { saved_at: options.savedAt } : {}),
+      }
+    : {
+        generated_by: 'sam2_video_tracking',
+      }
+  return normalizeAnnotationObject({
+    id: `local_track_${result.image_id}_${Math.random().toString(36).slice(2, 10)}`,
+    image_id: result.image_id,
+    label_id: context.labelId,
+    shape_type: 'polygon',
+    points: trackedPoints,
+    attributes: buildPolygonSmoothingAttributes(trackedPoints, 0, {
+      ...baseAttributes,
+      ...modeSpecificAttributes,
+    }),
+  })
+}
+
+function prepareTrackingResultCommit(
+  result: TrackingPreviewFrameResult | Sam2TrackVideoFrameResult,
+  context: TrackingCommitContext,
+  options: {
+    createdAt?: string
+    savedAt?: string | null
+  } = {},
+): PreparedTrackingCommit {
+  if (!trackingResultHasValidPolygon(result)) {
+    return { outcome: 'invalid' }
+  }
+
+  const existingAnnotations = imageAnnotationsFor(result.image_id)
+  const sameLabelAnnotations = existingAnnotations.filter((annotation) => annotation.label_id === context.labelId)
+  if (context.existingAnnotationPolicy === 'skip_same_label' && sameLabelAnnotations.length > 0) {
+    return { outcome: 'skipped' }
+  }
+
+  const nextFrameAnnotations = existingAnnotations.filter((annotation) => (
+    context.existingAnnotationPolicy === 'replace_same_label'
+      ? annotation.label_id !== context.labelId
+      : true
+  ))
+
+  return {
+    outcome: 'prepared',
+    nextAnnotations: [
+      ...nextFrameAnnotations,
+      buildAnnotationFromTrackingResult(result, context, options),
+    ],
+    removedSameLabelCount: sameLabelAnnotations.length,
+  }
+}
+
+async function ensureCurrentFrameSavedBeforeTrackingCommit() {
+  if (!hasUnsavedChanges.value) {
+    return true
+  }
+
+  const saved = await saveAnnotations()
+  if (!saved) {
+    ElMessage.error('Failed to save current annotations before applying tracking results.')
+    return false
+  }
+  return true
+}
+
+async function commitTrackingResult(imageId: number): Promise<TrackingCommitOutcome> {
+  if (!trackingPreviewState.value || !job.value) {
+    return 'invalid' as const
+  }
+
+  const previewState = trackingPreviewState.value
+  const result = previewState.results.find((item) => item.image_id === imageId)
+  if (!result || !trackingResultHasValidPolygon(result)) {
+    return 'invalid' as const
+  }
+  if (result.committed) {
+    return 'already_committed' as const
+  }
+
+  const commitContext = trackingCommitContextFromPreviewState(previewState)
+  const preparedCommit = prepareTrackingResultCommit(result, commitContext)
+  if (preparedCommit.outcome !== 'prepared') {
+    return preparedCommit.outcome === 'skipped' ? 'skipped' : 'invalid'
+  }
+
+  const saved = await annotationStore.saveImageAnnotations(result.image_id, preparedCommit.nextAnnotations)
+  if (!saved) {
+    return 'failed' as const
+  }
+
+  updateTrackingPreviewResult(result.image_id, (currentResult) => ({
+    ...currentResult,
+    review_status: 'accepted',
+    committed: true,
+  }))
+  return 'saved' as const
+}
+
+function imageAnnotationsFor(imageId: number) {
+  if (!job.value) {
+    return []
+  }
+  return job.value.annotations.filter((annotation) => annotation.image_id === imageId)
+}
+
+function acceptFixedTrackingFrame(
+  result: TrackingPreviewFrameResult,
+  options: {
+    showMessages?: boolean
+  } = {},
+): TrackingCommitOutcome {
+  if (!trackingPreviewState.value || !job.value) {
+    return 'invalid'
+  }
+
+  const previewState = trackingPreviewState.value
+  const fixAnnotation = existingFixAnnotationForResult(result)
+  if (!fixAnnotation || fixAnnotation.image_id !== result.image_id) {
+    if (options.showMessages !== false) {
+      ElMessage.warning('No editable fix annotation found for this frame.')
+    }
+    return 'invalid'
+  }
+
+  if (fixAnnotation.shape_type !== 'polygon' || fixAnnotation.points.length < 3) {
+    if (options.showMessages !== false) {
+      ElMessage.warning('Fix annotation must be a valid polygon.')
+    }
+    return 'invalid'
+  }
+
+  if (result.committed) {
+    return 'already_committed'
+  }
+
+  const imageAnnotations = imageAnnotationsFor(result.image_id)
+  const sameLabelAnnotations = imageAnnotations.filter((annotation) => (
+    annotation.label_id === previewState.labelId &&
+    annotation.id !== fixAnnotation.id
+  ))
+
+  if (previewState.existingAnnotationPolicy === 'skip_same_label' && sameLabelAnnotations.length > 0) {
+    if (options.showMessages !== false) {
+      ElMessage.warning('This frame already has an annotation with the same label.')
+    }
+    return 'skipped'
+  }
+
+  let nextAnnotations = imageAnnotations
+  if (previewState.existingAnnotationPolicy === 'replace_same_label') {
+    nextAnnotations = imageAnnotations.filter((annotation) => !(
+      annotation.label_id === previewState.labelId &&
+      annotation.id !== fixAnnotation.id
+    ))
+  }
+
+  const existingAttributes = fixAnnotation.attributes && typeof fixAnnotation.attributes === 'object'
+    ? { ...fixAnnotation.attributes }
+    : null
+  const acceptedAt = new Date().toISOString()
+  nextAnnotations = nextAnnotations.map((annotation) => {
+    if (annotation.id !== fixAnnotation.id) {
+      return annotation
+    }
+
+    return normalizeAnnotationObject({
+      ...annotation,
+      attributes: {
+        ...(existingAttributes ?? {}),
+        review_status: 'accepted',
+        accepted_from: 'needs_fix',
+        accepted_at: acceptedAt,
+        committed_from_tracking_review: true,
+        existing_annotation_policy_applied: previewState.existingAnnotationPolicy,
+      },
+    })
+  })
+
+  if (currentImage.value?.id === result.image_id) {
+    pushUndoState()
+    updateCurrentImageAnnotations(nextAnnotations)
+  } else {
+    updateAnnotationsForImage(result.image_id, nextAnnotations)
+  }
+
+  updateTrackingPreviewResult(result.image_id, (currentResult) => ({
+    ...currentResult,
+    review_status: 'accepted',
+    committed: true,
+  }))
+
+  if (options.showMessages !== false) {
+    if (previewState.existingAnnotationPolicy === 'replace_same_label' && sameLabelAnnotations.length > 0) {
+      ElMessage.success('Fixed annotation accepted. Existing annotations with the same label were replaced. Click Save to persist it.')
+    } else {
+      ElMessage.success('Fixed annotation accepted. Click Save to persist it.')
+    }
+  }
+
+  return 'saved'
+}
+
+async function commitTrackingResults(
+  results: TrackingPreviewFrameResult[],
+  messages: {
+    empty: string
+    successPrefix: string
+    partialPrefix: string
+  },
+  options: {
+    showMessages?: boolean
+  } = {},
+) {
+  if (!trackingPreviewState.value || !job.value) {
+    return null
+  }
+  if (!(await ensureCurrentFrameSavedBeforeTrackingCommit())) {
+    return null
+  }
+
+  const candidates = results.filter((result) => canAcceptTrackingResult(result))
+  if (candidates.length === 0) {
+    if (options.showMessages !== false) {
+      ElMessage.warning(messages.empty)
+    }
+    return {
+      savedCount: 0,
+      skippedCount: 0,
+      failedCount: 0,
+      attemptedCount: 0,
+    }
+  }
+
+  let savedCount = 0
+  let skippedCount = 0
+  let failedCount = 0
+
+  acceptingTrackingPreview.value = true
+  try {
+    for (const result of candidates) {
+      const outcome = result.review_status === 'needs_fix'
+        ? acceptFixedTrackingFrame(result, { showMessages: false })
+        : await commitTrackingResult(result.image_id)
+      if (outcome === 'saved') {
+        savedCount += 1
+      } else if (outcome === 'skipped' || outcome === 'already_committed') {
+        skippedCount += 1
+      } else if (outcome === 'failed') {
+        failedCount += 1
+      }
+    }
+  } finally {
+    acceptingTrackingPreview.value = false
+  }
+
+  if (failedCount > 0) {
+    if (options.showMessages !== false) {
+      ElMessage.error(
+        `${messages.partialPrefix} ${savedCount} frame(s)${skippedCount > 0 ? `, skipped ${skippedCount}` : ''}, failed ${failedCount}.`,
+      )
+    }
+    return {
+      savedCount,
+      skippedCount,
+      failedCount,
+      attemptedCount: candidates.length,
+    }
+  }
+
+  if (options.showMessages !== false) {
+    ElMessage.success(
+      `${messages.successPrefix} ${savedCount} frame(s)${skippedCount > 0 ? `, skipped ${skippedCount}` : ''}.`,
+    )
+  }
+  return {
+    savedCount,
+    skippedCount,
+    failedCount,
+    attemptedCount: candidates.length,
+  }
+}
+
+async function acceptCurrentTrackingFrame() {
+  const result = currentTrackingPreviewResult.value
+  if (!result) {
+    ElMessage.warning('No tracking preview is available on the current frame.')
+    return
+  }
+
+  await acceptTrackingFrame(result.image_id)
+}
+
+async function acceptTrackingFrame(imageId: number) {
+  const result = trackingPreviewMap.value.get(imageId)
+  if (!result) {
+    ElMessage.warning('No tracking preview is available on this frame.')
+    return
+  }
+  if (result.committed) {
+    ElMessage.info('This tracking result has already been accepted.')
+    return
+  }
+
+  if (result.review_status === 'needs_fix') {
+    const outcome = acceptFixedTrackingFrame(result)
+    if (outcome !== 'saved') {
+      return
+    }
+    return
+  }
+
+  if (!trackingResultHasValidPolygon(result)) {
+    ElMessage.warning('This tracking frame does not contain a valid polygon.')
+    return
+  }
+
+  setTrackingFrameReviewStatus(result.image_id, 'accepted')
+  await commitTrackingResults([result], {
+    empty: 'No valid tracking frame is available to accept.',
+    successPrefix: 'Saved accepted tracking',
+    partialPrefix: 'Saved accepted tracking',
+  })
+}
+
+async function acceptReviewedTrackingFrames() {
+  if (!trackingPreviewState.value) {
+    return
+  }
+
+  const reviewedResults = trackingPreviewState.value.results.filter((result) => (
+    trackingResultHasValidPolygon(result) &&
+    result.review_status === 'accepted' &&
+    !result.committed
+  ))
+  await commitTrackingResults(reviewedResults, {
+    empty: 'No reviewed tracking frames are ready to save.',
+    successPrefix: 'Saved reviewed tracked',
+    partialPrefix: 'Saved reviewed tracked',
+  })
+}
+
+async function acceptTrackingPreview() {
+  if (!trackingPreviewState.value) {
+    return
+  }
+
+  const blockedResults = trackingPreviewState.value.results.filter((result) =>
+    result.review_status === 'rejected' || result.review_status === 'needs_fix',
+  )
+  if (blockedResults.length > 0) {
+    const confirmed = window.confirm(
+      'Some frames are marked as rejected or needs fix. Accept All will save all currently acceptable results and skip unresolved frames. Continue?',
+    )
+    if (!confirmed) {
+      return
+    }
+  }
+
+  const acceptedResults = trackingPreviewState.value.results.filter((result) => (
+    canAcceptTrackingResult(result)
+  ))
+  const report = await commitTrackingResults(acceptedResults, {
+    empty: 'No valid tracking frames are available to accept.',
+    successPrefix: 'Saved tracked',
+    partialPrefix: 'Saved tracked',
+  }, {
+    showMessages: false,
+  })
+
+  if (!report) {
+    return
+  }
+
+  if (report.failedCount > 0) {
+    ElMessage.error(
+      `Saved tracked ${report.savedCount} frame(s)${report.skippedCount > 0 ? `, skipped ${report.skippedCount}` : ''}, failed ${report.failedCount}.`,
+    )
+    return
+  }
+
+  const remainingResults = trackingPreviewState.value?.results ?? []
+  if (trackingPreviewHasUnresolvedFrames(remainingResults)) {
+    ElMessage.warning('Some frames still need fixing.')
+    return
+  }
+
+  clearTrackingPreview()
+  if (report.attemptedCount === 0) {
+    ElMessage.info('No pending tracking frames remain. Tracking preview closed.')
+    return
+  }
+  ElMessage.success('Tracking results accepted. Click Save to persist the annotations.')
+}
+
+function rejectCurrentTrackingFrame() {
+  const result = currentTrackingPreviewResult.value
+  if (!result || result.status !== 'tracked') {
+    ElMessage.warning('No tracked preview is available on the current frame.')
+    return
+  }
+  rejectTrackingFrame(result.image_id)
+}
+
+function markCurrentTrackingFrameNeedsFix() {
+  const result = currentTrackingPreviewResult.value
+  if (!result || result.status !== 'tracked') {
+    ElMessage.warning('No tracked preview is available on the current frame.')
+    return
+  }
+  markTrackingFrameNeedsFix(result.image_id)
+}
+
+function rejectTrackingPreview() {
+  clearTrackingPreview()
+  ElMessage.info('Tracking preview discarded. Saved annotations remain unchanged.')
 }
 
 function frameIndexFromQuery() {
@@ -924,6 +2687,7 @@ async function saveAnnotations() {
 
   const saved = await annotationStore.saveImageAnnotations(currentImage.value.id, currentImageAnnotations.value)
   if (saved) {
+    reconcileTrackingFixAnnotationsForImage(currentImage.value.id)
     hasUnsavedChanges.value = false
   }
 
@@ -1034,7 +2798,7 @@ function isTextEntryTarget(target: EventTarget | null) {
 </script>
 
 <template>
-  <main class="annotate-page">
+  <main class="annotate-page annotate-layout">
     <aside class="annotate-sidebar annotation-sidebar-left">
       <div class="sidebar-header">
         <router-link :to="jobsBackRoute" class="annotate-back">
@@ -1044,7 +2808,7 @@ function isTextEntryTarget(target: EventTarget | null) {
 
         <div>
           <p class="eyebrow">Annotation workspace</p>
-          <h1>{{ job?.name ?? `Job ${jobId}` }}</h1>
+          <h1 class="job-title">{{ job?.name ?? `Job ${jobId}` }}</h1>
           <p v-if="job" class="job-subtitle">ID: #{{ job.id }}</p>
         </div>
 
@@ -1069,11 +2833,21 @@ function isTextEntryTarget(target: EventTarget | null) {
             >
               sam2
             </button>
+            <button
+              class="annotation-tool-button annotation-tool-button-classify"
+              :class="{ active: tool === 'classify', disabled: !canUseClassificationTool }"
+              :disabled="!canUseClassificationTool"
+              :title="canUseClassificationTool ? '' : 'Add image classification labels in Manage Labels first.'"
+              type="button"
+              @click="setTool('classify')"
+            >
+              classify
+            </button>
           </div>
         </section>
       </div>
 
-      <div class="sidebar-middle" :class="{ 'sidebar-middle-sam2': tool === 'sam2' }">
+      <div class="sidebar-middle left-panel-main" :class="{ 'sidebar-middle-sam2': tool === 'sam2' }">
         <div class="sidebar-settings-labels sidebar-label-settings-scroll">
           <section class="tool-panel sidebar-labels">
             <div class="panel-label-row">
@@ -1084,7 +2858,7 @@ function isTextEntryTarget(target: EventTarget | null) {
             </div>
             <div class="label-list">
               <button
-                v-for="label in job?.labels ?? []"
+                v-for="label in objectLabels"
                 :key="label.id"
                 class="label-choice"
                 :class="{ active: selectedLabelId === label.id }"
@@ -1095,6 +2869,9 @@ function isTextEntryTarget(target: EventTarget | null) {
                 {{ label.name }}
               </button>
             </div>
+            <p v-if="objectLabels.length === 0" class="tool-panel-hint">
+              Add object annotation labels in Manage Labels to draw polygons, rectangles, or points.
+            </p>
           </section>
 
           <div v-if="tool === 'sam2'" class="sidebar-sam2-settings">
@@ -1187,17 +2964,36 @@ function isTextEntryTarget(target: EventTarget | null) {
               v-for="(image, index) in job?.images ?? []"
               :key="image.id"
               class="frame-choice"
-              :class="{ active: selectedImageIndex === index }"
+              :class="[trackingFrameButtonClasses(image.id, image.frame_index ?? index), { active: selectedImageIndex === index }]"
               type="button"
               @click="goToImage(index)"
             >
-              {{ index + 1 }}. {{ image.filename }}
+              <span>{{ index + 1 }}. {{ image.filename }}</span>
+              <span class="frame-choice-badges">
+                <span
+                  v-if="classificationFrameBadge(image.id)"
+                  class="frame-choice-badge classification"
+                  :style="{
+                    borderColor: `${classificationFrameBadge(image.id)?.color}66`,
+                    color: classificationFrameBadge(image.id)?.color,
+                  }"
+                >
+                  {{ classificationFrameBadge(image.id)?.label }}
+                </span>
+                <span
+                  v-if="trackingFrameBadge(image.id, image.frame_index ?? index)"
+                  class="frame-choice-badge"
+                  :class="trackingFrameBadge(image.id, image.frame_index ?? index)?.className"
+                >
+                  {{ trackingFrameBadge(image.id, image.frame_index ?? index)?.label }}
+                </span>
+              </span>
             </button>
           </div>
         </div>
       </div>
 
-      <div class="sidebar-footer sidebar-bottom annotate-actions">
+      <div class="sidebar-footer sidebar-bottom annotate-actions left-panel-footer">
         <el-button :icon="Delete" @click="deleteAnnotation()">Delete current</el-button>
         <el-button :loading="saving" type="primary" :icon="Finished" @click="saveAnnotations">
           Save
@@ -1241,8 +3037,9 @@ function isTextEntryTarget(target: EventTarget | null) {
             <el-button @click="canvasRef?.resetView()">Reset</el-button>
           </div>
 
-          <div v-if="tool === 'sam2'" class="toolbar-group toolbar-group-sam2">
+          <div v-if="tool === 'sam2' || hasSam2Preview" class="toolbar-group toolbar-group-sam2">
             <el-button
+              v-if="tool === 'sam2'"
               class="sam-generate-btn"
               :loading="generatingSam2"
               style="--el-button-bg-color: #2563eb; --el-button-border-color: #2563eb; --el-button-text-color: #ffffff; --el-button-hover-bg-color: #1d4ed8; --el-button-hover-border-color: #1d4ed8; --el-button-hover-text-color: #ffffff; --el-button-active-bg-color: #1e40af; --el-button-active-border-color: #1e40af; --el-button-active-text-color: #ffffff; --el-button-disabled-text-color: #ffffff;"
@@ -1268,55 +3065,486 @@ function isTextEntryTarget(target: EventTarget | null) {
               Reload
             </el-button>
           </div>
+
+          <div class="toolbar-group toolbar-group-objects">
+            <el-button
+              class="annotation-objects-toggle"
+              :aria-expanded="isRightPanelOpen"
+              @click="toggleRightPanel"
+            >
+              Objects {{ currentImageObjectAnnotations.length }}
+            </el-button>
+          </div>
         </div>
       </header>
 
-      <el-alert v-if="error" :title="error" type="error" show-icon />
+      <div class="annotation-center-content">
+        <el-alert v-if="error" :title="error" type="error" show-icon />
 
-      <AnnotationCanvas
-        v-if="currentImage"
-        ref="canvasRef"
-        :image="currentImage"
-        :labels="job?.labels ?? []"
-        :annotations="currentImageAnnotations"
-        :hidden-annotation-ids="hiddenAnnotationIds"
-        :selected-annotation-id="selectedAnnotationId"
-        :selected-label-id="selectedLabelId"
-      :sam2-settings="sam2Settings"
-      :boundary-assist-reference-annotation-id="boundaryAssistReferenceAnnotationId"
-      :tool="tool"
-      :user-settings="userSettings"
-      @boundary-assist-cancel="cancelBoundaryAssist"
-      @boundary-assist-continue-polygon="continueBoundaryAssistAsPolygon"
-      @boundary-assist-complete="completeBoundaryAssist"
-      @before-change="pushUndoState"
-      @change="updateCurrentImageAnnotations"
-      @sam2-preview-change="hasSam2Preview = $event"
-      @select-object="selectAnnotation"
-    />
+        <section v-if="tool === 'classify' && classificationLabels.length > 0" class="classification-toolbar">
+          <div class="classification-toolbar-copy">
+            <strong>Image class</strong>
+            <span>
+              Current:
+              <template v-if="currentImageClassificationLabel">
+                {{ currentImageClassificationLabel.name }}
+              </template>
+              <template v-else>
+                Unclassified
+              </template>
+            </span>
+          </div>
+          <div class="classification-toolbar-actions">
+            <button
+              v-for="label in classificationLabels"
+              :key="label.id"
+              class="classification-chip"
+              :class="{ active: currentImageClassificationLabelId === label.id }"
+              type="button"
+              :style="{ '--classification-color': label.color }"
+              @click="applyImageClassification(label.id)"
+            >
+              <span class="classification-chip-dot"></span>
+              {{ label.name }}
+            </button>
+            <button
+              class="classification-chip classification-chip-clear"
+              :disabled="!currentImageClassificationAnnotation"
+              type="button"
+              @click="clearImageClassification"
+            >
+              Clear class
+            </button>
+          </div>
+        </section>
 
-      <div v-else v-loading="loading" class="annotate-empty">
-        <el-icon><Pointer /></el-icon>
-        <p>No image loaded</p>
+        <section
+          v-if="trackingPreviewState"
+          class="tracking-preview-banner tracking-preview-banner-wide"
+        >
+          <div class="tracking-preview-summary">
+            <div class="tracking-preview-title">Tracking preview active</div>
+            <div class="tracking-preview-compact-summary">
+              {{ trackingPreviewCompactText }}
+            </div>
+            <div class="tracking-preview-stats">
+              <span>Direction: {{ trackingPreviewDirectionText }}</span>
+              <span>Frames: {{ trackingPreviewProcessedCount }}</span>
+              <span>Pending: {{ trackingPreviewPendingCount }}</span>
+              <span>Accepted: {{ trackingPreviewAcceptedCount }}</span>
+              <span>Rejected: {{ trackingPreviewRejectedCount }}</span>
+              <span>Needs fix: {{ trackingPreviewNeedsFixCount }}</span>
+              <span>Failed: {{ trackingPreviewFailedCount }}</span>
+            </div>
+            <div class="tracking-preview-review-frames">
+              Review frames: {{ trackingPreviewReviewFramesText }}
+            </div>
+            <div
+              v-if="currentTrackingPreviewResult?.status === 'failed' && currentTrackingPreviewResult.detail"
+              class="tracking-preview-warning"
+            >
+              Current frame warning: {{ currentTrackingPreviewResult.detail }}
+            </div>
+          </div>
+          <div class="tracking-preview-actions">
+            <el-button :disabled="acceptingTrackingPreview" @click="openTrackingReviewDialog">
+              Review Results
+            </el-button>
+            <el-button :disabled="acceptingTrackingPreview || !currentTrackingFrameCanAccept" @click="acceptCurrentTrackingFrame">
+              Accept Current
+            </el-button>
+            <el-button :disabled="acceptingTrackingPreview || !currentTrackingFrameCanFlag" @click="rejectCurrentTrackingFrame">
+              Reject Current
+            </el-button>
+            <el-button :disabled="acceptingTrackingPreview || !currentTrackingFrameCanFlag" @click="markCurrentTrackingFrameNeedsFix">
+              Mark Needs Fix
+            </el-button>
+            <el-button :disabled="acceptingTrackingPreview" @click="acceptReviewedTrackingFrames">
+              Accept Reviewed
+            </el-button>
+            <el-button :disabled="acceptingTrackingPreview" @click="rejectTrackingPreview">
+              Reject All
+            </el-button>
+            <el-button type="primary" :loading="acceptingTrackingPreview" @click="acceptTrackingPreview">
+              Accept All
+            </el-button>
+          </div>
+        </section>
+
+        <section class="canvas-section">
+          <AnnotationCanvas
+            v-if="currentImage"
+            ref="canvasRef"
+            class="annotation-canvas-shell"
+            :image="currentImage"
+            :labels="job?.labels ?? []"
+            :annotations="currentImageObjectAnnotations"
+            :hidden-annotation-ids="hiddenAnnotationIds"
+            :selected-annotation-id="selectedAnnotationId"
+            :selected-label-id="selectedLabelId"
+            :tracking-preview-points="currentTrackingPreviewPoints"
+            :tracking-preview-variant="currentTrackingPreviewVariant"
+            :sam2-settings="sam2Settings"
+            :boundary-assist-reference-annotation-id="boundaryAssistReferenceAnnotationId"
+            :tool="tool"
+            :user-settings="userSettings"
+            @boundary-assist-cancel="cancelBoundaryAssist"
+            @boundary-assist-continue-polygon="continueBoundaryAssistAsPolygon"
+            @boundary-assist-complete="completeBoundaryAssist"
+            @before-change="pushUndoState"
+            @change="updateCurrentImageAnnotations"
+            @sam2-preview-change="hasSam2Preview = $event"
+            @select-object="selectAnnotation"
+          />
+
+          <div v-else v-loading="loading" class="annotate-empty">
+            <el-icon><Pointer /></el-icon>
+            <p>No image loaded</p>
+          </div>
+        </section>
       </div>
     </section>
 
-    <ObjectPanel
-      :annotations="currentImageAnnotations"
-      :hidden-annotation-ids="hiddenAnnotationIds"
-      :labels="job?.labels ?? []"
-      :selected-annotation-id="selectedAnnotationId"
-      @create-layer-above="startBoundaryAssist"
-      @delete-annotation="deleteAnnotation"
-      @hide-all="hideAllAnnotations"
-      @show-all="showAllAnnotations"
-      @select-annotation="selectAnnotation"
-      @commit-polygon-smoothing="commitPolygonSmoothing"
-      @reset-polygon-smoothing="resetPolygonSmoothing"
-      @toggle-visibility="toggleAnnotationVisibility"
-      @update-annotation-label="updateAnnotationLabel"
-      @update-polygon-smoothing="updatePolygonSmoothing"
-    />
+    <div
+      class="annotation-right-panel-backdrop"
+      :class="{ 'is-visible': isRightPanelOpen }"
+      @click="closeRightPanel"
+    ></div>
+
+    <div class="annotate-right-panel-shell" :class="{ 'is-open': isRightPanelOpen }">
+      <div class="right-panel-drawer-header">
+        <strong>Objects {{ currentImageObjectAnnotations.length }}</strong>
+        <button type="button" @click="closeRightPanel">Close</button>
+      </div>
+      <ObjectPanel
+        class="annotate-right-panel"
+        :annotations="currentImageObjectAnnotations"
+        :hidden-annotation-ids="hiddenAnnotationIds"
+        :labels="objectLabels"
+        :sam2-refining="refiningSelectedPolygonWithSam2 || generatingSam2"
+        :sam2-tracking="trackingWithSam2 || acceptingTrackingPreview"
+        :selected-annotation-id="selectedAnnotationId"
+        @create-layer-above="startBoundaryAssist"
+        @delete-annotation="deleteAnnotation"
+        @hide-all="hideAllAnnotations"
+        @refine-selected-polygon="handleRefineSelectedPolygonWithSam2"
+        @track-with-sam2="openTrackWithSam2"
+        @show-all="showAllAnnotations"
+        @select-annotation="selectAnnotation"
+        @commit-polygon-smoothing="commitPolygonSmoothing"
+        @reset-polygon-smoothing="resetPolygonSmoothing"
+        @toggle-visibility="toggleAnnotationVisibility"
+        @update-annotation-label="updateAnnotationLabel"
+        @update-polygon-smoothing="updatePolygonSmoothing"
+      />
+    </div>
+
+    <button
+      type="button"
+      class="right-panel-edge-toggle"
+      :class="{ 'is-hidden': isRightPanelOpen }"
+      @click="openRightPanel"
+    >
+      Objects {{ currentImageObjectAnnotations.length }}
+    </button>
+
+    <div v-if="trackWithSam2DialogVisible" class="app-modal-backdrop" @click.self="closeTrackWithSam2Dialog">
+      <section class="app-modal track-sam2-modal" @click.stop>
+        <header class="track-sam2-modal-header">
+          <div>
+            <p class="eyebrow">SAM2 video tracking</p>
+            <h2>Track with SAM2</h2>
+            <span>Select a polygon annotation to track it through frames with SAM2.</span>
+          </div>
+          <el-button :disabled="trackingWithSam2" @click="closeTrackWithSam2Dialog">Close</el-button>
+        </header>
+
+        <div class="track-sam2-modal-body">
+          <section class="track-sam2-summary">
+            <h3>Selected object</h3>
+            <p>Label: {{ trackingDialogTargetLabel?.name ?? 'Unknown' }}</p>
+            <p>Current frame: {{ currentImageNumber }} / {{ totalImages }}</p>
+            <p>Image: {{ currentImage?.filename ?? 'Unknown' }}</p>
+          </section>
+
+          <section class="track-sam2-section">
+            <h3>Tracking direction</h3>
+            <label class="track-sam2-radio" :class="{ disabled: !canTrackForwardFromCurrentFrame }">
+              <input
+                v-model="trackWithSam2Form.direction"
+                :disabled="!canTrackForwardFromCurrentFrame"
+                type="radio"
+                value="forward"
+              />
+              <span>Forward</span>
+            </label>
+            <label class="track-sam2-radio" :class="{ disabled: !canTrackBackwardFromCurrentFrame }">
+              <input
+                v-model="trackWithSam2Form.direction"
+                :disabled="!canTrackBackwardFromCurrentFrame"
+                type="radio"
+                value="backward"
+              />
+              <span>Backward</span>
+            </label>
+            <label class="track-sam2-radio" :class="{ disabled: !canTrackBothDirectionsFromCurrentFrame }">
+              <input
+                v-model="trackWithSam2Form.direction"
+                :disabled="!canTrackBothDirectionsFromCurrentFrame"
+                type="radio"
+                value="both"
+              />
+              <span>Both directions</span>
+            </label>
+          </section>
+
+          <section class="track-sam2-section">
+            <h3>Tracking range</h3>
+            <label class="track-sam2-field">
+              <span>Start frame</span>
+              <input :value="imageFrameIndex()" disabled type="number" />
+            </label>
+            <template v-if="trackWithSam2Form.direction === 'forward'">
+              <label class="track-sam2-field">
+                <span>End frame</span>
+                <input
+                  v-model.number="trackWithSam2Form.forwardEndFrameIndex"
+                  :max="lastJobFrameIndex()"
+                  :min="imageFrameIndex()"
+                  type="number"
+                />
+              </label>
+            </template>
+            <template v-else-if="trackWithSam2Form.direction === 'backward'">
+              <label class="track-sam2-field">
+                <span>End frame</span>
+                <input
+                  v-model.number="trackWithSam2Form.backwardEndFrameIndex"
+                  :max="imageFrameIndex()"
+                  :min="firstJobFrameIndex()"
+                  type="number"
+                />
+              </label>
+            </template>
+            <template v-else>
+              <label class="track-sam2-field">
+                <span>Backward end frame</span>
+                <input
+                  v-model.number="trackWithSam2Form.backwardEndFrameIndex"
+                  :max="imageFrameIndex()"
+                  :min="firstJobFrameIndex()"
+                  type="number"
+                />
+              </label>
+              <label class="track-sam2-field">
+                <span>Forward end frame</span>
+                <input
+                  v-model.number="trackWithSam2Form.forwardEndFrameIndex"
+                  :max="lastJobFrameIndex()"
+                  :min="imageFrameIndex()"
+                  type="number"
+                />
+              </label>
+            </template>
+          </section>
+
+          <section class="track-sam2-section">
+            <h3>Review interval</h3>
+            <label class="track-sam2-field">
+              <span>Review every N frames</span>
+              <input v-model.number="trackWithSam2Form.reviewInterval" max="1000" min="1" type="number" />
+            </label>
+            <p class="track-sam2-help">
+              Recommended: review every 10–20 frames. If tracking drifts, correct the mask on an intermediate frame and continue tracking from there.
+            </p>
+          </section>
+
+          <section class="track-sam2-section">
+            <h3>Output mode</h3>
+            <label class="track-sam2-radio">
+              <input v-model="trackWithSam2Form.outputMode" type="radio" value="preview_first" />
+              <span>Preview first, then accept</span>
+            </label>
+            <label class="track-sam2-radio">
+              <input v-model="trackWithSam2Form.outputMode" type="radio" value="direct_create" />
+              <span>Directly create annotations</span>
+            </label>
+            <p v-if="trackWithSam2Form.outputMode === 'direct_create'" class="track-sam2-help">
+              Direct mode will create annotations and save them automatically. Use Preview mode if you want to review or fix tracking results before saving.
+            </p>
+          </section>
+
+          <section class="track-sam2-section">
+            <h3>Existing annotations</h3>
+            <label class="track-sam2-radio">
+              <input v-model="trackWithSam2Form.existingAnnotationPolicy" type="radio" value="skip_same_label" />
+              <span>Skip frames that already have this label</span>
+            </label>
+            <label class="track-sam2-radio">
+              <input v-model="trackWithSam2Form.existingAnnotationPolicy" type="radio" value="replace_same_label" />
+              <span>Replace existing annotations with same label</span>
+            </label>
+            <label class="track-sam2-radio">
+              <input v-model="trackWithSam2Form.existingAnnotationPolicy" type="radio" value="append" />
+              <span>Append as new annotations</span>
+            </label>
+          </section>
+        </div>
+
+        <footer class="track-sam2-modal-footer">
+          <el-button :disabled="trackingWithSam2" @click="closeTrackWithSam2Dialog">Cancel</el-button>
+          <el-button type="primary" :loading="trackingWithSam2" @click="startTrackWithSam2">
+            Start Tracking
+          </el-button>
+        </footer>
+      </section>
+    </div>
+
+    <div v-if="trackingReviewDialogVisible && trackingPreviewState" class="app-modal-backdrop" @click.self="closeTrackingReviewDialog">
+      <section class="app-modal tracking-review-modal" @click.stop>
+        <header class="track-sam2-modal-header">
+          <div>
+            <p class="eyebrow">Tracking workflow</p>
+            <h2>Tracking Review</h2>
+            <span>Review frames, jump to drift points, and accept only the tracking results you trust.</span>
+          </div>
+          <el-button :disabled="acceptingTrackingPreview" @click="closeTrackingReviewDialog">Close</el-button>
+        </header>
+
+        <div class="track-sam2-modal-body tracking-review-modal-body">
+          <section class="tracking-review-summary">
+            <div class="tracking-review-summary-card">
+              <strong>Frames processed</strong>
+              <span>{{ trackingPreviewProcessedCount }}</span>
+            </div>
+            <div class="tracking-review-summary-card">
+              <strong>Pending</strong>
+              <span>{{ trackingPreviewPendingCount }}</span>
+            </div>
+            <div class="tracking-review-summary-card">
+              <strong>Accepted</strong>
+              <span>{{ trackingPreviewAcceptedCount }}</span>
+            </div>
+            <div class="tracking-review-summary-card">
+              <strong>Rejected</strong>
+              <span>{{ trackingPreviewRejectedCount }}</span>
+            </div>
+            <div class="tracking-review-summary-card">
+              <strong>Needs fix</strong>
+              <span>{{ trackingPreviewNeedsFixCount }}</span>
+            </div>
+            <div class="tracking-review-summary-card">
+              <strong>Failed</strong>
+              <span>{{ trackingPreviewFailedCount }}</span>
+            </div>
+          </section>
+
+          <section class="track-sam2-section">
+            <h3>Accept selected range</h3>
+            <div class="tracking-review-range">
+              <label class="track-sam2-field">
+                <span>Start frame</span>
+                <input
+                  v-model.number="trackingReviewRangeStart"
+                  :max="trackingPreviewState.endFrameIndex"
+                  :min="trackingPreviewState.startFrameIndex"
+                  type="number"
+                />
+              </label>
+              <label class="track-sam2-field">
+                <span>End frame</span>
+                <input
+                  v-model.number="trackingReviewRangeEnd"
+                  :max="trackingPreviewState.endFrameIndex"
+                  :min="trackingPreviewState.startFrameIndex"
+                  type="number"
+                />
+              </label>
+              <el-button :disabled="acceptingTrackingPreview" @click="acceptTrackingRange">
+                Accept Range
+              </el-button>
+            </div>
+            <p class="track-sam2-help">
+              Recommended workflow: review every 10–20 frames. If drift is visible, mark that frame as needs fix, correct the polygon there, then run Track with SAM2 again from the corrected frame.
+            </p>
+          </section>
+
+          <section class="track-sam2-section">
+            <h3>Tracking results</h3>
+            <div class="tracking-review-table-scroll">
+              <div class="tracking-review-table">
+                <div class="tracking-review-row tracking-review-row-head">
+                  <span>Frame</span>
+                  <span>Filename</span>
+                  <span>Direction</span>
+                  <span>Status</span>
+                  <span>Review</span>
+                  <span>Action</span>
+                </div>
+                <div
+                  v-for="result in trackingPreviewState.results"
+                  :key="result.image_id"
+                  class="tracking-review-row"
+                  :class="[
+                    `tracking-review-row-status-${result.status}`,
+                    `tracking-review-row-review-${result.review_status}`,
+                    { committed: result.committed },
+                  ]"
+                >
+                  <span>
+                    {{ result.frame_index }}
+                    <span v-if="isTrackingReviewFrame(result.frame_index)" class="tracking-review-tag review">Review</span>
+                  </span>
+                  <span>{{ result.filename }}</span>
+                  <span>{{ formatPropagationDirection(result.propagation_direction) }}</span>
+                  <span>
+                    <span class="tracking-review-tag" :class="result.status">{{ result.status }}</span>
+                  </span>
+                  <span>
+                    <span class="tracking-review-tag" :class="result.review_status">{{ result.review_status }}</span>
+                    <span v-if="result.committed" class="tracking-review-tag committed">saved</span>
+                  </span>
+                  <span class="tracking-review-actions">
+                    <el-button size="small" @click="goToTrackingFrame(result.image_id)">Go</el-button>
+                  <el-button
+                    size="small"
+                    :disabled="result.status !== 'tracked' || !canAcceptTrackingResult(result)"
+                    @click="acceptTrackingFrame(result.image_id)"
+                  >
+                    Accept
+                  </el-button>
+                    <el-button
+                      size="small"
+                      :disabled="result.status !== 'tracked' || result.committed"
+                      @click="rejectTrackingFrame(result.image_id)"
+                    >
+                      Reject
+                    </el-button>
+                    <el-button
+                      size="small"
+                      :disabled="result.status !== 'tracked' || result.committed"
+                      @click="markTrackingFrameNeedsFix(result.image_id)"
+                    >
+                      Needs Fix
+                    </el-button>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <footer class="track-sam2-modal-footer tracking-review-modal-footer">
+          <el-button :disabled="acceptingTrackingPreview" @click="closeTrackingReviewDialog">Close</el-button>
+          <el-button :disabled="acceptingTrackingPreview" @click="acceptReviewedTrackingFrames">
+            Accept Reviewed
+          </el-button>
+          <el-button type="primary" :loading="acceptingTrackingPreview" @click="acceptTrackingPreview">
+            Accept All
+          </el-button>
+        </footer>
+      </section>
+    </div>
 
     <div v-if="labelManagerVisible" class="app-modal-backdrop" @click.self="closeLabelManager">
       <section class="app-modal label-management-modal" @click.stop>
@@ -1330,60 +3558,126 @@ function isTextEntryTarget(target: EventTarget | null) {
         </header>
 
         <div v-loading="labelManagerLoading" class="label-management-modal-body">
-          <div class="label-management-table">
-            <div class="label-management-row label-management-row-head">
-              <span>Color</span>
-              <span>Name</span>
-              <span>Shape</span>
-              <span>Used</span>
-              <span>Actions</span>
+          <section class="label-management-section">
+            <div class="label-management-section-header">
+              <h3>Object annotation labels</h3>
+              <span>Polygon, rectangle, and point labels used on the canvas.</span>
             </div>
+            <div class="label-management-table">
+              <div class="label-management-row label-management-row-head">
+                <span>Color</span>
+                <span>Name</span>
+                <span>Shape</span>
+                <span>Used</span>
+                <span>Actions</span>
+              </div>
 
-            <div v-for="label in labelDrafts" :key="label.id" class="label-management-row">
-              <input v-model="label.color" class="label-management-color" type="color" />
-              <input
-                v-model="label.name"
-                class="label-management-name"
-                :disabled="isUndefinedLabel(label)"
-                type="text"
-              />
-              <select v-model="label.shape_type" class="label-management-shape">
-                <option value="polygon">polygon</option>
-                <option value="rectangle">rectangle</option>
-                <option value="point">point</option>
-              </select>
-              <span class="label-management-used">{{ label.annotation_count }}</span>
-              <div class="label-management-actions">
-                <el-button size="small" :loading="labelActionLoading" @click="saveManagedLabel(label)">
-                  Save
-                </el-button>
-                <el-button
-                  size="small"
-                  text
-                  type="danger"
-                  :loading="labelActionLoading"
-                  @click="requestDeleteManagedLabel(label)"
-                >
-                  Delete
-                </el-button>
+              <div v-for="label in objectLabelDrafts" :key="label.id" class="label-management-row">
+                <input v-model="label.color" class="label-management-color" type="color" />
+                <input
+                  v-model="label.name"
+                  class="label-management-name"
+                  :disabled="isUndefinedLabel(label)"
+                  type="text"
+                />
+                <select v-model="label.shape_type" class="label-management-shape">
+                  <option value="polygon">polygon</option>
+                  <option value="rectangle">rectangle</option>
+                  <option value="point">point</option>
+                </select>
+                <span class="label-management-used">{{ labelUsedCount(label) }}</span>
+                <div class="label-management-actions">
+                  <el-button size="small" :loading="labelActionLoading" @click="saveManagedLabel(label)">
+                    Save
+                  </el-button>
+                  <el-button
+                    size="small"
+                    text
+                    type="danger"
+                    :loading="labelActionLoading"
+                    @click="requestDeleteManagedLabel(label)"
+                  >
+                    Delete
+                  </el-button>
+                </div>
+              </div>
+
+              <div v-if="objectLabelDrafts.length === 0" class="label-management-empty">
+                No object annotation labels yet.
               </div>
             </div>
+          </section>
 
-            <div v-if="labelDrafts.length === 0" class="label-management-empty">
-              No labels yet. Add a label before creating annotations.
+          <section class="label-management-section">
+            <div class="label-management-section-header">
+              <h3>Image classification labels</h3>
+              <span>Whole-image classes used by the classify tool.</span>
             </div>
-          </div>
+            <div class="label-management-table">
+              <div class="label-management-row label-management-row-head">
+                <span>Color</span>
+                <span>Name</span>
+                <span>Type</span>
+                <span>Used</span>
+                <span>Actions</span>
+              </div>
+
+              <div v-for="label in classificationLabelDrafts" :key="label.id" class="label-management-row">
+                <input v-model="label.color" class="label-management-color" type="color" />
+                <input
+                  v-model="label.name"
+                  class="label-management-name"
+                  type="text"
+                />
+                <input class="label-management-shape" disabled type="text" value="classification" />
+                <span class="label-management-used">{{ labelUsedCount(label) }}</span>
+                <div class="label-management-actions">
+                  <el-button size="small" :loading="labelActionLoading" @click="saveManagedLabel(label)">
+                    Save
+                  </el-button>
+                  <el-button
+                    size="small"
+                    text
+                    type="danger"
+                    :loading="labelActionLoading"
+                    @click="requestDeleteManagedLabel(label)"
+                  >
+                    Delete
+                  </el-button>
+                </div>
+              </div>
+
+              <div v-if="classificationLabelDrafts.length === 0" class="label-management-empty">
+                No image classification labels yet.
+              </div>
+            </div>
+          </section>
 
           <section class="label-management-add">
             <h3>Add Label</h3>
-            <div class="label-management-add-row">
+            <div class="label-management-add-row label-management-add-row-extended">
               <input v-model="newLabelColor" class="label-management-color" type="color" />
               <input v-model="newLabelName" class="label-management-name" placeholder="Label name" type="text" />
-              <select v-model="newLabelShapeType" class="label-management-shape">
+              <select v-model="newLabelKind" class="label-management-shape">
+                <option value="object_annotation">Object annotation</option>
+                <option value="image_classification">Image classification</option>
+              </select>
+              <select
+                v-if="newLabelKind === 'object_annotation'"
+                v-model="newLabelShapeType"
+                class="label-management-shape"
+              >
                 <option value="polygon">polygon</option>
                 <option value="rectangle">rectangle</option>
                 <option value="point">point</option>
               </select>
+              <input
+                v-else
+                class="label-management-shape"
+                disabled
+                type="text"
+                value="classification"
+              />
               <el-button type="primary" :loading="labelActionLoading" @click="addManagedLabel">
                 Add Label
               </el-button>
@@ -1448,7 +3742,7 @@ function isTextEntryTarget(target: EventTarget | null) {
               placeholder="Select target label"
             >
               <el-option
-                v-for="label in labelDrafts.filter((item) => item.id !== pendingDeleteLabel?.id)"
+                v-for="label in compatibleReassignLabelOptions(pendingDeleteLabel)"
                 :key="label.id"
                 :label="label.name"
                 :value="label.id"

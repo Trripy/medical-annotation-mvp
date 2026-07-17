@@ -154,41 +154,98 @@ class Sam2Service:
         if not point_coords and box is None:
             raise Sam2PredictionError("At least one point or one box prompt is required")
 
-        try:
-            import cv2
-            import numpy as np
-        except Exception as exc:  # pragma: no cover - depends on optional runtime deps
-            raise Sam2UnavailableError(f"SAM2 post-processing dependencies are not available: {exc}") from exc
-
-        image_file = Path(image_path)
-        if not image_file.is_file():
-            raise Sam2PredictionError("Image file not found")
-
-        with PILImage.open(image_file) as image:
-            image_array = np.array(image.convert("RGB"))
+        cv2, np = self._load_post_processing_dependencies()
+        image_array = self._load_image_array(image_path, np)
 
         point_coords_array = np.array(point_coords, dtype=np.float32) if point_coords else None
         point_labels_array = np.array(point_labels, dtype=np.int32) if point_labels else None
         box_array = np.array(box, dtype=np.float32) if box is not None else None
 
-        with self._lock:
-            with self._torch.inference_mode():
-                with self._autocast_context():
-                    self._predictor.set_image(image_array)
-                    masks, scores, _ = self._predictor.predict(
-                        point_coords=point_coords_array,
-                        point_labels=point_labels_array,
-                        box=box_array,
-                        multimask_output=multimask_output,
-                        return_logits=True,
-                    )
+        masks, scores = self._run_predictor(
+            image_array=image_array,
+            point_coords_array=point_coords_array,
+            point_labels_array=point_labels_array,
+            box_array=box_array,
+            mask_input=None,
+            multimask_output=multimask_output,
+        )
+        score, points, num_contours, mask_area = self._build_prediction_result(
+            masks=masks,
+            scores=scores,
+            candidate=candidate,
+            polygon_epsilon=polygon_epsilon,
+            min_mask_area=min_mask_area,
+            mask_threshold=mask_threshold,
+            max_hole_area=max_hole_area,
+            cv2=cv2,
+            np=np,
+        )
+        return Sam2PredictionResult(
+            points=points,
+            score=score,
+            model_name=self._active_model_name or model_name,
+            candidate=candidate,
+            polygon_epsilon=polygon_epsilon,
+            mask_threshold=mask_threshold,
+            max_hole_area=max_hole_area,
+            num_contours=num_contours,
+            mask_area=mask_area,
+        )
 
-        best_index = self._select_candidate_index(scores, candidate, np)
-        mask_logits = masks[best_index]
-        mask = mask_logits > mask_threshold
-        mask = self._fill_small_holes(mask, cv2, np, max_hole_area)
-        score = float(scores[best_index])
-        points, num_contours, mask_area = self._mask_to_polygon(mask, cv2, np, polygon_epsilon, min_mask_area)
+    def refine_polygon(
+        self,
+        image_path: str,
+        model_name: str,
+        polygon_points: list[list[float]],
+        multimask_output: bool,
+        candidate: str,
+        polygon_epsilon: float,
+        min_mask_area: float,
+        mask_threshold: float,
+        max_hole_area: float,
+    ) -> Sam2PredictionResult:
+        self.load(model_name)
+        if not self.ready:
+            raise Sam2UnavailableError(self.load_error or "SAM2 model is not loaded")
+
+        if len(polygon_points) < 3:
+            raise Sam2PredictionError("Polygon must have at least 3 points.")
+
+        cv2, np = self._load_post_processing_dependencies()
+        image_array = self._load_image_array(image_path, np)
+        height, width = image_array.shape[:2]
+        rough_mask = self._rasterize_polygon_mask(
+            polygon_points,
+            width=width,
+            height=height,
+            cv2=cv2,
+            np=np,
+        )
+        if float(rough_mask.sum()) <= 0:
+            raise Sam2PredictionError("Cannot refine selected polygon with SAM2.")
+
+        mask_input = self._build_mask_input_from_binary_mask(rough_mask, np, cv2)
+        masks, scores = self._run_predictor(
+            image_array=image_array,
+            point_coords_array=None,
+            point_labels_array=None,
+            box_array=None,
+            mask_input=mask_input,
+            multimask_output=multimask_output,
+            force_sam_refinement=True,
+        )
+        score, points, num_contours, mask_area = self._build_prediction_result(
+            masks=masks,
+            scores=scores,
+            candidate=candidate,
+            polygon_epsilon=polygon_epsilon,
+            min_mask_area=min_mask_area,
+            mask_threshold=mask_threshold,
+            max_hole_area=max_hole_area,
+            cv2=cv2,
+            np=np,
+            fallback_to_best_candidate=True,
+        )
         return Sam2PredictionResult(
             points=points,
             score=score,
@@ -236,6 +293,28 @@ class Sam2Service:
             points.append([x, y])
         return points, len(usable_contours), mask_area
 
+    def _build_prediction_result(
+        self,
+        *,
+        masks: Any,
+        scores: Any,
+        candidate: str,
+        polygon_epsilon: float,
+        min_mask_area: float,
+        mask_threshold: float,
+        max_hole_area: float,
+        cv2: Any,
+        np: Any,
+        fallback_to_best_candidate: bool = False,
+    ) -> tuple[float, list[list[float]], int, float]:
+        best_index = self._select_candidate_index(scores, candidate, np, fallback_to_best=fallback_to_best_candidate)
+        mask_logits = masks[best_index]
+        mask = mask_logits > mask_threshold
+        mask = self._fill_small_holes(mask, cv2, np, max_hole_area)
+        score = float(scores[best_index])
+        points, num_contours, mask_area = self._mask_to_polygon(mask, cv2, np, polygon_epsilon, min_mask_area)
+        return score, points, num_contours, mask_area
+
     def _fill_small_holes(self, mask: Any, cv2: Any, np: Any, max_hole_area: float) -> Any:
         if max_hole_area <= 0:
             return mask
@@ -257,14 +336,132 @@ class Sam2Service:
 
         return mask_uint8.astype(bool)
 
-    def _select_candidate_index(self, scores: Any, candidate: str, np: Any) -> int:
+    def _select_candidate_index(self, scores: Any, candidate: str, np: Any, *, fallback_to_best: bool = False) -> int:
         if candidate == "best":
             return int(np.argmax(scores))
 
         index = int(candidate)
         if index < 0 or index >= len(scores):
+            if fallback_to_best:
+                return int(np.argmax(scores))
             raise Sam2PredictionError(f"SAM2 candidate {index} is not available")
         return index
+
+    def _load_post_processing_dependencies(self) -> tuple[Any, Any]:
+        try:
+            import cv2
+            import numpy as np
+        except Exception as exc:  # pragma: no cover - depends on optional runtime deps
+            raise Sam2UnavailableError(f"SAM2 post-processing dependencies are not available: {exc}") from exc
+        return cv2, np
+
+    def _load_image_array(self, image_path: str, np: Any) -> Any:
+        image_file = Path(image_path)
+        if not image_file.is_file():
+            raise Sam2PredictionError("Image file not found")
+
+        with PILImage.open(image_file) as image:
+            return np.array(image.convert("RGB"))
+
+    def _run_predictor(
+        self,
+        *,
+        image_array: Any,
+        point_coords_array: Any,
+        point_labels_array: Any,
+        box_array: Any,
+        mask_input: Any,
+        multimask_output: bool,
+        force_sam_refinement: bool = False,
+    ) -> tuple[Any, Any]:
+        with self._lock:
+            with self._torch.inference_mode():
+                with self._autocast_context():
+                    self._predictor.set_image(image_array)
+                    use_mask_input_as_output_without_sam = getattr(
+                        self._predictor.model,
+                        "use_mask_input_as_output_without_sam",
+                        None,
+                    )
+                    if force_sam_refinement and use_mask_input_as_output_without_sam is not None:
+                        self._predictor.model.use_mask_input_as_output_without_sam = False
+                    try:
+                        masks, scores, _ = self._predictor.predict(
+                            point_coords=point_coords_array,
+                            point_labels=point_labels_array,
+                            box=box_array,
+                            mask_input=mask_input,
+                            multimask_output=multimask_output,
+                            return_logits=True,
+                        )
+                    finally:
+                        if force_sam_refinement and use_mask_input_as_output_without_sam is not None:
+                            self._predictor.model.use_mask_input_as_output_without_sam = use_mask_input_as_output_without_sam
+
+        return masks, scores
+
+    def _rasterize_polygon_mask(
+        self,
+        points: list[list[float]],
+        *,
+        width: int,
+        height: int,
+        cv2: Any,
+        np: Any,
+    ) -> Any:
+        if width <= 0 or height <= 0:
+            raise Sam2PredictionError("Image dimensions are invalid for SAM2 refinement.")
+
+        mask = np.zeros((height, width), dtype=np.uint8)
+        normalized_points = []
+        for point in points:
+            if len(point) != 2:
+                continue
+            x = int(round(float(point[0])))
+            y = int(round(float(point[1])))
+            normalized_points.append([
+                max(0, min(width - 1, x)),
+                max(0, min(height - 1, y)),
+            ])
+
+        if len(normalized_points) < 3:
+            raise Sam2PredictionError("Polygon must have at least 3 points.")
+
+        polygon = np.asarray(normalized_points, dtype=np.float32)
+        if cv2.contourArea(polygon) <= 0:
+            raise Sam2PredictionError("Polygon must enclose a non-zero area.")
+
+        cv2.fillPoly(mask, [polygon.astype(np.int32)], 1)
+        return mask
+
+    def _build_mask_input_from_binary_mask(self, mask: Any, np: Any, cv2: Any) -> Any:
+        target_height, target_width = self._get_mask_input_size()
+        rough_mask = mask.astype(np.float32, copy=False)
+        if rough_mask.shape != (target_height, target_width):
+            interpolation = (
+                cv2.INTER_AREA
+                if target_height <= rough_mask.shape[0] and target_width <= rough_mask.shape[1]
+                else cv2.INTER_LINEAR
+            )
+            rough_mask = cv2.resize(
+                rough_mask,
+                (target_width, target_height),
+                interpolation=interpolation,
+            )
+        rough_mask = np.clip(rough_mask, 0.0, 1.0).astype(np.float32, copy=False)
+        return rough_mask[None, :, :] * 20.0 - 10.0
+
+    def _get_mask_input_size(self) -> tuple[int, int]:
+        prompt_encoder = getattr(getattr(self._predictor, "model", None), "sam_prompt_encoder", None)
+        mask_input_size = getattr(prompt_encoder, "mask_input_size", None)
+        if (
+            isinstance(mask_input_size, (list, tuple))
+            and len(mask_input_size) == 2
+            and int(mask_input_size[0]) > 0
+            and int(mask_input_size[1]) > 0
+        ):
+            return int(mask_input_size[0]), int(mask_input_size[1])
+        return (256, 256)
 
     def _select_autocast_dtype(self, torch: Any) -> str:
         if self._device != "cuda":

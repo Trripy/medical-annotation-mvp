@@ -2,6 +2,9 @@ import { defineStore } from 'pinia'
 
 import { apiUrl } from '../utils/api'
 
+export const MAX_JOB_UPLOAD_FILES = 5000
+export const JOB_UPLOAD_FILE_LIMIT_MESSAGE = `Too many files. Maximum number of files is ${MAX_JOB_UPLOAD_FILES}.`
+
 export type DatasetUploadResult = {
   project_id: number
   id: number
@@ -94,6 +97,12 @@ export const useDatasetsStore = defineStore('datasets', {
     }) {
       this.uploading = true
       this.error = ''
+
+      if (payload.files.length > MAX_JOB_UPLOAD_FILES) {
+        this.error = JOB_UPLOAD_FILE_LIMIT_MESSAGE
+        this.uploading = false
+        return null
+      }
 
       const formData = new FormData()
       formData.append('project_id', String(payload.projectId))

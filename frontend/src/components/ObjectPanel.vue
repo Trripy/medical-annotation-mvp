@@ -11,6 +11,8 @@ const props = defineProps<{
   labels: Label[]
   selectedAnnotationId: number | string | null
   hiddenAnnotationIds: Array<number | string>
+  sam2Refining: boolean
+  sam2Tracking: boolean
 }>()
 
 const emit = defineEmits<{
@@ -19,6 +21,8 @@ const emit = defineEmits<{
   toggleVisibility: [id: number | string]
   updateAnnotationLabel: [id: number | string, labelId: number]
   createLayerAbove: [id: number | string]
+  refineSelectedPolygon: [id: number | string]
+  trackWithSam2: [id: number | string]
   showAll: []
   hideAll: []
   updatePolygonSmoothing: [id: number | string, value: number]
@@ -29,10 +33,13 @@ const emit = defineEmits<{
 const cardRefs = ref(new Map<number | string, HTMLElement>())
 const polygonSmoothingValue = ref(0)
 
-const objectCount = computed(() => props.annotations.length)
-const hiddenCount = computed(() => props.annotations.filter((annotation) => isHidden(annotation.id)).length)
+const objectAnnotations = computed(() =>
+  props.annotations.filter((annotation) => !isClassificationAnnotation(annotation)),
+)
+const objectCount = computed(() => objectAnnotations.value.length)
+const hiddenCount = computed(() => objectAnnotations.value.filter((annotation) => isHidden(annotation.id)).length)
 const selectedAnnotation = computed(() =>
-  props.annotations.find((annotation) => annotation.id === props.selectedAnnotationId) ?? null,
+  objectAnnotations.value.find((annotation) => annotation.id === props.selectedAnnotationId) ?? null,
 )
 const selectedPolygonAnnotation = computed(() =>
   selectedAnnotation.value?.shape_type === 'polygon' ? selectedAnnotation.value : null,
@@ -60,6 +67,10 @@ watch(
 
 function labelFor(labelId: number): Label | undefined {
   return props.labels.find((label) => label.id === labelId)
+}
+
+function isClassificationAnnotation(annotation: AnnotationObject): boolean {
+  return annotation.shape_type === 'classification' || annotation.attributes?.classification === true
 }
 
 function isHidden(id: number | string): boolean {
@@ -104,50 +115,83 @@ function commitSmoothing(value: number | null) {
         <h2>Objects {{ objectCount }}</h2>
       </div>
       <div class="objects-panel-bulk-actions">
-        <el-button size="small" :disabled="annotations.length === 0 || hiddenCount === 0" @click="emit('showAll')">
+        <el-button size="small" :disabled="objectAnnotations.length === 0 || hiddenCount === 0" @click="emit('showAll')">
           Show All
         </el-button>
-        <el-button size="small" :disabled="annotations.length === 0 || hiddenCount === annotations.length" @click="emit('hideAll')">
+        <el-button size="small" :disabled="objectAnnotations.length === 0 || hiddenCount === objectAnnotations.length" @click="emit('hideAll')">
           Hide All
         </el-button>
       </div>
     </header>
 
     <section class="objects-list">
-      <section v-if="selectedPolygonAnnotation" class="object-smoothing-panel">
+      <section class="object-smoothing-panel">
         <div class="object-smoothing-header">
           <div>
             <p class="panel-label">Polygon smoothing</p>
-            <h3>Selected polygon</h3>
+            <h3>{{ selectedPolygonAnnotation ? 'Selected polygon' : 'Select a polygon' }}</h3>
           </div>
-          <el-button size="small" text @click="emit('resetPolygonSmoothing', selectedPolygonAnnotation.id)">
+          <el-button
+            size="small"
+            text
+            :disabled="!selectedPolygonAnnotation"
+            @click="selectedPolygonAnnotation && emit('resetPolygonSmoothing', selectedPolygonAnnotation.id)"
+          >
             Reset to original
           </el-button>
         </div>
-        <div class="object-smoothing-scale">
-          <span>Fine outline</span>
-          <span>Coarse outline</span>
-        </div>
-        <el-slider
-          :model-value="polygonSmoothingValue"
-          :min="0"
-          :max="100"
-          :step="1"
-          @input="updateSmoothing"
-          @change="commitSmoothing"
-        />
+        <template v-if="selectedPolygonAnnotation">
+          <div class="object-smoothing-scale">
+            <span>Fine outline</span>
+            <span>Coarse outline</span>
+          </div>
+          <el-slider
+            :model-value="polygonSmoothingValue"
+            :min="0"
+            :max="100"
+            :step="1"
+            @input="updateSmoothing"
+            @change="commitSmoothing"
+          />
+        </template>
+        <p v-else class="object-smoothing-empty">
+          Only polygon annotations can use smoothing, Create layer above, Refine with SAM2, and Track with SAM2.
+        </p>
         <el-button
           size="small"
           type="primary"
           plain
-          @click="emit('createLayerAbove', selectedPolygonAnnotation.id)"
+          :disabled="!selectedPolygonAnnotation"
+          @click="selectedPolygonAnnotation && emit('createLayerAbove', selectedPolygonAnnotation.id)"
         >
           Create layer above
+        </el-button>
+        <el-button
+          size="small"
+          type="primary"
+          plain
+          :loading="sam2Refining"
+          :disabled="!selectedPolygonAnnotation || sam2Refining"
+          :title="selectedPolygonAnnotation ? '' : 'Only polygon annotations can be refined with SAM2.'"
+          @click="selectedPolygonAnnotation && emit('refineSelectedPolygon', selectedPolygonAnnotation.id)"
+        >
+          Refine with SAM2
+        </el-button>
+        <el-button
+          size="small"
+          type="primary"
+          plain
+          :loading="sam2Tracking"
+          :disabled="!selectedPolygonAnnotation || sam2Tracking || sam2Refining"
+          :title="selectedPolygonAnnotation ? '' : 'Select a polygon annotation to track it through frames with SAM2.'"
+          @click="selectedPolygonAnnotation && emit('trackWithSam2', selectedPolygonAnnotation.id)"
+        >
+          Track with SAM2
         </el-button>
       </section>
 
       <article
-        v-for="(annotation, index) in annotations"
+        v-for="(annotation, index) in objectAnnotations"
         :key="annotation.id"
         :ref="(element) => setCardRef(annotation.id, element)"
         class="object-card"
@@ -190,7 +234,7 @@ function commitSmoothing(value: number | null) {
         </div>
       </article>
 
-      <div v-if="annotations.length === 0" class="objects-empty">
+      <div v-if="objectAnnotations.length === 0" class="objects-empty">
         No annotations on this image.
       </div>
     </section>

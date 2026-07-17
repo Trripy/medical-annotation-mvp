@@ -6,7 +6,12 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import AppSidebar from '../components/AppSidebar.vue'
-import { useDatasetsStore, type JobLabelInput } from '../stores/datasets'
+import {
+  JOB_UPLOAD_FILE_LIMIT_MESSAGE,
+  MAX_JOB_UPLOAD_FILES,
+  useDatasetsStore,
+  type JobLabelInput,
+} from '../stores/datasets'
 
 const router = useRouter()
 const datasetsStore = useDatasetsStore()
@@ -52,12 +57,28 @@ onMounted(async () => {
 
 function onImageFilesSelected(event: Event) {
   const input = event.target as HTMLInputElement
-  imageFiles.value = filterImageFiles(Array.from(input.files ?? []))
+  const nextImageFiles = filterImageFiles(Array.from(input.files ?? []))
+
+  if (!canApplySelectedFiles(nextImageFiles, folderFiles.value)) {
+    input.value = ''
+    return
+  }
+
+  imageFiles.value = nextImageFiles
+  input.value = ''
 }
 
 function onFolderSelected(event: Event) {
   const input = event.target as HTMLInputElement
-  folderFiles.value = filterImageFiles(Array.from(input.files ?? []))
+  const nextFolderFiles = filterImageFiles(Array.from(input.files ?? []))
+
+  if (!canApplySelectedFiles(imageFiles.value, nextFolderFiles)) {
+    input.value = ''
+    return
+  }
+
+  folderFiles.value = nextFolderFiles
+  input.value = ''
 }
 
 function filterImageFiles(files: File[]): File[] {
@@ -97,6 +118,17 @@ function dedupeFiles(files: File[]): File[] {
 
 function sortFiles(files: File[]): File[] {
   return [...files].sort((left, right) => naturalCompare(displayPath(left), displayPath(right)))
+}
+
+function canApplySelectedFiles(nextImageFiles: File[], nextFolderFiles: File[]): boolean {
+  const nextSelectedFiles = dedupeFiles([...nextImageFiles, ...nextFolderFiles])
+
+  if (nextSelectedFiles.length > MAX_JOB_UPLOAD_FILES) {
+    ElMessage.error(JOB_UPLOAD_FILE_LIMIT_MESSAGE)
+    return false
+  }
+
+  return true
 }
 
 function displayPath(file: File): string {
@@ -173,6 +205,10 @@ async function createJob() {
 
   if (selectedFiles.value.length === 0) {
     ElMessage.warning('At least one image is required')
+    return
+  }
+  if (selectedFiles.value.length > MAX_JOB_UPLOAD_FILES) {
+    ElMessage.warning(JOB_UPLOAD_FILE_LIMIT_MESSAGE)
     return
   }
 

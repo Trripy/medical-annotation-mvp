@@ -52,7 +52,11 @@ def _build_labelme_json(image: Image, annotations: list[Annotation]) -> dict:
     return {
         "version": "5.0.0",
         "flags": {},
-        "shapes": [_build_shape(annotation) for annotation in annotations],
+        "shapes": [
+            _build_shape(annotation)
+            for annotation in annotations
+            if annotation.shape_type != "classification"
+        ],
         "imagePath": image.filename,
         "imageData": None,
         "imageHeight": image.height,

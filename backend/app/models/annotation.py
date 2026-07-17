@@ -19,7 +19,7 @@ class Annotation(Base):
     __tablename__ = "annotations"
     __table_args__ = (
         CheckConstraint(
-            "shape_type IN ('rectangle', 'polygon', 'point')",
+            "shape_type IN ('rectangle', 'polygon', 'point', 'classification')",
             name="ck_annotations_shape_type",
         ),
     )

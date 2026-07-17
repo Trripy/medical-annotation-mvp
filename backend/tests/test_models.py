@@ -4,7 +4,19 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
-from app.models import Annotation, Image, Job, Label, Project, Task, User
+from app.models import (
+    Annotation,
+    Image,
+    Job,
+    Label,
+    Project,
+    ResearchVideo,
+    ResearchVideoAnnotation,
+    ResearchVideoFrame,
+    ResearchVideoLabel,
+    Task,
+    User,
+)
 
 
 @pytest.fixture()
@@ -25,6 +37,10 @@ def test_metadata_contains_core_tables() -> None:
         "jobs",
         "images",
         "annotations",
+        "research_videos",
+        "research_video_frames",
+        "research_video_labels",
+        "research_video_annotations",
     }.issubset(Base.metadata.tables.keys())
 
 
@@ -83,3 +99,53 @@ def test_annotation_shape_type_is_limited(session: Session) -> None:
 
     with pytest.raises(IntegrityError):
         session.commit()
+
+
+def test_can_create_research_video_frame_label_and_annotation(session: Session) -> None:
+    user = User(username="researcher", email="researcher@example.com")
+    video = ResearchVideo(
+        name="case001",
+        original_filename="case001.mp4",
+        file_path="/tmp/case001.mp4",
+        thumbnail_path="/tmp/case001.jpg",
+        width=320,
+        height=240,
+        fps=30.0,
+        frame_count=2,
+        duration_ms=67,
+        status="ready",
+        created_by=user,
+    )
+    frame = ResearchVideoFrame(
+        video=video,
+        frame_index=0,
+        timestamp_ms=0,
+        filename="000000.jpg",
+        file_path="/tmp/frames/000000.jpg",
+        width=320,
+        height=240,
+    )
+    label = ResearchVideoLabel(
+        video=video,
+        name="layer_up",
+        color="#22c55e",
+        shape_type="polygon",
+        sort_order=0,
+    )
+    annotation = ResearchVideoAnnotation(
+        video=video,
+        frame=frame,
+        frame_index=0,
+        label=label,
+        shape_type="polygon",
+        points=[[10.0, 12.0], [18.0, 12.0], [18.0, 20.0]],
+        visible=True,
+    )
+
+    session.add(annotation)
+    session.commit()
+
+    assert annotation.id is not None
+    assert video.frames == [frame]
+    assert video.labels == [label]
+    assert frame.annotations == [annotation]

@@ -1,10 +1,10 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 Point = list[float]
-ShapeType = Literal["rectangle", "polygon", "point"]
+ShapeType = Literal["rectangle", "polygon", "point", "classification"]
 
 
 class LabelRead(BaseModel):
@@ -41,8 +41,26 @@ class AnnotationRead(BaseModel):
 class AnnotationWrite(BaseModel):
     label_id: int
     shape_type: ShapeType
-    points: list[Point] = Field(min_length=1)
+    points: list[Point] = Field(default_factory=list)
     attributes: dict | None = None
+
+    @model_validator(mode="after")
+    def validate_points_for_shape(self) -> "AnnotationWrite":
+        for index, point in enumerate(self.points):
+            if len(point) < 2:
+                raise ValueError(f"Point at index {index} must contain x and y coordinates")
+
+        minimum_points = {
+            "point": 1,
+            "rectangle": 2,
+            "polygon": 3,
+        }.get(self.shape_type)
+        if minimum_points is not None and len(self.points) < minimum_points:
+            raise ValueError(
+                f"{self.shape_type} annotations require at least {minimum_points} point(s)"
+            )
+
+        return self
 
 
 class AnnotationSaveRequest(BaseModel):

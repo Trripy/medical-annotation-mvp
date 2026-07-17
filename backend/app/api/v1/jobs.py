@@ -9,6 +9,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
+from app.core.upload_limits import MAX_JOB_UPLOAD_FILES, too_many_files_detail
 from app.db.session import get_db
 from app.models import Annotation, Image, Job, Label, Project, Task
 from app.schemas.annotation import (
@@ -98,6 +99,8 @@ def create_job(
 
     if not files:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one image is required")
+    if len(files) > MAX_JOB_UPLOAD_FILES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=too_many_files_detail())
 
     labels = _parse_labels_json(labels_json)
     if not labels:
@@ -631,7 +634,7 @@ def _ensure_job_label_scope(job: Job, db: Session) -> tuple[list[Label], bool]:
 
 
 def _label_to_read(label: Label, job: Job, db: Session) -> JobLabelRead:
-    annotation_count, _ = _label_usage(label, job, db)
+    annotation_count, frame_count = _label_usage(label, job, db)
     return JobLabelRead(
         id=label.id,
         name=label.name,
@@ -639,6 +642,7 @@ def _label_to_read(label: Label, job: Job, db: Session) -> JobLabelRead:
         shape_type=label.shape_type,
         sort_order=label.sort_order,
         annotation_count=annotation_count,
+        frame_count=frame_count,
     )
 
 

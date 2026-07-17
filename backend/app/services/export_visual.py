@@ -127,6 +127,9 @@ def _ordered_annotations(annotations: list[Annotation]) -> list[Annotation]:
 
 
 def _draw_overlay_annotation(draw: ImageDraw.ImageDraw, annotation: Annotation) -> None:
+    if annotation.shape_type == "classification":
+        return
+
     rgb = _hex_to_rgb(annotation.label.color if annotation.label else "#22c55e")
     fill = (*rgb, OVERLAY_ALPHA)
     outline = (*rgb, 255)
@@ -155,6 +158,9 @@ def _draw_overlay_annotation(draw: ImageDraw.ImageDraw, annotation: Annotation) 
 
 
 def _draw_mask_annotation(draw: ImageDraw.ImageDraw, annotation: Annotation, fill: int | tuple[int, int, int]) -> None:
+    if annotation.shape_type == "classification":
+        return
+
     if annotation.shape_type == "polygon":
         points = _points(annotation.points)
         if len(points) >= 3:

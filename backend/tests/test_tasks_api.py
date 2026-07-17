@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from io import BytesIO
 import json
 from pathlib import Path
@@ -7,6 +8,7 @@ from zipfile import ZipFile
 import pytest
 from fastapi import HTTPException, UploadFile
 from PIL import Image as PILImage
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -15,13 +17,15 @@ from app.api.v1 import datasets as datasets_api
 from app.api.v1 import images as images_api
 from app.api.v1 import jobs as jobs_api
 from app.api.v1 import projects as projects_api
+from app.api.v1 import sam2 as sam2_api
 from app.api.v1 import tasks as tasks_api
 from app.core.config import settings
 from app.db.base import Base
-from app.models import Job, Label, Project, User
+from app.models import Image, Job, Label, Project, User
 from app.schemas.annotation import AnnotationSaveRequest
 from app.schemas.job import JobRead
 from app.schemas.project import ProjectCreate
+from app.schemas.sam2 import Sam2RefinePolygonRequest, Sam2TrackVideoRequest
 from app.schemas.task import TaskCreate
 from app.services.download_filenames import (
     build_attachment_content_disposition,
@@ -34,6 +38,13 @@ from app.services.export_visual import (
     build_job_overlay_zip,
 )
 from app.services.labelme_export import build_job_labelme_zip, build_labelme_zip
+from app.services.sam2_service import Sam2PredictionError, Sam2PredictionResult, Sam2Service
+from app.services.sam2_video_service import (
+    Sam2TrackVideoFrameResult,
+    Sam2TrackVideoResult,
+    Sam2VideoFrame,
+    Sam2VideoService,
+)
 
 
 @pytest.fixture()
@@ -78,6 +89,101 @@ def make_png(size: tuple[int, int] = (32, 24)) -> BytesIO:
 
 def make_upload(filename: str, size: tuple[int, int] = (32, 24)) -> UploadFile:
     return UploadFile(file=make_png(size), filename=filename)
+
+
+def build_stubbed_sam2_service(masks, scores) -> tuple[Sam2Service, object]:
+    class FakePredictor:
+        def __init__(self) -> None:
+            self.model = type(
+                "FakeModel",
+                (),
+                {
+                    "use_mask_input_as_output_without_sam": True,
+                    "sam_prompt_encoder": type("FakePromptEncoder", (), {"mask_input_size": (16, 16)})(),
+                },
+            )()
+            self.image_shape = None
+            self.mask_input = None
+            self.force_flag_inside_call = None
+
+        def set_image(self, image_array) -> None:
+            self.image_shape = image_array.shape
+
+        def predict(
+            self,
+            *,
+            point_coords=None,
+            point_labels=None,
+            box=None,
+            mask_input=None,
+            multimask_output=True,
+            return_logits=True,
+        ):
+            self.mask_input = mask_input
+            self.force_flag_inside_call = self.model.use_mask_input_as_output_without_sam
+            return masks, scores, masks
+
+    class FakeTorch:
+        @staticmethod
+        def inference_mode():
+            return nullcontext()
+
+    predictor = FakePredictor()
+    service = Sam2Service()
+    service._predictor = predictor
+    service._torch = FakeTorch()
+    service._device = "cpu"
+    service._dtype = "float32"
+    service._active_model_name = "sam2_hiera_large"
+    service.load_error = None
+    service.load = lambda model_name=None: None  # type: ignore[assignment]
+    return service, predictor
+
+
+def build_stubbed_sam2_video_service(frame_masks) -> tuple[Sam2VideoService, object]:
+    normalized_runs = frame_masks
+    if not frame_masks or not isinstance(frame_masks[0], list):
+        normalized_runs = [frame_masks]
+
+    class FakePredictor:
+        def __init__(self) -> None:
+            self.init_state_path = None
+            self.offload_video_to_cpu = None
+            self.added_mask = None
+            self.frame_files = []
+            self.propagate_calls = 0
+
+        def init_state(self, video_path, offload_video_to_cpu=False):
+            self.init_state_path = video_path
+            self.offload_video_to_cpu = offload_video_to_cpu
+            self.frame_files = sorted(Path(video_path).glob("*.jpg"))
+            return {"video_path": video_path}
+
+        def add_new_mask(self, *, inference_state, frame_idx, obj_id, mask):
+            self.added_mask = mask.detach().cpu().numpy() if hasattr(mask, "detach") else mask
+            return frame_idx, [obj_id], None
+
+        def propagate_in_video(self, inference_state, start_frame_idx=None, max_frame_num_to_track=None, reverse=False):
+            run_index = min(self.propagate_calls, len(normalized_runs) - 1)
+            self.propagate_calls += 1
+            for frame_idx, mask in normalized_runs[run_index]:
+                yield frame_idx, [1], mask
+
+    class FakeTorch:
+        @staticmethod
+        def inference_mode():
+            return nullcontext()
+
+    predictor = FakePredictor()
+    service = Sam2VideoService()
+    service._predictor = predictor
+    service._torch = FakeTorch()
+    service._device = "cpu"
+    service._dtype = "float32"
+    service._active_model_name = "sam2_hiera_large"
+    service.load_error = None
+    service.load = lambda model_name=None: None  # type: ignore[assignment]
+    return service, predictor
 
 
 def test_create_task(db_session: Session) -> None:
@@ -372,6 +478,505 @@ def test_annotated_only_export_without_annotations_returns_error(db_session: Ses
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "No annotated images found in this job."
+
+
+def test_refine_polygon_endpoint_returns_polygon(db_session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    task = tasks_api.create_task(TaskCreate(project_id=1, name="Refine Polygon"), db_session)
+    upload_response = tasks_api.upload_task_data(
+        task.id,
+        files=[make_upload("slice.png", (64, 48))],
+        db=db_session,
+    )
+
+    class FakeSam2Service:
+        def refine_polygon(self, **kwargs):
+            assert kwargs["polygon_points"] == [[5, 5], [30, 6], [28, 30], [6, 28]]
+            return Sam2PredictionResult(
+                points=[[6.0, 6.0], [31.0, 7.0], [29.0, 31.0], [7.0, 29.0]],
+                score=0.95,
+                model_name="sam2_hiera_large",
+                candidate="best",
+                polygon_epsilon=0.002,
+                mask_threshold=0.0,
+                max_hole_area=0.0,
+                num_contours=1,
+                mask_area=432.0,
+            )
+
+    monkeypatch.setattr(sam2_api, "get_sam2_service", lambda: FakeSam2Service())
+
+    response = sam2_api.refine_sam2_polygon(
+        Sam2RefinePolygonRequest(
+            image_id=upload_response.images[0].id,
+            annotation_id=456,
+            points=[[5, 5], [30, 6], [28, 30], [6, 28]],
+        ),
+        db_session,
+    )
+
+    assert response.annotation_id == 456
+    assert response.source == "refine_polygon"
+    assert response.points == [[6.0, 6.0], [31.0, 7.0], [29.0, 31.0], [7.0, 29.0]]
+    assert response.area == 432.0
+
+
+def test_track_video_endpoint_orders_frames_and_returns_results(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = tasks_api.create_task(TaskCreate(project_id=1, name="Track Polygon"), db_session)
+    upload_response = tasks_api.upload_task_data(
+        task.id,
+        files=[
+            make_upload("2.png", (64, 48)),
+            make_upload("0.png", (64, 48)),
+            make_upload("1.png", (64, 48)),
+        ],
+        db=db_session,
+    )
+    images = db_session.query(Image).filter(Image.id.in_([image.id for image in upload_response.images])).all()
+    image_by_filename = {image.filename: image for image in images}
+    image_by_filename["2.png"].frame_index = 5
+    image_by_filename["0.png"].frame_index = 1
+    image_by_filename["1.png"].frame_index = 3
+    db_session.commit()
+    detail = jobs_api.get_job(upload_response.job_id, db_session)
+
+    class FakeSam2VideoService:
+        def track_video(self, **kwargs):
+            frames = kwargs["frames"]
+            assert [frame.filename for frame in frames] == ["0.png", "1.png", "2.png"]
+            assert [frame.frame_index for frame in frames] == [1, 3, 5]
+            return Sam2TrackVideoResult(
+                start_frame_index=1,
+                end_frame_index=5,
+                backward_end_frame_index=None,
+                forward_end_frame_index=5,
+                direction="forward",
+                model_name="sam2_hiera_large",
+                results=[
+                    Sam2TrackVideoFrameResult(
+                        image_id=frames[0].image_id,
+                        frame_index=1,
+                        filename="0.png",
+                        points=[[5.0, 5.0], [20.0, 5.0], [20.0, 20.0], [5.0, 20.0]],
+                        score=None,
+                        area=225.0,
+                        status="source",
+                        propagation_direction="source",
+                    ),
+                    Sam2TrackVideoFrameResult(
+                        image_id=frames[1].image_id,
+                        frame_index=3,
+                        filename="1.png",
+                        points=[[6.0, 6.0], [21.0, 6.0], [21.0, 21.0], [6.0, 21.0]],
+                        score=None,
+                        area=225.0,
+                        status="tracked",
+                        propagation_direction="forward",
+                    ),
+                ],
+                review_frames=[3, 5],
+                warnings=[],
+            )
+
+    monkeypatch.setattr(sam2_api, "get_sam2_video_service", lambda: FakeSam2VideoService())
+
+    response = sam2_api.track_sam2_video(
+        Sam2TrackVideoRequest(
+            job_id=upload_response.job_id,
+            start_image_id=image_by_filename["0.png"].id,
+            start_frame_index=1,
+            annotation_id=123,
+            label_id=detail.labels[0].id,
+            points=[[5, 5], [20, 5], [20, 20], [5, 20]],
+            direction="forward",
+            end_frame_index=21,
+            review_interval=10,
+        ),
+        db_session,
+    )
+
+    assert response.job_id == upload_response.job_id
+    assert response.source_annotation_id == 123
+    assert response.start_frame_index == 1
+    assert response.end_frame_index == 5
+    assert response.direction == "forward"
+    assert response.review_frames == [3, 5]
+    assert response.results[1].status == "tracked"
+    assert response.results[1].points == [[6.0, 6.0], [21.0, 6.0], [21.0, 21.0], [6.0, 21.0]]
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected_score"),
+    [
+        ("best", 0.9),
+        ("0", 0.1),
+        ("1", 0.9),
+        ("2", 0.2),
+    ],
+)
+def test_sam2_service_refine_polygon_selects_requested_candidate(
+    tmp_path: Path,
+    candidate: str,
+    expected_score: float,
+) -> None:
+    import numpy as np
+
+    image_path = tmp_path / "slice.png"
+    PILImage.new("RGB", (32, 24), color=(0, 0, 0)).save(image_path)
+
+    masks = np.zeros((3, 24, 32), dtype=np.float32)
+    masks[0, 4:18, 5:20] = 3.0
+    masks[1, 5:20, 7:24] = 5.0
+    masks[2, 3:16, 10:28] = 4.0
+    scores = np.array([0.1, 0.9, 0.2], dtype=np.float32)
+
+    service, predictor = build_stubbed_sam2_service(masks, scores)
+    result = service.refine_polygon(
+        image_path=str(image_path),
+        model_name="sam2_hiera_large",
+        polygon_points=[[4, 4], [24, 5], [26, 20], [6, 21]],
+        multimask_output=True,
+        candidate=candidate,
+        polygon_epsilon=0.002,
+        min_mask_area=10,
+        mask_threshold=0.0,
+        max_hole_area=0.0,
+    )
+
+    assert predictor.image_shape == (24, 32, 3)
+    assert predictor.mask_input.shape == (1, 16, 16)
+    assert predictor.mask_input.dtype == np.float32
+    assert predictor.force_flag_inside_call is False
+    assert predictor.model.use_mask_input_as_output_without_sam is True
+    assert result.score == pytest.approx(expected_score)
+    assert len(result.points) >= 3
+
+
+def test_sam2_video_service_tracks_forward_frames_and_builds_review_frames(tmp_path: Path) -> None:
+    import numpy as np
+    import torch
+
+    frame0 = tmp_path / "frame0.png"
+    frame1 = tmp_path / "frame1.jpg"
+    frame2 = tmp_path / "frame2.png"
+    PILImage.new("RGB", (32, 24), color=(0, 0, 0)).save(frame0)
+    PILImage.new("RGB", (32, 24), color=(0, 0, 0)).save(frame1)
+    PILImage.new("RGB", (32, 24), color=(0, 0, 0)).save(frame2)
+
+    mask1 = torch.zeros((1, 1, 24, 32), dtype=torch.float32)
+    mask1[0, 0, 5:18, 6:22] = 2.0
+    mask2 = torch.zeros((1, 1, 24, 32), dtype=torch.float32)
+    mask2[0, 0, 6:20, 7:24] = 3.0
+
+    service, predictor = build_stubbed_sam2_video_service(
+        [
+            (0, torch.zeros((1, 1, 24, 32), dtype=torch.float32)),
+            (1, mask1),
+            (2, mask2),
+        ]
+    )
+    result = service.track_video(
+        frames=[
+            Sam2VideoFrame(image_id=1, frame_index=0, filename="frame0.png", file_path=str(frame0), width=32, height=24),
+            Sam2VideoFrame(image_id=2, frame_index=1, filename="frame1.jpg", file_path=str(frame1), width=32, height=24),
+            Sam2VideoFrame(image_id=3, frame_index=2, filename="frame2.png", file_path=str(frame2), width=32, height=24),
+        ],
+        start_image_id=1,
+        start_frame_index=0,
+        polygon_points=[[4, 4], [20, 4], [20, 18], [4, 18]],
+        direction="forward",
+        end_frame_index=2,
+        backward_end_frame_index=None,
+        forward_end_frame_index=None,
+        review_interval=1,
+        model_name="sam2_hiera_large",
+        polygon_epsilon=0.002,
+        min_mask_area=10,
+        mask_threshold=0.0,
+        max_hole_area=0.0,
+    )
+
+    assert predictor.added_mask.shape == (24, 32)
+    assert predictor.added_mask.dtype == np.bool_
+    assert [path.name for path in predictor.frame_files] == ["000000.jpg", "000001.jpg", "000002.jpg"]
+    assert result.start_frame_index == 0
+    assert result.end_frame_index == 2
+    assert result.review_frames == [1, 2]
+    assert [frame.status for frame in result.results] == ["source", "tracked", "tracked"]
+    assert result.results[0].points == [[4.0, 4.0], [20.0, 4.0], [20.0, 18.0], [4.0, 18.0]]
+    assert len(result.results[1].points or []) >= 3
+    assert result.warnings == []
+
+
+def test_sam2_video_service_tracks_backward_frames_using_reversed_sequence(tmp_path: Path) -> None:
+    import torch
+
+    frame0 = tmp_path / "frame0.png"
+    frame1 = tmp_path / "frame1.jpg"
+    frame2 = tmp_path / "frame2.png"
+    PILImage.new("RGB", (32, 24), color=(0, 0, 0)).save(frame0)
+    PILImage.new("RGB", (32, 24), color=(0, 0, 0)).save(frame1)
+    PILImage.new("RGB", (32, 24), color=(0, 0, 0)).save(frame2)
+
+    source_mask = torch.zeros((1, 1, 24, 32), dtype=torch.float32)
+    mask_for_frame1 = torch.zeros((1, 1, 24, 32), dtype=torch.float32)
+    mask_for_frame1[0, 0, 4:12, 4:14] = 2.0
+    mask_for_frame0 = torch.zeros((1, 1, 24, 32), dtype=torch.float32)
+    mask_for_frame0[0, 0, 6:20, 10:26] = 3.0
+
+    service, predictor = build_stubbed_sam2_video_service(
+        [
+            (0, source_mask),
+            (1, mask_for_frame1),
+            (2, mask_for_frame0),
+        ]
+    )
+    result = service.track_video(
+        frames=[
+            Sam2VideoFrame(image_id=1, frame_index=0, filename="frame0.png", file_path=str(frame0), width=32, height=24),
+            Sam2VideoFrame(image_id=2, frame_index=1, filename="frame1.jpg", file_path=str(frame1), width=32, height=24),
+            Sam2VideoFrame(image_id=3, frame_index=2, filename="frame2.png", file_path=str(frame2), width=32, height=24),
+        ],
+        start_image_id=3,
+        start_frame_index=2,
+        polygon_points=[[4, 4], [20, 4], [20, 18], [4, 18]],
+        direction="backward",
+        end_frame_index=0,
+        backward_end_frame_index=None,
+        forward_end_frame_index=None,
+        review_interval=1,
+        model_name="sam2_hiera_large",
+        polygon_epsilon=0.002,
+        min_mask_area=10,
+        mask_threshold=0.0,
+        max_hole_area=0.0,
+    )
+
+    assert predictor.added_mask.shape == (24, 32)
+    assert result.start_frame_index == 2
+    assert result.end_frame_index == 0
+    assert result.backward_end_frame_index == 0
+    assert result.forward_end_frame_index is None
+    assert result.review_frames == [0, 1]
+    assert [frame.frame_index for frame in result.results] == [0, 1, 2]
+    assert [frame.propagation_direction for frame in result.results] == ["backward", "backward", "source"]
+    assert [frame.status for frame in result.results] == ["tracked", "tracked", "source"]
+    assert result.results[0].area == pytest.approx(float((mask_for_frame0[0, 0] > 0).sum().item()))
+    assert result.results[1].area == pytest.approx(float((mask_for_frame1[0, 0] > 0).sum().item()))
+
+
+def test_sam2_video_service_tracks_both_directions_and_deduplicates_source(tmp_path: Path) -> None:
+    import torch
+
+    frame_paths = []
+    for index in range(5):
+        frame_path = tmp_path / f"frame{index}.png"
+        PILImage.new("RGB", (32, 24), color=(0, 0, 0)).save(frame_path)
+        frame_paths.append(frame_path)
+
+    empty = torch.zeros((1, 1, 24, 32), dtype=torch.float32)
+    backward_mask_1 = torch.zeros((1, 1, 24, 32), dtype=torch.float32)
+    backward_mask_1[0, 0, 4:12, 4:14] = 2.0
+    backward_mask_0 = torch.zeros((1, 1, 24, 32), dtype=torch.float32)
+    backward_mask_0[0, 0, 6:18, 8:24] = 2.5
+    forward_mask_3 = torch.zeros((1, 1, 24, 32), dtype=torch.float32)
+    forward_mask_3[0, 0, 5:14, 5:18] = 2.0
+    forward_mask_4 = torch.zeros((1, 1, 24, 32), dtype=torch.float32)
+    forward_mask_4[0, 0, 7:21, 12:26] = 2.5
+
+    service, predictor = build_stubbed_sam2_video_service(
+        [
+            [
+                (0, empty),
+                (1, backward_mask_1),
+                (2, backward_mask_0),
+            ],
+            [
+                (0, empty),
+                (1, forward_mask_3),
+                (2, forward_mask_4),
+            ],
+        ]
+    )
+    result = service.track_video(
+        frames=[
+            Sam2VideoFrame(image_id=index + 1, frame_index=index, filename=f"frame{index}.png", file_path=str(frame_paths[index]), width=32, height=24)
+            for index in range(5)
+        ],
+        start_image_id=3,
+        start_frame_index=2,
+        polygon_points=[[4, 4], [20, 4], [20, 18], [4, 18]],
+        direction="both",
+        end_frame_index=None,
+        backward_end_frame_index=0,
+        forward_end_frame_index=4,
+        review_interval=1,
+        model_name="sam2_hiera_large",
+        polygon_epsilon=0.002,
+        min_mask_area=10,
+        mask_threshold=0.0,
+        max_hole_area=0.0,
+    )
+
+    assert predictor.propagate_calls == 2
+    assert result.start_frame_index == 2
+    assert result.end_frame_index == 4
+    assert result.backward_end_frame_index == 0
+    assert result.forward_end_frame_index == 4
+    assert result.review_frames == [0, 1, 3, 4]
+    assert [frame.frame_index for frame in result.results] == [0, 1, 2, 3, 4]
+    assert [frame.propagation_direction for frame in result.results] == ["backward", "backward", "source", "forward", "forward"]
+    assert sum(1 for frame in result.results if frame.status == "source") == 1
+    assert result.warnings == []
+
+
+def test_sam2_track_video_request_validates_directional_ranges() -> None:
+    with pytest.raises(ValidationError, match="Forward tracking end_frame_index must be greater than or equal to start_frame_index"):
+        Sam2TrackVideoRequest(
+            job_id=1,
+            start_image_id=1,
+            start_frame_index=10,
+            label_id=1,
+            points=[[1, 1], [2, 1], [2, 2]],
+            direction="forward",
+            end_frame_index=9,
+        )
+
+    with pytest.raises(ValidationError, match="Backward tracking end_frame_index must be less than or equal to start_frame_index"):
+        Sam2TrackVideoRequest(
+            job_id=1,
+            start_image_id=1,
+            start_frame_index=10,
+            label_id=1,
+            points=[[1, 1], [2, 1], [2, 2]],
+            direction="backward",
+            end_frame_index=11,
+        )
+
+    with pytest.raises(ValidationError, match="Bidirectional backward_end_frame_index must be less than or equal to start_frame_index"):
+        Sam2TrackVideoRequest(
+            job_id=1,
+            start_image_id=1,
+            start_frame_index=10,
+            label_id=1,
+            points=[[1, 1], [2, 1], [2, 2]],
+            direction="both",
+            backward_end_frame_index=11,
+            forward_end_frame_index=12,
+        )
+
+
+def test_sam2_video_service_rejects_inconsistent_frame_sizes(tmp_path: Path) -> None:
+    import torch
+
+    frame0 = tmp_path / "frame0.jpg"
+    frame1 = tmp_path / "frame1.jpg"
+    PILImage.new("RGB", (32, 24), color=(0, 0, 0)).save(frame0)
+    PILImage.new("RGB", (64, 24), color=(0, 0, 0)).save(frame1)
+
+    service, _predictor = build_stubbed_sam2_video_service(
+        [(0, torch.zeros((1, 1, 24, 32), dtype=torch.float32))]
+    )
+
+    with pytest.raises(Sam2PredictionError, match="All frames in the tracking range must have the same image size."):
+        service.track_video(
+            frames=[
+                Sam2VideoFrame(image_id=1, frame_index=0, filename="frame0.jpg", file_path=str(frame0), width=32, height=24),
+                Sam2VideoFrame(image_id=2, frame_index=1, filename="frame1.jpg", file_path=str(frame1), width=64, height=24),
+            ],
+            start_image_id=1,
+            start_frame_index=0,
+            polygon_points=[[4, 4], [20, 4], [20, 18], [4, 18]],
+            direction="forward",
+            end_frame_index=1,
+            backward_end_frame_index=None,
+            forward_end_frame_index=None,
+            review_interval=10,
+            model_name="sam2_hiera_large",
+            polygon_epsilon=0.002,
+            min_mask_area=10,
+            mask_threshold=0.0,
+            max_hole_area=0.0,
+        )
+
+
+def test_sam2_service_refine_polygon_falls_back_to_best_candidate(tmp_path: Path) -> None:
+    import numpy as np
+
+    image_path = tmp_path / "slice.png"
+    PILImage.new("RGB", (32, 24), color=(0, 0, 0)).save(image_path)
+
+    masks = np.zeros((1, 24, 32), dtype=np.float32)
+    masks[0, 5:18, 6:22] = 6.0
+    scores = np.array([0.8], dtype=np.float32)
+
+    service, _predictor = build_stubbed_sam2_service(masks, scores)
+    result = service.refine_polygon(
+        image_path=str(image_path),
+        model_name="sam2_hiera_large",
+        polygon_points=[[5, 5], [21, 5], [22, 18], [6, 18]],
+        multimask_output=False,
+        candidate="2",
+        polygon_epsilon=0.002,
+        min_mask_area=10,
+        mask_threshold=0.0,
+        max_hole_area=0.0,
+    )
+
+    assert result.score == pytest.approx(0.8)
+    assert len(result.points) >= 3
+
+
+def test_sam2_service_refine_polygon_rejects_empty_mask(tmp_path: Path) -> None:
+    import numpy as np
+
+    image_path = tmp_path / "slice.png"
+    PILImage.new("RGB", (32, 24), color=(0, 0, 0)).save(image_path)
+
+    masks = np.zeros((1, 24, 32), dtype=np.float32)
+    scores = np.array([0.8], dtype=np.float32)
+
+    service, _predictor = build_stubbed_sam2_service(masks, scores)
+
+    with pytest.raises(Sam2PredictionError, match="SAM2 returned an empty mask"):
+        service.refine_polygon(
+            image_path=str(image_path),
+            model_name="sam2_hiera_large",
+            polygon_points=[[5, 5], [21, 5], [22, 18], [6, 18]],
+            multimask_output=False,
+            candidate="best",
+            polygon_epsilon=0.002,
+            min_mask_area=10,
+            mask_threshold=0.0,
+            max_hole_area=0.0,
+        )
+
+
+def test_sam2_service_refine_polygon_rejects_degenerate_polygon(tmp_path: Path) -> None:
+    import numpy as np
+
+    image_path = tmp_path / "slice.png"
+    PILImage.new("RGB", (32, 24), color=(0, 0, 0)).save(image_path)
+
+    masks = np.zeros((1, 24, 32), dtype=np.float32)
+    scores = np.array([0.8], dtype=np.float32)
+
+    service, _predictor = build_stubbed_sam2_service(masks, scores)
+
+    with pytest.raises(Sam2PredictionError, match="Polygon must enclose a non-zero area."):
+        service.refine_polygon(
+            image_path=str(image_path),
+            model_name="sam2_hiera_large",
+            polygon_points=[[5, 5], [10, 10], [15, 15]],
+            multimask_output=False,
+            candidate="best",
+            polygon_epsilon=0.002,
+            min_mask_area=10,
+            mask_threshold=0.0,
+            max_hole_area=0.0,
+        )
 
 
 def test_image_file_and_thumbnail_are_inline_images(db_session: Session) -> None:
