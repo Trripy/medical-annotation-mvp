@@ -66,6 +66,19 @@ class ResearchVideoDetailRead(ResearchVideoRead):
     labels: list[ResearchVideoLabelRead]
 
 
+class ResearchVideoWorkspaceRead(ResearchVideoRead):
+    file_url: str
+    labels: list[ResearchVideoLabelRead]
+
+
+class ResearchVideoFramesPageRead(BaseModel):
+    items: list[ResearchVideoFrameRead]
+    offset: int
+    limit: int
+    total: int
+    has_more: bool
+
+
 class ResearchVideoAnnotationRead(BaseModel):
     id: int
     frame_id: int

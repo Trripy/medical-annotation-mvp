@@ -52,6 +52,12 @@ def build_attachment_content_disposition(filename: str, ascii_fallback: str) -> 
     return f'attachment; filename="{ascii_filename}"; filename*=UTF-8\'\'{encoded_filename}'
 
 
+def build_inline_content_disposition(filename: str, ascii_fallback: str) -> str:
+    ascii_filename = _ascii_filename(filename, ascii_fallback)
+    encoded_filename = quote(filename, safe="")
+    return f'inline; filename="{ascii_filename}"; filename*=UTF-8\'\'{encoded_filename}'
+
+
 def _ascii_filename(filename: str, fallback: str) -> str:
     stem, dot, extension = filename.rpartition(".")
     ascii_stem = (stem or filename).encode("ascii", "ignore").decode("ascii")

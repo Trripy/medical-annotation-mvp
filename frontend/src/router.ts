@@ -6,6 +6,8 @@ import DatasetsPage from './views/DatasetsPage.vue'
 import JobsPage from './views/JobsPage.vue'
 import ResearchPage from './views/ResearchPage.vue'
 import ResearchVideoAnnotatePage from './views/ResearchVideoAnnotatePage.vue'
+import ResearchVideoPhasePage from './views/ResearchVideoPhasePage.vue'
+import ResearchVideoSkillPage from './views/ResearchVideoSkillPage.vue'
 import ResearchVideosPage from './views/ResearchVideosPage.vue'
 import ReviewPage from './views/ReviewPage.vue'
 
@@ -48,6 +50,16 @@ const router = createRouter({
     {
       path: '/research/videos/:videoId/annotate',
       component: ResearchVideoAnnotatePage,
+      props: true,
+    },
+    {
+      path: '/research/videos/:videoId/phases',
+      component: ResearchVideoPhasePage,
+      props: true,
+    },
+    {
+      path: '/research/videos/:videoId/skills',
+      component: ResearchVideoSkillPage,
       props: true,
     },
     {

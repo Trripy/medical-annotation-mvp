@@ -12,6 +12,8 @@ if TYPE_CHECKING:
     from app.models.annotation import Annotation
     from app.models.job import Job
     from app.models.project import Project
+    from app.models.research_phase import ResearchPhaseAnnotationSet, ResearchPhaseProtocol
+    from app.models.research_skill import ResearchSkillAssessment, ResearchSkillRubric
     from app.models.user_settings import UserSettings
 
 
@@ -37,6 +39,22 @@ class User(Base):
     projects: Mapped[list[Project]] = relationship(back_populates="owner", cascade="all, delete-orphan")
     assigned_jobs: Mapped[list[Job]] = relationship(back_populates="assignee")
     annotations: Mapped[list[Annotation]] = relationship(back_populates="created_by")
+    created_phase_protocols: Mapped[list[ResearchPhaseProtocol]] = relationship(
+        "ResearchPhaseProtocol",
+        back_populates="created_by",
+    )
+    phase_annotation_sets: Mapped[list[ResearchPhaseAnnotationSet]] = relationship(
+        "ResearchPhaseAnnotationSet",
+        back_populates="annotator",
+    )
+    created_skill_rubrics: Mapped[list[ResearchSkillRubric]] = relationship(
+        "ResearchSkillRubric",
+        back_populates="created_by",
+    )
+    skill_assessments: Mapped[list[ResearchSkillAssessment]] = relationship(
+        "ResearchSkillAssessment",
+        back_populates="rater",
+    )
     settings: Mapped[UserSettings | None] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",

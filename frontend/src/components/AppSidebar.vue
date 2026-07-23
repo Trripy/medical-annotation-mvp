@@ -3,8 +3,10 @@ import { DataAnalysis, FolderOpened, Lock, Tickets, User } from '@element-plus/i
 import { ElMessage } from 'element-plus'
 import { storeToRefs } from 'pinia'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
+import LanguageSwitcher from './LanguageSwitcher.vue'
 import { useAdminStore } from '../stores/admin'
 import {
   DEFAULT_USER_SETTINGS,
@@ -25,6 +27,7 @@ defineProps<{
 
 const route = useRoute()
 const router = useRouter()
+const { t } = useI18n()
 const adminStore = useAdminStore()
 const usersStore = useUsersStore()
 const userSettingsStore = useUserSettingsStore()
@@ -58,13 +61,13 @@ const hasShortcutConflict = computed(() =>
 const shortcutWarnings = computed(() => {
   const warnings: string[] = []
   if (settingsDraft.value.polygon_confirm_point_shortcut === settingsDraft.value.pan_modifier_shortcut) {
-    warnings.push('Confirm polygon point shortcut conflicts with pan shortcut.')
+    warnings.push(t('settings.confirmPanConflict'))
   }
   if (settingsDraft.value.polygon_confirm_point_shortcut === settingsDraft.value.add_polygon_vertex_shortcut) {
-    warnings.push('Confirm polygon point shortcut conflicts with add vertex shortcut.')
+    warnings.push(t('settings.confirmAddConflict'))
   }
   if (settingsDraft.value.polygon_confirm_point_shortcut === settingsDraft.value.delete_polygon_vertex_shortcut) {
-    warnings.push('Confirm polygon point shortcut conflicts with delete vertex shortcut.')
+    warnings.push(t('settings.confirmDeleteConflict'))
   }
   return warnings
 })
@@ -111,13 +114,13 @@ function closeAdminLogin() {
 
 function submitAdminLogin() {
   if (!adminStore.login(adminPassword.value)) {
-    ElMessage.error('Wrong password')
+    ElMessage.error(t('auth.wrongPassword'))
     return
   }
 
   adminPassword.value = ''
   closeAdminLogin()
-  ElMessage.success('Admin mode enabled')
+  ElMessage.success(t('auth.adminEnabled'))
 }
 
 function openUserLogin() {
@@ -133,19 +136,19 @@ function closeUserLogin() {
 async function submitUserLogin() {
   const loggedIn = await usersStore.login(usernameInput.value)
   if (!loggedIn) {
-    ElMessage.error(usersStore.error || 'User not found. Please ask admin to add this username.')
+    ElMessage.error(usersStore.error || t('auth.userNotFound'))
     return
   }
 
   closeUserLogin()
   await userSettingsStore.loadSettings(currentUsername.value)
-  ElMessage.success(`Logged in as ${currentUsername.value}`)
+  ElMessage.success(t('auth.loggedInAs', { username: currentUsername.value }))
 }
 
 function logoutUser() {
   usersStore.logout()
   userSettingsStore.resetToDefaults()
-  ElMessage.success('Logged out')
+  ElMessage.success(t('auth.loggedOut'))
 }
 
 async function openUserSettings() {
@@ -179,20 +182,20 @@ async function saveUserSettings() {
   }
 
   if (hasShortcutConflict.value) {
-    ElMessage.error('Add and delete polygon vertex shortcuts cannot use the same key.')
+    ElMessage.error(t('settings.shortcutConflict'))
     return
   }
 
   const saved = await userSettingsStore.saveSettings(currentUsername.value, settingsDraft.value)
   if (!saved) {
-    ElMessage.error(userSettingsStore.error || 'Save user settings failed')
+    ElMessage.error(userSettingsStore.error || t('auth.saveUserSettingsFailed'))
     return
   }
 
   closeSettingHelp()
   stopShortcutCapture()
   settingsVisible.value = false
-  ElMessage.success('User settings saved')
+  ElMessage.success(t('auth.userSettingsSaved'))
 }
 
 function startShortcutCapture(target: ShortcutCaptureTarget) {
@@ -221,7 +224,7 @@ function handleShortcutCaptureKeydown(event: KeyboardEvent) {
 
   const shortcut = normalizeShortcutFromKeyboardEvent(event)
   if (!shortcut) {
-    ElMessage.error('Only Shift, Alt, Ctrl, Space, A-Z, and 0-9 are supported.')
+    ElMessage.error(t('settings.shortcutUnsupported'))
     return
   }
 
@@ -256,7 +259,7 @@ function normalizeShortcutFromKeyboardEvent(event: KeyboardEvent) {
 
 function shortcutCaptureLabel(target: ShortcutCaptureTarget) {
   if (shortcutCaptureTarget.value === target) {
-    return 'Press a key...'
+    return t('settings.pressKey')
   }
 
   return shortcutDisplayLabel(settingsDraft.value[target])
@@ -323,56 +326,57 @@ function closeSettingHelp() {
     <div class="brand">
       <span class="brand-mark">MA</span>
       <div>
-        <h1>Medical Annotation</h1>
-        <p>{{ subtitle ?? 'MVP Workbench' }}</p>
+        <h1>{{ t('common.appName') }}</h1>
+        <p>{{ subtitle ?? t('common.mvpWorkbench') }}</p>
       </div>
     </div>
 
     <el-menu :default-active="activeMenu" class="nav-menu" @select="navigate">
       <el-menu-item index="datasets">
         <el-icon><FolderOpened /></el-icon>
-        <span>Datasets</span>
+        <span>{{ t('navigation.datasets') }}</span>
       </el-menu-item>
       <el-menu-item index="projects">
         <el-icon><Tickets /></el-icon>
-        <span>Projects</span>
+        <span>{{ t('navigation.projects') }}</span>
       </el-menu-item>
       <el-menu-item index="review">
         <el-icon><DataAnalysis /></el-icon>
-        <span>Review</span>
+        <span>{{ t('navigation.review') }}</span>
       </el-menu-item>
       <el-menu-item index="research">
         <el-icon><DataAnalysis /></el-icon>
-        <span>Research</span>
+        <span>{{ t('navigation.research') }}</span>
       </el-menu-item>
     </el-menu>
 
     <div class="sidebar-admin">
       <div class="sidebar-user-login">
+        <LanguageSwitcher />
         <template v-if="currentUsername">
-          <div class="current-user-label">User: {{ currentUsername }}</div>
+          <div class="current-user-label">{{ t('common.user') }}: {{ currentUsername }}</div>
           <el-button size="small" plain @click="openUserSettings">
-            Settings
+            {{ t('navigation.settings') }}
           </el-button>
           <el-button size="small" plain @click="logoutUser">
-            Logout
+            {{ t('navigation.logout') }}
           </el-button>
         </template>
         <el-button v-else plain @click="openUserLogin">
           <el-icon><User /></el-icon>
-          Login
+          {{ t('common.login') }}
         </el-button>
       </div>
 
       <template v-if="isAdmin">
-        <div class="admin-active-label">Admin active</div>
+        <div class="admin-active-label">{{ t('navigation.adminActive') }}</div>
         <el-button size="small" plain @click="adminStore.exit">
-          Exit Admin
+          {{ t('navigation.exitAdmin') }}
         </el-button>
       </template>
       <el-button v-else plain @click="openAdminLogin">
         <el-icon><Lock /></el-icon>
-        Admin
+        {{ t('navigation.admin') }}
       </el-button>
     </div>
 
@@ -386,15 +390,15 @@ function closeSettingHelp() {
       >
         <section class="app-modal user-settings-modal" role="dialog" aria-modal="true" aria-labelledby="user-settings-title">
           <header class="user-settings-modal-header">
-            <h2 id="user-settings-title">User Settings</h2>
+            <h2 id="user-settings-title">{{ t('auth.userSettings') }}</h2>
           </header>
 
           <div class="user-settings-modal-body">
             <section class="settings-section">
-              <h3 class="settings-section-title">General</h3>
+              <h3 class="settings-section-title">{{ t('settings.general') }}</h3>
               <label class="settings-field">
               <span class="settings-field-label">
-                Edge snap threshold
+                {{ t('settings.edgeSnapThreshold') }}
                 <button
                   class="settings-help-button"
                   type="button"
@@ -407,12 +411,12 @@ function closeSettingHelp() {
                 :min="0"
                 :step="1"
               />
-              <small>Points within this many image pixels from the border will snap to the image edge.</small>
+              <small>{{ t('settings.edgeSnapThresholdHelp') }}</small>
             </label>
 
             <label class="settings-field">
               <span class="settings-field-label">
-                Default tool
+                {{ t('settings.defaultTool') }}
                 <button
                   class="settings-help-button"
                   type="button"
@@ -433,7 +437,7 @@ function closeSettingHelp() {
 
             <label class="settings-field">
               <span class="settings-field-label">
-                After SAM2 Accept
+                {{ t('settings.afterSam2Accept') }}
                 <button
                   class="settings-help-button"
                   type="button"
@@ -445,19 +449,19 @@ function closeSettingHelp() {
                 popper-class="settings-select-popper"
                 :teleported="true"
               >
-                <el-option label="Keep current tool" value="keep_current" />
-                <el-option label="Switch to default tool" value="default_tool" />
-                <el-option label="Switch to cursor" value="cursor" />
-                <el-option label="Switch to rectangle" value="rectangle" />
-                <el-option label="Switch to polygon" value="polygon" />
-                <el-option label="Switch to sam2" value="sam2" />
+                <el-option :label="t('settings.keepCurrentTool')" value="keep_current" />
+                <el-option :label="t('settings.switchToDefaultTool')" value="default_tool" />
+                <el-option :label="t('settings.switchToCursor')" value="cursor" />
+                <el-option :label="t('settings.switchToRectangle')" value="rectangle" />
+                <el-option :label="t('settings.switchToPolygon')" value="polygon" />
+                <el-option :label="t('settings.switchToSam2')" value="sam2" />
               </el-select>
-              <small>Choose which tool should be active after accepting a SAM2 mask.</small>
+              <small>{{ t('settings.afterSam2AcceptHelp') }}</small>
             </label>
 
             <label class="settings-field settings-checkbox-field">
               <span class="settings-field-label">
-                Remember last frame per job
+                {{ t('settings.rememberLastFrame') }}
                 <button
                   class="settings-help-button"
                   type="button"
@@ -465,12 +469,12 @@ function closeSettingHelp() {
                 >?</button>
               </span>
               <input v-model="settingsDraft.remember_last_frame_per_job" type="checkbox" />
-              <small>When enabled, the annotation page will reopen each job at the last frame you visited.</small>
+              <small>{{ t('settings.rememberLastFrameHelp') }}</small>
             </label>
 
             <label class="settings-field settings-checkbox-field">
               <span class="settings-field-label">
-                Keep zoom and pan when switching frames
+                {{ t('settings.keepZoomPan') }}
                 <button
                   class="settings-help-button"
                   type="button"
@@ -478,16 +482,16 @@ function closeSettingHelp() {
                 >?</button>
               </span>
               <input v-model="settingsDraft.keep_view_transform_on_frame_switch" type="checkbox" />
-              <small>When enabled, zoom scale and canvas pan position will be preserved when switching frames within the same job.</small>
+              <small>{{ t('settings.keepZoomPanHelp') }}</small>
             </label>
             </section>
 
             <section class="settings-section">
-              <h3 class="settings-section-title">SAM2 Defaults</h3>
+              <h3 class="settings-section-title">{{ t('settings.sam2Defaults') }}</h3>
 
               <label class="settings-field">
                 <span class="settings-field-label">
-                  Default SAM2 model
+                  {{ t('settings.defaultSam2Model') }}
                   <button
                     class="settings-help-button"
                     type="button"
@@ -508,7 +512,7 @@ function closeSettingHelp() {
 
               <label class="settings-field settings-checkbox-field">
                 <span class="settings-field-label">
-                  Default multimask output
+                  {{ t('settings.defaultMultimask') }}
                   <button
                     class="settings-help-button"
                     type="button"
@@ -520,7 +524,7 @@ function closeSettingHelp() {
 
               <label class="settings-field settings-checkbox-field">
                 <span class="settings-field-label">
-                  Default show prompt points
+                  {{ t('settings.defaultPromptPoints') }}
                   <button
                     class="settings-help-button"
                     type="button"
@@ -532,7 +536,7 @@ function closeSettingHelp() {
 
               <label class="settings-field">
                 <span class="settings-field-label">
-                  Default candidate
+                  {{ t('settings.defaultCandidate') }}
                   <button
                     class="settings-help-button"
                     type="button"
@@ -553,7 +557,7 @@ function closeSettingHelp() {
 
               <label class="settings-field settings-slider-field">
                 <span class="settings-field-label">
-                  Default polygon simplification: {{ settingsDraft.sam2_default_polygon_epsilon.toFixed(4) }}
+                  {{ t('settings.defaultPolygonSimplification') }}: {{ settingsDraft.sam2_default_polygon_epsilon.toFixed(4) }}
                   <button
                     class="settings-help-button"
                     type="button"
@@ -568,14 +572,14 @@ function closeSettingHelp() {
                   type="range"
                 />
                 <div class="settings-slider-labels">
-                  <small>fine outline</small>
-                  <small>coarse outline</small>
+                  <small>{{ t('settings.fineOutline') }}</small>
+                  <small>{{ t('settings.coarseOutline') }}</small>
                 </div>
               </label>
 
               <label class="settings-field settings-slider-field">
                 <span class="settings-field-label">
-                  Default mask threshold: {{ settingsDraft.sam2_default_mask_threshold.toFixed(1) }}
+                  {{ t('settings.defaultMaskThreshold') }}: {{ settingsDraft.sam2_default_mask_threshold.toFixed(1) }}
                   <button
                     class="settings-help-button"
                     type="button"
@@ -590,14 +594,14 @@ function closeSettingHelp() {
                   type="range"
                 />
                 <div class="settings-slider-labels">
-                  <small>loose mask</small>
-                  <small>strict mask</small>
+                  <small>{{ t('settings.looseMask') }}</small>
+                  <small>{{ t('settings.strictMask') }}</small>
                 </div>
               </label>
 
               <label class="settings-field">
                 <span class="settings-field-label">
-                  Default min mask area
+                  {{ t('settings.defaultMinMaskArea') }}
                   <button
                     class="settings-help-button"
                     type="button"
@@ -614,7 +618,7 @@ function closeSettingHelp() {
 
               <label class="settings-field">
                 <span class="settings-field-label">
-                  Default max hole area
+                  {{ t('settings.defaultMaxHoleArea') }}
                   <button
                     class="settings-help-button"
                     type="button"
@@ -631,10 +635,10 @@ function closeSettingHelp() {
             </section>
 
             <section class="settings-section">
-              <h3 class="settings-section-title">Shortcuts</h3>
+              <h3 class="settings-section-title">{{ t('settings.shortcuts') }}</h3>
               <label class="settings-field">
               <span class="settings-field-label">
-                Add polygon vertex shortcut
+                {{ t('settings.addVertexShortcut') }}
                 <button
                   class="settings-help-button"
                   type="button"
@@ -653,7 +657,7 @@ function closeSettingHelp() {
 
             <label class="settings-field">
               <span class="settings-field-label">
-                Delete polygon vertex shortcut
+                {{ t('settings.deleteVertexShortcut') }}
                 <button
                   class="settings-help-button"
                   type="button"
@@ -672,7 +676,7 @@ function closeSettingHelp() {
 
             <label class="settings-field">
               <span class="settings-field-label">
-                Confirm polygon point shortcut
+                {{ t('settings.confirmPointShortcut') }}
                 <button
                   class="settings-help-button"
                   type="button"
@@ -687,12 +691,12 @@ function closeSettingHelp() {
               >
                 {{ shortcutCaptureLabel('polygon_confirm_point_shortcut') }}
               </button>
-              <small>In polygon mode, press this key to add a point at the current cursor position.</small>
+              <small>{{ t('settings.confirmPointShortcutHelp') }}</small>
             </label>
 
             <label class="settings-field">
               <span class="settings-field-label">
-                Pan while drawing shortcut
+                {{ t('settings.panShortcut') }}
                 <button
                   class="settings-help-button"
                   type="button"
@@ -714,7 +718,7 @@ function closeSettingHelp() {
               <h3 class="settings-section-title">SAM2</h3>
               <label class="settings-field settings-checkbox-field">
               <span class="settings-field-label">
-                SAM result edge snap
+                {{ t('settings.samResultEdgeSnap') }}
                 <button
                   class="settings-help-button"
                   type="button"
@@ -722,12 +726,12 @@ function closeSettingHelp() {
                 >?</button>
               </span>
               <input v-model="settingsDraft.sam_result_edge_snap_enabled" type="checkbox" />
-              <small>When enabled, polygon points generated from SAM2 masks near the image border will snap to the image edge.</small>
+              <small>{{ t('settings.samResultEdgeSnapHelp') }}</small>
             </label>
 
             <label class="settings-field">
               <span class="settings-field-label">
-                SAM result edge snap threshold
+                {{ t('settings.samResultEdgeSnapThreshold') }}
                 <button
                   class="settings-help-button"
                   type="button"
@@ -746,7 +750,7 @@ function closeSettingHelp() {
 
             <el-alert
               v-if="hasShortcutConflict"
-              title="Add and delete polygon vertex shortcuts cannot use the same key."
+              :title="t('settings.shortcutConflict')"
               type="warning"
               show-icon
               :closable="false"
@@ -763,13 +767,13 @@ function closeSettingHelp() {
 
           <footer class="user-settings-modal-footer">
             <el-button @click="resetSettingsDraft">
-              Reset to defaults
+              {{ t('settings.resetToDefaults') }}
             </el-button>
             <el-button @click="closeUserSettings">
-              Cancel
+              {{ t('common.cancel') }}
             </el-button>
             <el-button type="primary" :loading="settingsLoading" @click="saveUserSettings">
-              Save
+              {{ t('common.save') }}
             </el-button>
           </footer>
         </section>
@@ -786,7 +790,7 @@ function closeSettingHelp() {
       >
         <p>{{ settingHelpText }}</p>
         <button class="settings-help-floating-close" type="button" @click="closeSettingHelp">
-          知道了
+          {{ t('settings.gotIt') }}
         </button>
       </div>
     </Teleport>
@@ -800,23 +804,23 @@ function closeSettingHelp() {
         @keydown.esc="closeUserLogin"
       >
         <section class="app-modal admin-modal" role="dialog" aria-modal="true" aria-labelledby="user-login-title">
-          <h2 id="user-login-title">User Login</h2>
+          <h2 id="user-login-title">{{ t('auth.userLogin') }}</h2>
           <label class="admin-password-field">
-            <span>Username</span>
+            <span>{{ t('common.username') }}</span>
             <el-input
               v-model="usernameInput"
               autofocus
               clearable
-              placeholder="Username"
+              :placeholder="t('common.username')"
               @keyup.enter="submitUserLogin"
             />
           </label>
           <div class="admin-modal-actions">
             <el-button @click="closeUserLogin">
-              Cancel
+              {{ t('common.cancel') }}
             </el-button>
             <el-button type="primary" :loading="userLoading" @click="submitUserLogin">
-              Login
+              {{ t('common.login') }}
             </el-button>
           </div>
         </section>
@@ -832,14 +836,14 @@ function closeSettingHelp() {
         @keydown.esc="closeAdminLogin"
       >
         <section class="app-modal admin-modal" role="dialog" aria-modal="true" aria-labelledby="admin-login-title">
-          <h2 id="admin-login-title">Admin Login</h2>
+          <h2 id="admin-login-title">{{ t('auth.adminLogin') }}</h2>
           <label class="admin-password-field">
-            <span>Password</span>
+            <span>{{ t('common.password') }}</span>
             <el-input
               v-model="adminPassword"
               autofocus
               clearable
-              placeholder="Password"
+              :placeholder="t('common.password')"
               show-password
               type="password"
               @keyup.enter="submitAdminLogin"
@@ -847,10 +851,10 @@ function closeSettingHelp() {
           </label>
           <div class="admin-modal-actions">
             <el-button @click="closeAdminLogin">
-              Cancel
+              {{ t('common.cancel') }}
             </el-button>
             <el-button type="primary" @click="submitAdminLogin">
-              Enter
+              {{ t('common.enter') }}
             </el-button>
           </div>
         </section>

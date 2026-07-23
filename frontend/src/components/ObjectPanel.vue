@@ -2,6 +2,7 @@
 import { Delete, Hide, View } from '@element-plus/icons-vue'
 import { computed, nextTick, ref, watch } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 import type { AnnotationObject, Label } from '../stores/annotation'
 import { getPolygonSmoothValue } from '../utils/polygon'
@@ -14,6 +15,8 @@ const props = defineProps<{
   sam2Refining: boolean
   sam2Tracking: boolean
 }>()
+
+const { t } = useI18n()
 
 const emit = defineEmits<{
   deleteAnnotation: [id: number | string]
@@ -111,15 +114,15 @@ function commitSmoothing(value: number | null) {
   <aside class="annotation-sidebar-right">
     <header class="objects-panel-header">
       <div>
-        <p class="panel-label">Objects</p>
-        <h2>Objects {{ objectCount }}</h2>
+        <p class="panel-label">{{ t('frameAnnotation.objects') }}</p>
+        <h2>{{ t('frameAnnotation.objects') }} {{ objectCount }}</h2>
       </div>
       <div class="objects-panel-bulk-actions">
         <el-button size="small" :disabled="objectAnnotations.length === 0 || hiddenCount === 0" @click="emit('showAll')">
-          Show All
+          {{ t('frameAnnotation.showAll') }}
         </el-button>
         <el-button size="small" :disabled="objectAnnotations.length === 0 || hiddenCount === objectAnnotations.length" @click="emit('hideAll')">
-          Hide All
+          {{ t('frameAnnotation.hideAll') }}
         </el-button>
       </div>
     </header>
@@ -128,8 +131,8 @@ function commitSmoothing(value: number | null) {
       <section class="object-smoothing-panel">
         <div class="object-smoothing-header">
           <div>
-            <p class="panel-label">Polygon smoothing</p>
-            <h3>{{ selectedPolygonAnnotation ? 'Selected polygon' : 'Select a polygon' }}</h3>
+            <p class="panel-label">{{ t('frameAnnotation.polygonSmoothing') }}</p>
+            <h3>{{ selectedPolygonAnnotation ? t('frameAnnotation.selectedPolygon') : t('frameAnnotation.selectPolygon') }}</h3>
           </div>
           <el-button
             size="small"
@@ -137,13 +140,13 @@ function commitSmoothing(value: number | null) {
             :disabled="!selectedPolygonAnnotation"
             @click="selectedPolygonAnnotation && emit('resetPolygonSmoothing', selectedPolygonAnnotation.id)"
           >
-            Reset to original
+            {{ t('frameAnnotation.resetToOriginal') }}
           </el-button>
         </div>
         <template v-if="selectedPolygonAnnotation">
           <div class="object-smoothing-scale">
-            <span>Fine outline</span>
-            <span>Coarse outline</span>
+            <span>{{ t('settings.fineOutline') }}</span>
+            <span>{{ t('settings.coarseOutline') }}</span>
           </div>
           <el-slider
             :model-value="polygonSmoothingValue"
@@ -155,7 +158,7 @@ function commitSmoothing(value: number | null) {
           />
         </template>
         <p v-else class="object-smoothing-empty">
-          Only polygon annotations can use smoothing, Create layer above, Refine with SAM2, and Track with SAM2.
+          {{ t('frameAnnotation.smoothingHelp') }}
         </p>
         <el-button
           size="small"
@@ -164,7 +167,7 @@ function commitSmoothing(value: number | null) {
           :disabled="!selectedPolygonAnnotation"
           @click="selectedPolygonAnnotation && emit('createLayerAbove', selectedPolygonAnnotation.id)"
         >
-          Create layer above
+          {{ t('frameAnnotation.createLayerAbove') }}
         </el-button>
         <el-button
           size="small"
@@ -172,10 +175,10 @@ function commitSmoothing(value: number | null) {
           plain
           :loading="sam2Refining"
           :disabled="!selectedPolygonAnnotation || sam2Refining"
-          :title="selectedPolygonAnnotation ? '' : 'Only polygon annotations can be refined with SAM2.'"
+          :title="selectedPolygonAnnotation ? '' : t('frameAnnotation.refinePolygonOnly')"
           @click="selectedPolygonAnnotation && emit('refineSelectedPolygon', selectedPolygonAnnotation.id)"
         >
-          Refine with SAM2
+          {{ t('frameAnnotation.refineWithSam2') }}
         </el-button>
         <el-button
           size="small"
@@ -183,10 +186,10 @@ function commitSmoothing(value: number | null) {
           plain
           :loading="sam2Tracking"
           :disabled="!selectedPolygonAnnotation || sam2Tracking || sam2Refining"
-          :title="selectedPolygonAnnotation ? '' : 'Select a polygon annotation to track it through frames with SAM2.'"
+          :title="selectedPolygonAnnotation ? '' : t('frameAnnotation.trackPolygonOnly')"
           @click="selectedPolygonAnnotation && emit('trackWithSam2', selectedPolygonAnnotation.id)"
         >
-          Track with SAM2
+          {{ t('frameAnnotation.trackWithSam2') }}
         </el-button>
       </section>
 
@@ -201,8 +204,8 @@ function commitSmoothing(value: number | null) {
       >
         <div class="object-card-top">
           <div>
-            <strong>Object #{{ index + 1 }}</strong>
-            <span class="object-shape-type">{{ annotation.shape_type }} shape</span>
+            <strong>{{ t('frameAnnotation.object') }} #{{ index + 1 }}</strong>
+            <span class="object-shape-type">{{ annotation.shape_type }} {{ t('frameAnnotation.shapeSuffix') }}</span>
           </div>
           <span class="label-swatch" :style="{ backgroundColor: labelFor(annotation.label_id)?.color }"></span>
         </div>
@@ -225,17 +228,17 @@ function commitSmoothing(value: number | null) {
         <div class="object-card-actions">
           <el-button size="small" text @click.stop="emit('toggleVisibility', annotation.id)">
             <el-icon><Hide v-if="isHidden(annotation.id)" /><View v-else /></el-icon>
-            {{ isHidden(annotation.id) ? 'Hidden' : 'Visible' }}
+            {{ isHidden(annotation.id) ? t('frameAnnotation.hidden') : t('frameAnnotation.visible') }}
           </el-button>
           <el-button size="small" text type="danger" @click.stop="emit('deleteAnnotation', annotation.id)">
             <el-icon><Delete /></el-icon>
-            Delete
+            {{ t('common.delete') }}
           </el-button>
         </div>
       </article>
 
       <div v-if="objectAnnotations.length === 0" class="objects-empty">
-        No annotations on this image.
+        {{ t('frameAnnotation.noAnnotationsOnImage') }}
       </div>
     </section>
   </aside>

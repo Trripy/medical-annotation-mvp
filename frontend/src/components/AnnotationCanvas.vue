@@ -554,7 +554,6 @@ onBeforeUnmount(() => {
 
 function preloadImage() {
   const imageUrl = props.image.image_url
-  console.log('current image url:', imageUrl)
 
   loadedImageUrl.value = ''
   const img = new window.Image()
@@ -782,7 +781,6 @@ function onPointerLeave() {
 
 function onPointerDown(event: PointerEvent) {
   const targetName = eventTargetName(event)
-  console.log('[stage] mousedown target name:', targetName)
 
   if (targetName.includes('sam2-point-delete')) {
     return
@@ -837,7 +835,6 @@ function onPointerDown(event: PointerEvent) {
   }
 
   event.preventDefault()
-  console.log('[draw] start rectangle')
   const point = fromPointer(event)
   if (!point) {
     return
@@ -972,7 +969,6 @@ function onCanvasClick(event: MouseEvent) {
     return
   }
 
-  console.log('[draw] add polygon point')
   addDraftPolygonPoint(point)
 }
 
@@ -1178,7 +1174,6 @@ function finishSam2Prompt(event: PointerEvent) {
     const maxX = Math.max(start[0], end[0])
     const maxY = Math.max(start[1], end[1])
     sam2Box.value = [minX, minY, maxX, maxY]
-    console.log('SAM mode box', sam2Box.value)
   } else {
     sam2Points.value = [
       ...sam2Points.value,
@@ -1188,9 +1183,6 @@ function finishSam2Prompt(event: PointerEvent) {
         label: sam2PointerLabel.value,
       },
     ]
-    console.log('SAM mode click')
-    console.log('Foreground points', samForegroundPoints())
-    console.log('Background points', samBackgroundPoints())
   }
 
   resetSam2BoxDraft()
@@ -1219,7 +1211,6 @@ function samBackgroundPoints(): number[][] {
 }
 
 async function runSamPrediction(): Promise<boolean> {
-  console.log('runSamPrediction')
   clearSamPredictionDebounce()
   const prompt = getSam2Prompt()
   if (prompt.point_coords.length === 0 && prompt.box === null) {
@@ -1245,8 +1236,6 @@ async function runSamPrediction(): Promise<boolean> {
     mask_threshold: props.sam2Settings.mask_threshold,
     max_hole_area: props.sam2Settings.max_hole_area,
   }
-  console.log('sam request', endpoint, payload)
-
   try {
     const response = await fetch(endpoint, {
       method: 'POST',
@@ -1270,7 +1259,6 @@ async function runSamPrediction(): Promise<boolean> {
     if (isStaleSam2Request(request)) {
       return false
     }
-    console.log('sam predict', result)
     setSam2Preview(result, {
       source: 'prompt',
       targetAnnotationId: null,
@@ -1491,7 +1479,6 @@ function startCursorPan(event: PointerEvent) {
   }
   window.addEventListener('pointermove', handleCursorPanMove)
   window.addEventListener('pointerup', stopCursorPan, { once: true })
-  console.log('[pan] start cursor pan')
 }
 
 function handleCursorPanMove(event: PointerEvent) {
@@ -1510,7 +1497,6 @@ function handleCursorPanMove(event: PointerEvent) {
   if (hasMovedDuringPan.value) {
     offsetX.value = panStartOffset.value.x + dx
     offsetY.value = panStartOffset.value.y + dy
-    console.log('[pan] moving', dx, dy)
   }
 }
 
@@ -1520,7 +1506,6 @@ function stopCursorPan(event?: PointerEvent) {
   }
 
   event?.preventDefault()
-  console.log('[pan] stop cursor pan')
 
   if (!hasMovedDuringPan.value) {
     emit('selectObject', null)
@@ -1542,7 +1527,6 @@ function resetCursorPan() {
 function startDragPolygonVertex(annotationId: number | string, pointIndex: number, event: PointerEvent) {
   event.preventDefault()
   event.stopPropagation()
-  console.log('[handle] start polygon vertex drag', annotationId, pointIndex)
   suppressNextCanvasClick.value = true
   emit('beforeChange')
   draggingHandle.value = { type: 'polygon-vertex', annotationId, pointIndex }
@@ -1556,7 +1540,6 @@ function startDragPolygonVertex(annotationId: number | string, pointIndex: numbe
 function startDragRectangleHandle(annotationId: number | string, handle: RectangleHandle, event: PointerEvent) {
   event.preventDefault()
   event.stopPropagation()
-  console.log('[handle] start rectangle handle drag', annotationId, handle)
   suppressNextCanvasClick.value = true
   emit('beforeChange')
   draggingHandle.value = { type: 'rectangle-handle', annotationId, handle }
@@ -1570,7 +1553,6 @@ function startDragRectangleHandle(annotationId: number | string, handle: Rectang
 function startDragBoundaryAssistVertex(pointIndex: number, event: PointerEvent) {
   event.preventDefault()
   event.stopPropagation()
-  console.log('[handle] start boundary vertex drag', pointIndex)
   suppressNextCanvasClick.value = true
   pushBoundaryAssistUndoSnapshot()
   draggingHandle.value = { type: 'boundary-assist-vertex', pointIndex }
@@ -1648,7 +1630,6 @@ function handleGlobalPointerMove(event: PointerEvent) {
   }
 
   const imagePoint = applyEdgeSnap(canvasToImage(canvasPoint.x, canvasPoint.y))
-  console.log('[handle] moving', draggingHandle.value)
 
   if (draggingHandle.value.type === 'polygon-vertex') {
     updatePolygonVertex(
@@ -1675,9 +1656,6 @@ function handleGlobalPointerMove(event: PointerEvent) {
 
 function stopDragHandle(event?: PointerEvent) {
   event?.preventDefault()
-  if (draggingHandle.value) {
-    console.log('[handle] stop drag')
-  }
   draggingHandle.value = null
   hideCursorPoint()
   window.removeEventListener('pointermove', handleGlobalPointerMove)
@@ -2422,6 +2400,19 @@ function resetView() {
   offsetY.value = (containerSize.value.height - (props.image.height || 1)) / 2
 }
 
+function refreshViewport() {
+  updateContainerSize()
+  if (!loadedImageUrl.value) {
+    return
+  }
+  if (!hasInitializedView.value) {
+    fitToScreen()
+    hasInitializedView.value = true
+    return
+  }
+  preserveCurrentViewTransform()
+}
+
 function rectFromImageBox(box: number[]) {
   const start = imageToCanvasPoint([box[0], box[1]])
   const end = imageToCanvasPoint([box[2], box[3]])
@@ -2446,6 +2437,7 @@ defineExpose({
   cancelBoundaryAssistMode,
   deleteSelected,
   fitToScreen,
+  refreshViewport,
   getSam2Prompt,
   isBoundaryAssistActive: boundaryAssistActive,
   isDrawingPolygon,

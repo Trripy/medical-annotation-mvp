@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { markRaw } from 'vue'
 
 import { apiUrl, resolveApiUrl } from '../utils/api'
 import { normalizeAnnotationObject } from '../utils/polygon'
@@ -34,6 +35,19 @@ export type ResearchVideoDetail = ResearchVideoListItem & {
   file_url: string
   frames: ResearchVideoFrame[]
   labels: ResearchVideoLabel[]
+}
+
+export type ResearchVideoWorkspaceDetail = ResearchVideoListItem & {
+  file_url: string
+  labels: ResearchVideoLabel[]
+}
+
+export type ResearchVideoFramesPage = {
+  items: ResearchVideoFrame[]
+  offset: number
+  limit: number
+  total: number
+  has_more: boolean
 }
 
 export type ResearchVideoLabel = {
@@ -82,15 +96,33 @@ function normalizeVideo(video: ResearchVideoListItem): ResearchVideoListItem {
 }
 
 function normalizeVideoDetail(video: ResearchVideoDetail): ResearchVideoDetail {
-  return {
+  return markRaw({
     ...normalizeVideo(video),
     file_url: resolveStorageUrl(video.file_url),
-    frames: video.frames.map((frame) => ({
+    frames: markRaw(video.frames.map((frame) => ({
       ...frame,
       image_url: withCacheBuster(resolveStorageUrl(frame.image_url), frame.id),
-    })),
-    labels: video.labels,
-  }
+    }))),
+    labels: markRaw(video.labels.slice()),
+  })
+}
+
+function normalizeVideoWorkspace(video: ResearchVideoWorkspaceDetail): ResearchVideoWorkspaceDetail {
+  return markRaw({
+    ...normalizeVideo(video),
+    file_url: resolveStorageUrl(video.file_url),
+    labels: markRaw(video.labels.slice()),
+  })
+}
+
+function normalizeFramesPage(page: ResearchVideoFramesPage): ResearchVideoFramesPage {
+  return markRaw({
+    ...page,
+    items: markRaw(page.items.map((frame) => ({
+      ...frame,
+      image_url: withCacheBuster(resolveStorageUrl(frame.image_url), frame.id),
+    }))),
+  })
 }
 
 export const useResearchVideosStore = defineStore('researchVideos', {
@@ -131,6 +163,48 @@ export const useResearchVideosStore = defineStore('researchVideos', {
         this.currentVideo = null
       } finally {
         this.loading = false
+      }
+    },
+    async fetchVideoWorkspace(videoId: number): Promise<ResearchVideoWorkspaceDetail | null> {
+      this.loading = true
+      this.error = ''
+      try {
+        const response = await fetch(apiUrl(`/api/research/videos/${videoId}/workspace`), { cache: 'no-store' })
+        if (!response.ok) {
+          throw new Error(`Video workspace request failed: ${response.status}`)
+        }
+        return normalizeVideoWorkspace(await response.json())
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      } finally {
+        this.loading = false
+      }
+    },
+    async fetchVideoFramesPage(
+      videoId: number,
+      options: {
+        offset?: number
+        limit?: number
+      } = {},
+    ): Promise<ResearchVideoFramesPage | null> {
+      const { offset = 0, limit = 500 } = options
+      this.error = ''
+      try {
+        const searchParams = new URLSearchParams({
+          offset: String(offset),
+          limit: String(limit),
+        })
+        const response = await fetch(apiUrl(`/api/research/videos/${videoId}/frames?${searchParams.toString()}`), {
+          cache: 'no-store',
+        })
+        if (!response.ok) {
+          throw new Error(`Video frames request failed: ${response.status}`)
+        }
+        return normalizeFramesPage(await response.json())
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
       }
     },
     async uploadVideo(file: File, name?: string | null) {

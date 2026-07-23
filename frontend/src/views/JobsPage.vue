@@ -3,6 +3,7 @@ import { ArrowDown, Back, Picture, RefreshRight, Tickets } from '@element-plus/i
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { storeToRefs } from 'pinia'
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
 import AppSidebar from '../components/AppSidebar.vue'
@@ -22,6 +23,7 @@ import { useUsersStore, type UserAccount } from '../stores/users'
 
 const route = useRoute()
 const router = useRouter()
+const { t } = useI18n()
 const adminStore = useAdminStore()
 const jobsStore = useJobsStore()
 const usersStore = useUsersStore()
@@ -95,7 +97,7 @@ const projectTitle = computed(() => {
     return 'Unassigned Project'
   }
 
-  return jobs.value[0]?.project_name ?? 'Project'
+  return jobs.value[0]?.project_name ?? t('projects.project')
 })
 
 watch(
@@ -129,22 +131,22 @@ async function loadPage() {
 async function addUsername() {
   const added = await usersStore.addUser(newUsername.value)
   if (!added) {
-    ElMessage.error(usersStore.error || 'Add user failed')
+    ElMessage.error(usersStore.error || t('projects.addUserFailed'))
     return
   }
 
   newUsername.value = ''
-  ElMessage.success('User added')
+  ElMessage.success(t('projects.userAdded'))
 }
 
 async function confirmDeleteUser(user: UserAccount) {
   try {
     await ElMessageBox.confirm(
-      `Are you sure you want to delete user "${user.username}"?`,
-      'Delete User',
+      t('projects.deleteUserConfirm', { username: user.username }),
+      t('projects.deleteUser'),
       {
-        cancelButtonText: 'Cancel',
-        confirmButtonText: 'Delete User',
+        cancelButtonText: t('common.cancel'),
+        confirmButtonText: t('projects.deleteUser'),
         type: 'warning',
       },
     )
@@ -154,11 +156,11 @@ async function confirmDeleteUser(user: UserAccount) {
 
   const deleted = await usersStore.deleteUser(user.id)
   if (!deleted) {
-    ElMessage.error(usersStore.error || 'Delete user failed')
+    ElMessage.error(usersStore.error || t('projects.deleteUserFailed'))
     return
   }
 
-  ElMessage.success('User deleted')
+  ElMessage.success(t('projects.userDeleted'))
 }
 
 function refreshPage() {
@@ -181,11 +183,11 @@ async function exportJob(job: JobCard, format: JobExportFormat) {
   const exported = await jobsStore.exportJob(job, format, exportScope.value)
   if (exported) {
     closeExportOptions()
-    ElMessage.success('Export completed')
+    ElMessage.success(t('projects.exportCompleted'))
     return
   }
 
-  ElMessage.error(jobsStore.error || 'Export failed')
+  ElMessage.error(jobsStore.error || t('projects.exportFailed'))
 }
 
 function handleExportCommand(job: JobCard, command: string | number | object) {
@@ -393,7 +395,7 @@ async function confirmDeleteJob(job: JobCard) {
 
 <template>
   <main class="workspace">
-    <AppSidebar :subtitle="isProjectJobsMode ? 'Project Jobs' : 'Projects'" />
+    <AppSidebar :subtitle="isProjectJobsMode ? t('projects.projectJobs') : t('navigation.projects')" />
 
     <section class="content">
       <header class="topbar jobs-topbar">
@@ -419,14 +421,14 @@ async function confirmDeleteJob(job: JobCard) {
       <section v-if="isAdmin" class="admin-user-panel">
         <div class="admin-user-panel-header">
           <div>
-            <p class="eyebrow">Admin</p>
-            <h3>User Management</h3>
+            <p class="eyebrow">{{ t('navigation.admin') }}</p>
+            <h3>{{ t('projects.userManagement') }}</h3>
           </div>
           <form class="admin-user-add" @submit.prevent="addUsername">
             <el-input
               v-model="newUsername"
               clearable
-              placeholder="Add username"
+              :placeholder="t('projects.addUsername')"
             />
             <el-button type="primary" :loading="usersLoading" native-type="submit">
               Add
@@ -499,7 +501,7 @@ async function confirmDeleteJob(job: JobCard) {
 
         <div v-if="!loading && projects.length === 0" class="empty-jobs">
           <el-icon><Tickets /></el-icon>
-          <p>No projects yet</p>
+          <p>{{ t('projects.noProjects') }}</p>
         </div>
       </section>
 
@@ -526,7 +528,7 @@ async function confirmDeleteJob(job: JobCard) {
 
           <div class="job-card-body">
             <div class="job-card-header">
-              <h3 class="job-card-title" :title="job.name || 'Untitled Job'">
+              <h3 class="job-card-title" :title="job.name || t('projects.untitledJob')">
                 {{ job.name || 'Untitled Job' }}
               </h3>
               <el-tag class="job-status-badge" size="small" :type="job.status === 'completed' ? 'success' : 'warning'">
@@ -586,7 +588,7 @@ async function confirmDeleteJob(job: JobCard) {
 
         <div v-if="!loading && jobs.length === 0" class="empty-jobs">
           <el-icon><Tickets /></el-icon>
-          <p>No jobs in this project</p>
+          <p>{{ t('projects.noJobs') }}</p>
         </div>
       </section>
     </section>

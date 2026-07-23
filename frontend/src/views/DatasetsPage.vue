@@ -3,6 +3,7 @@ import { Plus, Picture, UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { storeToRefs } from 'pinia'
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
 import AppSidebar from '../components/AppSidebar.vue'
@@ -14,6 +15,7 @@ import {
 } from '../stores/datasets'
 
 const router = useRouter()
+const { t } = useI18n()
 const datasetsStore = useDatasetsStore()
 const { creatingProject, error, lastUpload, loadingProjects, projects, uploading } = storeToRefs(datasetsStore)
 const imageInputRef = ref<HTMLInputElement | null>(null)
@@ -142,31 +144,31 @@ function naturalCompare(left: string, right: string): number {
 async function createProject() {
   const name = newProjectName.value.trim()
   if (!name) {
-    ElMessage.warning('Project name is required')
+    ElMessage.warning(t('datasets.projectNameRequired'))
     return
   }
 
   const project = await datasetsStore.createProject(name)
   if (!project) {
-    ElMessage.error('Failed to create project')
+    ElMessage.error(t('datasets.createProjectFailed'))
     return
   }
 
   form.projectId = project.id
   newProjectName.value = ''
   showProjectDialog.value = false
-  ElMessage.success('Project created')
+  ElMessage.success(t('datasets.projectCreated'))
 }
 
 function addLabel() {
   const name = labelDraft.name.trim()
   if (!name) {
-    ElMessage.warning('Label name is required')
+    ElMessage.warning(t('datasets.labelNameRequired'))
     return
   }
 
   if (labels.value.some((label) => label.name.toLowerCase() === name.toLowerCase())) {
-    ElMessage.warning(`Duplicate label: ${name}`)
+    ElMessage.warning(t('datasets.duplicateLabel', { name }))
     return
   }
 
@@ -189,22 +191,22 @@ function deleteLabel(index: number) {
 
 async function createJob() {
   if (form.projectId === null) {
-    ElMessage.warning('Please select a project')
+    ElMessage.warning(t('datasets.selectProject'))
     return
   }
 
   if (!form.jobName.trim()) {
-    ElMessage.warning('Job name is required')
+    ElMessage.warning(t('datasets.jobNameRequired'))
     return
   }
 
   if (labels.value.length === 0) {
-    ElMessage.warning('At least one label is required')
+    ElMessage.warning(t('datasets.atLeastOneLabel'))
     return
   }
 
   if (selectedFiles.value.length === 0) {
-    ElMessage.warning('At least one image is required')
+    ElMessage.warning(t('datasets.atLeastOneImage'))
     return
   }
   if (selectedFiles.value.length > MAX_JOB_UPLOAD_FILES) {
@@ -228,16 +230,16 @@ async function createJob() {
 
 <template>
   <main class="workspace">
-    <AppSidebar subtitle="Datasets" />
+    <AppSidebar :subtitle="t('navigation.datasets')" />
 
     <section class="content">
       <header class="topbar">
         <div>
-          <p class="eyebrow">Data management</p>
-          <h2>Datasets</h2>
+          <p class="eyebrow">{{ t('datasets.dataManagement') }}</p>
+          <h2>{{ t('navigation.datasets') }}</h2>
         </div>
         <router-link to="/jobs">
-          <el-button>View Jobs</el-button>
+          <el-button>{{ t('datasets.viewJobs') }}</el-button>
         </router-link>
       </header>
 
@@ -246,8 +248,8 @@ async function createJob() {
           <div class="upload-panel-heading">
             <el-icon><UploadFilled /></el-icon>
             <div>
-              <h3>Create Job</h3>
-              <p>Select a project, define job labels, and upload images in one step.</p>
+              <h3>{{ t('datasets.createJob') }}</h3>
+              <p>{{ t('datasets.createJobHelp') }}</p>
             </div>
           </div>
 
@@ -258,7 +260,7 @@ async function createJob() {
                 v-model="form.projectId"
                 :loading="loadingProjects"
                 filterable
-                placeholder="Select project"
+                :placeholder="t('datasets.selectProjectPlaceholder')"
               >
                 <el-option
                   v-for="project in projects"
@@ -280,7 +282,7 @@ async function createJob() {
           </label>
 
           <section class="label-builder">
-            <p class="panel-label">Labels</p>
+            <p class="panel-label">{{ t('datasets.labels') }}</p>
             <div class="label-builder-row">
               <el-input v-model="labelDraft.name" placeholder="layer_down" @keyup.enter="addLabel" />
               <el-select v-model="labelDraft.shape_type" class="shape-type-select">
@@ -289,7 +291,7 @@ async function createJob() {
                 <el-option label="point" value="point" />
               </el-select>
               <input v-model="labelDraft.color" class="label-color-input" type="color" />
-              <el-button type="primary" plain @click="addLabel">Add</el-button>
+              <el-button type="primary" plain @click="addLabel">{{ t('datasets.add') }}</el-button>
             </div>
 
             <div class="job-label-list">
@@ -298,21 +300,21 @@ async function createJob() {
                 <strong>{{ label.name }}</strong>
                 <span>{{ label.shape_type }}</span>
                 <small>{{ label.color }}</small>
-                <el-button size="small" text type="danger" @click="deleteLabel(index)">Delete</el-button>
+                <el-button size="small" text type="danger" @click="deleteLabel(index)">{{ t('common.delete') }}</el-button>
               </div>
-              <p v-if="labels.length === 0" class="muted-text">Add at least one label before creating a job.</p>
+              <p v-if="labels.length === 0" class="muted-text">{{ t('datasets.addLabelHelp') }}</p>
             </div>
           </section>
 
           <div class="file-pickers">
             <button class="file-picker-button" type="button" @click="imageInputRef?.click()">
               <el-icon><Picture /></el-icon>
-              <span>Choose images</span>
+              <span>{{ t('datasets.chooseImages') }}</span>
             </button>
             <div class="file-picker-with-hint">
               <button class="file-picker-button" type="button" @click="folderInputRef?.click()">
                 <el-icon><Picture /></el-icon>
-                <span>Choose folder</span>
+                <span>{{ t('datasets.chooseFolder') }}</span>
               </button>
               <p class="folder-picker-hint">
                 No need to zip. Select the image folder directly.
@@ -347,7 +349,7 @@ async function createJob() {
         </form>
 
         <section class="upload-summary">
-          <h3>Selected Images</h3>
+          <h3>{{ t('datasets.selectedImages') }}</h3>
           <div v-if="selectedFiles.length" class="selected-file-list">
             <p>{{ selectedFiles.length }} images selected. Showing first {{ previewFiles.length }}.</p>
             <div v-for="file in previewFiles" :key="`${file.name}-${file.size}-${file.lastModified}`" class="selected-file">
@@ -356,10 +358,10 @@ async function createJob() {
             </div>
             <p v-if="hiddenFileCount">... {{ hiddenFileCount }} more images not shown.</p>
           </div>
-          <p v-else>No images selected.</p>
+          <p v-else>{{ t('datasets.noImages') }}</p>
 
           <div v-if="lastUpload" class="upload-result">
-            <strong>Last created job</strong>
+            <strong>{{ t('datasets.lastCreatedJob') }}</strong>
             <span>Project #{{ lastUpload.project_id }}</span>
             <span>Job #{{ lastUpload.id }}</span>
             <span>{{ lastUpload.name }}</span>
@@ -368,14 +370,14 @@ async function createJob() {
       </section>
     </section>
 
-    <el-dialog v-model="showProjectDialog" title="Create Project" width="420px">
+    <el-dialog v-model="showProjectDialog" :title="t('datasets.createProject')" width="420px">
       <label class="field-label">
         Project name
         <el-input v-model="newProjectName" placeholder="Pig Eye OCT" @keyup.enter="createProject" />
       </label>
       <template #footer>
-        <el-button @click="showProjectDialog = false">Cancel</el-button>
-        <el-button type="primary" :loading="creatingProject" @click="createProject">Create</el-button>
+        <el-button @click="showProjectDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" :loading="creatingProject" @click="createProject">{{ t('common.create') }}</el-button>
       </template>
     </el-dialog>
   </main>

@@ -9,6 +9,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.models.research_phase import ResearchPhaseAnnotationSet
+    from app.models.research_skill import ResearchSkillAssessment
     from app.models.user import User
 
 
@@ -51,6 +53,16 @@ class ResearchVideo(Base):
         order_by="ResearchVideoLabel.sort_order",
     )
     annotations: Mapped[list[ResearchVideoAnnotation]] = relationship(
+        back_populates="video",
+        cascade="all, delete-orphan",
+    )
+    phase_annotation_sets: Mapped[list[ResearchPhaseAnnotationSet]] = relationship(
+        "ResearchPhaseAnnotationSet",
+        back_populates="video",
+        cascade="all, delete-orphan",
+    )
+    skill_assessments: Mapped[list[ResearchSkillAssessment]] = relationship(
+        "ResearchSkillAssessment",
         back_populates="video",
         cascade="all, delete-orphan",
     )

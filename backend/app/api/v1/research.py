@@ -3,7 +3,7 @@ from __future__ import annotations
 import mimetypes
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
@@ -23,21 +23,26 @@ from app.schemas.research import (
     ResearchVideoDetailRead,
     ResearchVideoFrameAnnotationsRead,
     ResearchVideoFrameRead,
+    ResearchVideoFramesPageRead,
     ResearchVideoLabelPayload,
     ResearchVideoLabelRead,
     ResearchVideoRead,
     ResearchVideoUploadResponse,
+    ResearchVideoWorkspaceRead,
 )
+from app.api.v1 import research_phases, research_skills
+from app.services.range_file_response import create_range_file_response
 from app.services.video_import import InvalidVideoError, extract_video_frames, save_uploaded_video
 
 router = APIRouter()
+router.include_router(research_phases.router)
+router.include_router(research_skills.router)
 
 
 @router.get("/videos", response_model=list[ResearchVideoRead])
 def list_research_videos(db: Session = Depends(get_db)) -> list[ResearchVideoRead]:
     videos = db.scalars(
         select(ResearchVideo)
-        .options(selectinload(ResearchVideo.frames))
         .order_by(ResearchVideo.created_at.desc(), ResearchVideo.id.desc())
     ).all()
     return [_research_video_to_read(video) for video in videos]
@@ -122,6 +127,37 @@ def get_research_video(video_id: int, db: Session = Depends(get_db)) -> Research
     return _research_video_to_detail(video)
 
 
+@router.get("/videos/{video_id}/workspace", response_model=ResearchVideoWorkspaceRead)
+def get_research_video_workspace(video_id: int, db: Session = Depends(get_db)) -> ResearchVideoWorkspaceRead:
+    video = _get_research_video_workspace_or_404(video_id, db)
+    return _research_video_to_workspace(video)
+
+
+@router.get("/videos/{video_id}/frames", response_model=ResearchVideoFramesPageRead)
+def list_research_video_frames(
+    video_id: int,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=500, ge=1, le=1000),
+    db: Session = Depends(get_db),
+) -> ResearchVideoFramesPageRead:
+    video = _get_research_video_workspace_or_404(video_id, db)
+    frames = db.scalars(
+        select(ResearchVideoFrame)
+        .where(ResearchVideoFrame.video_id == video_id)
+        .order_by(ResearchVideoFrame.frame_index)
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    total = video.frame_count
+    return ResearchVideoFramesPageRead(
+        items=[_research_frame_to_read(frame, video_id) for frame in frames],
+        offset=offset,
+        limit=limit,
+        total=total,
+        has_more=offset + len(frames) < total,
+    )
+
+
 @router.delete("/videos/{video_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def delete_research_video(video_id: int, db: Session = Depends(get_db)) -> Response:
     video = db.get(ResearchVideo, video_id)
@@ -133,15 +169,29 @@ def delete_research_video(video_id: int, db: Session = Depends(get_db)) -> Respo
 
 
 @router.get("/videos/{video_id}/file")
-def get_research_video_file(video_id: int, db: Session = Depends(get_db)) -> FileResponse:
+def get_research_video_file(request: Request, video_id: int, db: Session = Depends(get_db)) -> Response:
     video = _get_research_video_or_404(video_id, db)
-    return _inline_file_response(video.file_path, default_media_type="video/mp4")
+    file_path = _resolve_research_storage_path(video.file_path)
+    media_type, _ = mimetypes.guess_type(video.original_filename or str(file_path))
+    return create_range_file_response(
+        request=request,
+        file_path=file_path,
+        media_type=media_type or "video/mp4",
+        filename=video.original_filename,
+    )
 
 
 @router.head("/videos/{video_id}/file")
-def head_research_video_file(video_id: int, db: Session = Depends(get_db)) -> FileResponse:
+def head_research_video_file(request: Request, video_id: int, db: Session = Depends(get_db)) -> Response:
     video = _get_research_video_or_404(video_id, db)
-    return _inline_file_response(video.file_path, default_media_type="video/mp4")
+    file_path = _resolve_research_storage_path(video.file_path)
+    media_type, _ = mimetypes.guess_type(video.original_filename or str(file_path))
+    return create_range_file_response(
+        request=request,
+        file_path=file_path,
+        media_type=media_type or "video/mp4",
+        filename=video.original_filename,
+    )
 
 
 @router.get("/videos/{video_id}/thumbnail")
@@ -304,6 +354,17 @@ def _get_research_video_or_404(video_id: int, db: Session) -> ResearchVideo:
     return video
 
 
+def _get_research_video_workspace_or_404(video_id: int, db: Session) -> ResearchVideo:
+    video = db.scalar(
+        select(ResearchVideo)
+        .where(ResearchVideo.id == video_id)
+        .options(selectinload(ResearchVideo.labels))
+    )
+    if video is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research video not found")
+    return video
+
+
 def _get_research_video_frame_or_404(video_id: int, frame_index: int, db: Session) -> ResearchVideoFrame:
     frame = db.scalar(
         select(ResearchVideoFrame).where(
@@ -345,18 +406,30 @@ def _research_video_to_detail(video: ResearchVideo) -> ResearchVideoDetailRead:
         **_research_video_to_read(video).model_dump(),
         file_url=f"/api/research/videos/{video.id}/file",
         frames=[
-            ResearchVideoFrameRead(
-                id=frame.id,
-                frame_index=frame.frame_index,
-                timestamp_ms=frame.timestamp_ms,
-                filename=frame.filename,
-                width=frame.width,
-                height=frame.height,
-                image_url=f"/api/research/videos/{video.id}/frames/{frame.frame_index}/image",
-            )
+            _research_frame_to_read(frame, video.id)
             for frame in video.frames
         ],
         labels=[_research_label_to_read(label, None) for label in video.labels],
+    )
+
+
+def _research_video_to_workspace(video: ResearchVideo) -> ResearchVideoWorkspaceRead:
+    return ResearchVideoWorkspaceRead(
+        **_research_video_to_read(video).model_dump(),
+        file_url=f"/api/research/videos/{video.id}/file",
+        labels=[_research_label_to_read(label, None) for label in video.labels],
+    )
+
+
+def _research_frame_to_read(frame: ResearchVideoFrame, video_id: int) -> ResearchVideoFrameRead:
+    return ResearchVideoFrameRead(
+        id=frame.id,
+        frame_index=frame.frame_index,
+        timestamp_ms=frame.timestamp_ms,
+        filename=frame.filename,
+        width=frame.width,
+        height=frame.height,
+        image_url=f"/api/research/videos/{video_id}/frames/{frame.frame_index}/image",
     )
 
 
@@ -391,7 +464,7 @@ def _validate_unique_research_label_name(
 
 
 def _inline_file_response(path: str, *, default_media_type: str) -> FileResponse:
-    file_path = Path(path)
+    file_path = _resolve_research_storage_path(path)
     if not file_path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
 
@@ -401,3 +474,16 @@ def _inline_file_response(path: str, *, default_media_type: str) -> FileResponse
         media_type=media_type or default_media_type,
         headers={"Content-Disposition": "inline"},
     )
+
+
+def _resolve_research_storage_path(path: str) -> Path:
+    file_path = Path(path).expanduser()
+    resolved = file_path.resolve(strict=False)
+    allowed_root = (Path(settings.local_storage_root) / "research" / "videos").resolve(strict=False)
+
+    try:
+        resolved.relative_to(allowed_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found") from exc
+
+    return resolved

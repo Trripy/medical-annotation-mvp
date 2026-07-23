@@ -1,19 +1,22 @@
 <script setup lang="ts">
 import { VideoPlay } from '@element-plus/icons-vue'
+import { useI18n } from 'vue-i18n'
 
 import AppSidebar from '../components/AppSidebar.vue'
+
+const { t } = useI18n()
 </script>
 
 <template>
   <main class="workspace">
-    <AppSidebar subtitle="Research" />
+    <AppSidebar :subtitle="t('research.subtitle')" />
 
     <section class="content">
       <header class="topbar">
         <div>
-          <p class="eyebrow">Experimental workspace</p>
-          <h2>Research</h2>
-          <p class="page-subtitle">Research features are isolated from production annotation projects.</p>
+          <p class="eyebrow">{{ t('research.experimentalWorkspace') }}</p>
+          <h2>{{ t('research.title') }}</h2>
+          <p class="page-subtitle">{{ t('research.description') }}</p>
         </div>
       </header>
 
@@ -23,11 +26,11 @@ import AppSidebar from '../components/AppSidebar.vue'
             <el-icon><VideoPlay /></el-icon>
           </div>
           <div class="research-card-content">
-            <h3>Video Annotation Experiments</h3>
-            <p>Import videos, play them frame by frame, and reuse the existing annotation tools on individual frames.</p>
+            <h3>{{ t('research.videoExperiments') }}</h3>
+            <p>{{ t('research.videoExperimentsDescription') }}</p>
           </div>
           <router-link to="/research/videos" class="research-card-link">
-            <el-button type="primary">Open</el-button>
+            <el-button type="primary">{{ t('common.open') }}</el-button>
           </router-link>
         </article>
       </section>

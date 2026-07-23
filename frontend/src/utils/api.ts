@@ -1,4 +1,5 @@
-const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim()
+const viteEnv = (import.meta as { env?: Record<string, string | undefined> }).env
+const configuredApiBaseUrl = viteEnv?.VITE_API_BASE_URL?.trim()
 
 function normalizeApiBaseUrl(url: string): string {
   return url
@@ -9,7 +10,9 @@ function normalizeApiBaseUrl(url: string): string {
 
 export const API_BASE_URL = configuredApiBaseUrl
   ? normalizeApiBaseUrl(configuredApiBaseUrl)
-  : `${window.location.protocol}//${window.location.hostname}:8000`
+  : typeof window !== 'undefined'
+    ? `${window.location.protocol}//${window.location.hostname}:8000`
+    : 'http://localhost:8000'
 
 export const API_V1_BASE_URL = `${API_BASE_URL}/api/v1`
 
