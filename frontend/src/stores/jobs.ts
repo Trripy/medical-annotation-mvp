@@ -23,7 +23,8 @@ export type ProjectCard = {
 }
 
 export type JobExportFormat = 'labelme' | 'overlay' | 'indexed-mask' | 'color-mask'
-export type JobExportScope = 'all' | 'annotated_only'
+export type JobExportRange = 'all' | 'annotated' | 'selected'
+export type JobExportScope = JobExportRange
 export type JobImportFormat = 'auto' | 'labelme' | 'coco' | 'cvat' | 'yolo' | 'mask' | 'voc' | 'via' | 'supervisely'
 export type JobImportMode = 'append' | 'replace_matched_images' | 'replace_all_job'
 export type MissingLabelPolicy = 'auto_create' | 'skip'
@@ -44,6 +45,32 @@ export type JobImportReport = {
   reassigned_conflicting_colors?: number
   skipped_items: Array<{ source: string; reason: string }>
   errors: string[]
+}
+
+export type JobExportOptions = {
+  exportRange?: JobExportRange
+  includeOriginalImages?: boolean
+  selectedImageIds?: number[]
+}
+
+export type JobExportImage = {
+  id: number
+  filename: string
+  frame_index: number | null
+  thumbnail_url: string
+  annotation_count: number
+}
+
+export type JobExportImagePage = {
+  items: JobExportImage[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export type JobExportImageIds = {
+  image_ids: number[]
+  total: number
 }
 
 const exportConfigs: Record<JobExportFormat, { endpoint: string; filenameSuffix: string }> = {
@@ -95,11 +122,11 @@ function sanitizeFilename(name: string | null | undefined, fallback: string): st
 function buildExportFilename(
   job: Pick<JobCard, 'id' | 'name'>,
   format: JobExportFormat,
-  scope: JobExportScope,
+  scope: JobExportRange,
 ): string {
   const config = exportConfigs[format]
   const safeJobName = sanitizeFilename(job.name, `job_${job.id}`)
-  const scopeSuffix = scope === 'annotated_only' ? '_annotated_only' : ''
+  const scopeSuffix = scope === 'annotated' ? '_annotated_only' : scope === 'selected' ? '_selected' : ''
   return `${safeJobName}_${config.filenameSuffix}${scopeSuffix}.zip`
 }
 
@@ -227,14 +254,81 @@ export const useJobsStore = defineStore('jobs', {
         return false
       }
     },
-    async exportJob(job: Pick<JobCard, 'id' | 'name'>, format: JobExportFormat, scope: JobExportScope = 'all') {
+    async fetchExportImages(
+      jobId: number,
+      options: { search?: string; annotationStatus?: 'all' | 'annotated' | 'unannotated'; limit?: number; offset?: number } = {},
+    ): Promise<JobExportImagePage | null> {
+      this.error = ''
+      const searchParams = new URLSearchParams({
+        search: options.search ?? '',
+        annotation_status: options.annotationStatus ?? 'all',
+        limit: String(options.limit ?? 40),
+        offset: String(options.offset ?? 0),
+      })
+
+      try {
+        const response = await fetch(apiUrl(`/api/jobs/${jobId}/export/images?${searchParams.toString()}`))
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null)
+          const detail = typeof payload?.detail === 'string' ? payload.detail : `Image list failed: ${response.status}`
+          throw new Error(detail)
+        }
+
+        return await response.json()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      }
+    },
+    async fetchExportImageIds(
+      jobId: number,
+      options: { search?: string; annotationStatus?: 'all' | 'annotated' | 'unannotated' } = {},
+    ): Promise<JobExportImageIds | null> {
+      this.error = ''
+      const searchParams = new URLSearchParams({
+        search: options.search ?? '',
+        annotation_status: options.annotationStatus ?? 'all',
+      })
+
+      try {
+        const response = await fetch(apiUrl(`/api/jobs/${jobId}/export/images/ids?${searchParams.toString()}`))
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null)
+          const detail = typeof payload?.detail === 'string' ? payload.detail : `Image ids failed: ${response.status}`
+          throw new Error(detail)
+        }
+
+        return await response.json()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      }
+    },
+    async exportJob(
+      job: Pick<JobCard, 'id' | 'name'>,
+      format: JobExportFormat,
+      options: JobExportOptions | JobExportRange = 'all',
+    ) {
       this.exportingJobIds = [...this.exportingJobIds, job.id]
       this.error = ''
 
       try {
         const config = exportConfigs[format]
-        const searchParams = new URLSearchParams({ export_scope: scope })
-        const response = await fetch(apiUrl(`/api/jobs/${job.id}/export/${config.endpoint}?${searchParams.toString()}`))
+        const normalizedOptions = typeof options === 'string'
+          ? { exportRange: options }
+          : options
+        const exportRange = normalizedOptions.exportRange ?? 'all'
+        const response = await fetch(apiUrl(`/api/jobs/${job.id}/export/${config.endpoint}`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            export_range: exportRange,
+            include_original_images: normalizedOptions.includeOriginalImages ?? false,
+            selected_image_ids: exportRange === 'selected' ? normalizedOptions.selectedImageIds ?? [] : [],
+          }),
+        })
 
         if (!response.ok) {
           const payload = await response.json().catch(() => null)
@@ -247,7 +341,7 @@ export const useJobsStore = defineStore('jobs', {
         const link = document.createElement('a')
         link.href = url
         link.download = parseContentDispositionFilename(response.headers.get('Content-Disposition'))
-          ?? buildExportFilename(job, format, scope)
+          ?? buildExportFilename(job, format, exportRange)
         document.body.appendChild(link)
         link.click()
         link.remove()

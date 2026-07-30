@@ -2,16 +2,25 @@
 import { Connection } from '@element-plus/icons-vue'
 import { storeToRefs } from 'pinia'
 import { onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 import AppSidebar from '../components/AppSidebar.vue'
 import { usePlatformStore } from '../stores/platform'
 
+const { t } = useI18n()
 const platformStore = usePlatformStore()
 const { health, loading, error } = storeToRefs(platformStore)
 
 onMounted(() => {
   void platformStore.fetchHealth()
 })
+
+function formatHealthStatus(status: string | null | undefined) {
+  if (status === 'ok') {
+    return t('workbench.ready')
+  }
+  return status ?? t('workbench.pending')
+}
 </script>
 
 <template>
@@ -21,34 +30,34 @@ onMounted(() => {
     <section class="content">
       <header class="topbar">
         <div>
-          <p class="eyebrow">Local filesystem first</p>
-          <h2>医学图像标注平台骨架</h2>
+          <p class="eyebrow">{{ t('workbench.eyebrow') }}</p>
+          <h2>{{ t('workbench.title') }}</h2>
         </div>
         <el-button :loading="loading" type="primary" @click="platformStore.fetchHealth">
           <el-icon><Connection /></el-icon>
-          Check API
+          {{ t('workbench.checkApi') }}
         </el-button>
       </header>
 
       <div class="status-grid">
         <el-card shadow="never">
-          <template #header>Backend</template>
+          <template #header>{{ t('workbench.backend') }}</template>
           <el-tag :type="health?.status === 'ok' ? 'success' : 'info'">
-            {{ health?.status ?? 'pending' }}
+            {{ formatHealthStatus(health?.status) }}
           </el-tag>
         </el-card>
 
         <el-card shadow="never">
-          <template #header>PostgreSQL</template>
+          <template #header>{{ t('workbench.database') }}</template>
           <el-tag :type="health?.database === 'ok' ? 'success' : 'info'">
-            {{ health?.database ?? 'pending' }}
+            {{ formatHealthStatus(health?.database) }}
           </el-tag>
         </el-card>
 
         <el-card shadow="never">
-          <template #header>Storage</template>
+          <template #header>{{ t('workbench.storage') }}</template>
           <el-tag :type="health?.storage_ready ? 'success' : 'info'">
-            {{ health?.storage_ready ? 'ready' : 'pending' }}
+            {{ health?.storage_ready ? t('workbench.ready') : t('workbench.pending') }}
           </el-tag>
         </el-card>
       </div>
@@ -57,9 +66,9 @@ onMounted(() => {
 
       <section class="canvas-shell">
         <div class="canvas-toolbar">
-          <el-button disabled>Upload Study</el-button>
-          <el-button disabled>Open Viewer</el-button>
-          <el-button disabled>Export Labels</el-button>
+          <el-button disabled>{{ t('workbench.uploadStudy') }}</el-button>
+          <el-button disabled>{{ t('workbench.openViewer') }}</el-button>
+          <el-button disabled>{{ t('workbench.exportLabels') }}</el-button>
         </div>
         <div class="viewer-placeholder">
           <div class="scan-frame">
@@ -67,8 +76,8 @@ onMounted(() => {
             <span></span>
             <span></span>
           </div>
-          <p>基础项目已就绪，后续可接入 DICOM/NIfTI 浏览、标注任务和标签导出。</p>
-          <small v-if="health">Storage root: {{ health.storage_root }}</small>
+          <p>{{ t('workbench.placeholder') }}</p>
+          <small v-if="health">{{ t('workbench.storageRoot', { path: health.storage_root }) }}</small>
         </div>
       </section>
     </section>

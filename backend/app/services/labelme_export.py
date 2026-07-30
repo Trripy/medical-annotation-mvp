@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import Annotation, Image, Job, Task
-from app.services.export_scope import load_job_export_bundle
+from app.services.export_scope import add_original_images_to_archive, load_job_export_bundle
 
 
 def build_labelme_zip(task: Task, db: Session) -> BytesIO:
@@ -20,11 +20,26 @@ def build_labelme_zip(task: Task, db: Session) -> BytesIO:
     return build_labelme_zip_for_images(_ordered_images(images))
 
 
-def build_job_labelme_zip(job: Job, db: Session, *, export_scope: str | None = "all") -> BytesIO:
-    images, annotations_by_image = load_job_export_bundle(job, db, export_scope=export_scope)
+def build_job_labelme_zip(
+    job: Job,
+    db: Session,
+    *,
+    export_scope: str | None = "all",
+    export_range: str | None = None,
+    selected_image_ids: list[int] | None = None,
+    include_original_images: bool = False,
+) -> BytesIO:
+    images, annotations_by_image = load_job_export_bundle(
+        job,
+        db,
+        export_scope=export_scope,
+        export_range=export_range,
+        selected_image_ids=selected_image_ids,
+    )
     return build_labelme_zip_for_images(
         images,
         annotations_by_image=annotations_by_image,
+        include_original_images=include_original_images,
     )
 
 
@@ -32,9 +47,11 @@ def build_labelme_zip_for_images(
     images: list[Image],
     *,
     annotations_by_image: dict[int, list[Annotation]] | None = None,
+    include_original_images: bool = False,
 ) -> BytesIO:
     buffer = BytesIO()
     with ZipFile(buffer, mode="w", compression=ZIP_DEFLATED) as zip_file:
+        emitted_image_ids: list[int] = []
         for image in images:
             annotations = annotations_by_image.get(image.id, []) if annotations_by_image is not None else image.annotations
             labelme_json = _build_labelme_json(image, annotations)
@@ -43,6 +60,10 @@ def build_labelme_zip_for_images(
                 json_name,
                 json.dumps(labelme_json, ensure_ascii=False, indent=2),
             )
+            emitted_image_ids.append(image.id)
+
+        if include_original_images:
+            add_original_images_to_archive(zip_file, images, emitted_image_ids)
 
     buffer.seek(0)
     return buffer
@@ -54,7 +75,7 @@ def _build_labelme_json(image: Image, annotations: list[Annotation]) -> dict:
         "flags": {},
         "shapes": [
             _build_shape(annotation)
-            for annotation in annotations
+            for annotation in _ordered_annotations(annotations)
             if annotation.shape_type != "classification"
         ],
         "imagePath": image.filename,
@@ -93,6 +114,10 @@ def _rectangle_to_polygon(points: list[list[float]]) -> list[list[float]]:
         [x2, y2],
         [x1, y2],
     ]
+
+
+def _ordered_annotations(annotations: list[Annotation]) -> list[Annotation]:
+    return sorted(annotations, key=lambda annotation: (annotation.z_order, annotation.id))
 
 
 def _ordered_images(images: list[Image]) -> list[Image]:

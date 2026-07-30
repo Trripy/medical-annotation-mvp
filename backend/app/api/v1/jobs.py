@@ -3,7 +3,7 @@ import logging
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
@@ -21,6 +21,10 @@ from app.schemas.annotation import (
 )
 from app.schemas.job import (
     ExportScope,
+    JobExportImageIdsRead,
+    JobExportImagePageRead,
+    JobExportImageRead,
+    JobExportRequest,
     JobImportRequest,
     JobImportResponse,
     JobLabelCreate,
@@ -35,7 +39,12 @@ from app.services.download_filenames import (
     build_attachment_content_disposition,
     build_job_export_filename,
 )
-from app.services.export_scope import get_annotated_image_counts
+from app.services.export_scope import (
+    ExportSelectionError,
+    OriginalImageExportError,
+    get_annotated_image_counts,
+    get_job_image_annotation_counts,
+)
 from app.services.image_storage import InvalidImageError, save_uploaded_image
 from app.services.importers import import_labels_for_job
 from app.services.label_colors import is_color_conflict, normalize_hex_color, pick_distinct_label_color
@@ -173,7 +182,9 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetailRead:
     images = _job_images(job)
     image_ids = [image.id for image in images]
     annotations = db.scalars(
-        select(Annotation).where(Annotation.job_id == job.id, Annotation.image_id.in_(image_ids))
+        select(Annotation)
+        .where(Annotation.job_id == job.id, Annotation.image_id.in_(image_ids))
+        .order_by(Annotation.image_id, Annotation.z_order, Annotation.id)
     ).all()
     labels = _job_labels(job)
 
@@ -365,6 +376,7 @@ def save_image_annotations(
 
     db.execute(delete(Annotation).where(Annotation.job_id == job_id, Annotation.image_id == image_id))
 
+    normalized_writes = _normalized_annotation_writes(payload.annotations)
     saved_annotations = [
         Annotation(
             image_id=image_id,
@@ -373,8 +385,9 @@ def save_image_annotations(
             shape_type=annotation.shape_type,
             points=annotation.points,
             attributes=annotation.attributes,
+            z_order=index,
         )
-        for annotation in payload.annotations
+        for index, annotation in enumerate(normalized_writes)
     ]
     db.add_all(saved_annotations)
     db.commit()
@@ -383,6 +396,16 @@ def save_image_annotations(
         db.refresh(annotation)
 
     return saved_annotations
+
+
+def _normalized_annotation_writes(annotations):
+    return [
+        annotation
+        for _index, annotation in sorted(
+            enumerate(annotations),
+            key=lambda item: (item[1].z_order, item[0]),
+        )
+    ]
 
 
 @router.post("/{job_id}/import-labels", response_model=JobImportResponse)
@@ -469,26 +492,70 @@ def delete_job(job_id: int, db: Session = Depends(get_db)) -> None:
     _delete_files(file_paths)
 
 
+@router.get("/{job_id}/export/images", response_model=JobExportImagePageRead)
+def list_job_export_images(
+    job_id: int,
+    search: str = "",
+    annotation_status: str = "all",
+    limit: int = Query(default=40, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> JobExportImagePageRead:
+    job = _get_job_for_export(job_id, db)
+    images = _job_images(job)
+    annotation_counts = get_job_image_annotation_counts(db, [image.id for image in images], job_id=job.id)
+    filtered_images = _filter_export_images(images, annotation_counts, search=search, annotation_status=annotation_status)
+    page_images = filtered_images[offset : offset + limit]
+
+    return JobExportImagePageRead(
+        items=[
+            JobExportImageRead(
+                id=image.id,
+                filename=image.filename,
+                frame_index=image.frame_index,
+                thumbnail_url=f"/api/images/{image.id}/thumbnail",
+                annotation_count=annotation_counts.get(image.id, 0),
+            )
+            for image in page_images
+        ],
+        total=len(filtered_images),
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/{job_id}/export/images/ids", response_model=JobExportImageIdsRead)
+def list_job_export_image_ids(
+    job_id: int,
+    search: str = "",
+    annotation_status: str = "all",
+    db: Session = Depends(get_db),
+) -> JobExportImageIdsRead:
+    job = _get_job_for_export(job_id, db)
+    images = _job_images(job)
+    annotation_counts = get_job_image_annotation_counts(db, [image.id for image in images], job_id=job.id)
+    filtered_images = _filter_export_images(images, annotation_counts, search=search, annotation_status=annotation_status)
+    image_ids = [image.id for image in filtered_images]
+    return JobExportImageIdsRead(image_ids=image_ids, total=len(image_ids))
+
+
 @router.get("/{job_id}/export/labelme")
 def export_job_labelme(
     job_id: int,
     export_scope: ExportScope = "all",
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
-    job = db.get(Job, job_id)
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    request = JobExportRequest(include_original_images=False)
+    return _export_job_archive(job_id, "labelme", request, db, legacy_scope=export_scope)
 
-    try:
-        archive = build_job_labelme_zip(job, db, export_scope=export_scope)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    filename = build_job_export_filename(job, "labelme", export_scope=export_scope)
-    return StreamingResponse(
-        archive,
-        media_type="application/zip",
-        headers={"Content-Disposition": build_attachment_content_disposition(filename, "export_labelme.zip")},
-    )
+
+@router.post("/{job_id}/export/labelme")
+def export_job_labelme_post(
+    job_id: int,
+    request: JobExportRequest,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    return _export_job_archive(job_id, "labelme", request, db)
 
 
 @router.get("/{job_id}/export/overlay")
@@ -497,20 +564,17 @@ def export_job_overlay_images(
     export_scope: ExportScope = "all",
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
-    job = db.get(Job, job_id)
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    request = JobExportRequest(include_original_images=False)
+    return _export_job_archive(job_id, "overlay", request, db, legacy_scope=export_scope)
 
-    try:
-        archive = build_job_overlay_zip(job, db, export_scope=export_scope)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    filename = build_job_export_filename(job, "overlay", export_scope=export_scope)
-    return StreamingResponse(
-        archive,
-        media_type="application/zip",
-        headers={"Content-Disposition": build_attachment_content_disposition(filename, "export_overlay.zip")},
-    )
+
+@router.post("/{job_id}/export/overlay")
+def export_job_overlay_images_post(
+    job_id: int,
+    request: JobExportRequest,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    return _export_job_archive(job_id, "overlay", request, db)
 
 
 @router.get("/{job_id}/export/indexed-mask")
@@ -519,21 +583,17 @@ def export_job_indexed_masks(
     export_scope: ExportScope = "all",
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
-    job = db.get(Job, job_id)
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    request = JobExportRequest(include_original_images=False)
+    return _export_job_archive(job_id, "indexed-mask", request, db, legacy_scope=export_scope)
 
-    try:
-        archive = build_job_indexed_mask_zip(job, db, export_scope=export_scope)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    filename = build_job_export_filename(job, "mask_indexed", export_scope=export_scope)
-    return StreamingResponse(
-        archive,
-        media_type="application/zip",
-        headers={"Content-Disposition": build_attachment_content_disposition(filename, "export_mask_indexed.zip")},
-    )
+@router.post("/{job_id}/export/indexed-mask")
+def export_job_indexed_masks_post(
+    job_id: int,
+    request: JobExportRequest,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    return _export_job_archive(job_id, "indexed-mask", request, db)
 
 
 @router.get("/{job_id}/export/color-mask")
@@ -542,20 +602,129 @@ def export_job_color_masks(
     export_scope: ExportScope = "all",
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
-    job = db.get(Job, job_id)
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    request = JobExportRequest(include_original_images=False)
+    return _export_job_archive(job_id, "color-mask", request, db, legacy_scope=export_scope)
+
+
+@router.post("/{job_id}/export/color-mask")
+def export_job_color_masks_post(
+    job_id: int,
+    request: JobExportRequest,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    return _export_job_archive(job_id, "color-mask", request, db)
+
+
+def _export_job_archive(
+    job_id: int,
+    export_format: str,
+    request: JobExportRequest,
+    db: Session,
+    *,
+    legacy_scope: str | None = None,
+) -> StreamingResponse:
+    job = _get_job_for_export(job_id, db)
+    selected_image_ids = request.selected_image_ids if request.export_range == "selected" else []
+    export_range = request.export_range
 
     try:
-        archive = build_job_color_mask_zip(job, db, export_scope=export_scope)
+        if export_format == "labelme":
+            archive = build_job_labelme_zip(
+                job,
+                db,
+                export_scope=legacy_scope,
+                export_range=export_range,
+                selected_image_ids=selected_image_ids,
+                include_original_images=request.include_original_images,
+            )
+            filename = build_job_export_filename(job, "labelme", export_scope=legacy_scope, export_range=export_range)
+            fallback = "export_labelme.zip"
+        elif export_format == "overlay":
+            archive = build_job_overlay_zip(
+                job,
+                db,
+                export_scope=legacy_scope,
+                export_range=export_range,
+                selected_image_ids=selected_image_ids,
+                include_original_images=request.include_original_images,
+            )
+            filename = build_job_export_filename(job, "overlay", export_scope=legacy_scope, export_range=export_range)
+            fallback = "export_overlay.zip"
+        elif export_format == "indexed-mask":
+            archive = build_job_indexed_mask_zip(
+                job,
+                db,
+                export_scope=legacy_scope,
+                export_range=export_range,
+                selected_image_ids=selected_image_ids,
+                include_original_images=request.include_original_images,
+            )
+            filename = build_job_export_filename(job, "mask_indexed", export_scope=legacy_scope, export_range=export_range)
+            fallback = "export_mask_indexed.zip"
+        elif export_format == "color-mask":
+            archive = build_job_color_mask_zip(
+                job,
+                db,
+                export_scope=legacy_scope,
+                export_range=export_range,
+                selected_image_ids=selected_image_ids,
+                include_original_images=request.include_original_images,
+            )
+            filename = build_job_export_filename(job, "mask_color", export_scope=legacy_scope, export_range=export_range)
+            fallback = "export_mask_color.zip"
+        else:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Export format not found")
+    except OriginalImageExportError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except ExportSelectionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    filename = build_job_export_filename(job, "mask_color", export_scope=export_scope)
+
     return StreamingResponse(
         archive,
         media_type="application/zip",
-        headers={"Content-Disposition": build_attachment_content_disposition(filename, "export_mask_color.zip")},
+        headers={"Content-Disposition": build_attachment_content_disposition(filename, fallback)},
     )
+
+
+def _get_job_for_export(job_id: int, db: Session) -> Job:
+    job = db.scalar(
+        select(Job)
+        .where(Job.id == job_id)
+        .options(
+            selectinload(Job.images),
+            selectinload(Job.task).selectinload(Task.images),
+        )
+    )
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return job
+
+
+def _filter_export_images(
+    images: list[Image],
+    annotation_counts: dict[int, int],
+    *,
+    search: str,
+    annotation_status: str,
+) -> list[Image]:
+    normalized_search = search.strip().lower()
+    normalized_status = annotation_status.strip().lower()
+    if normalized_status not in {"all", "annotated", "unannotated"}:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid annotation_status")
+
+    filtered: list[Image] = []
+    for image in images:
+        if normalized_search and normalized_search not in image.filename.lower():
+            continue
+        annotation_count = annotation_counts.get(image.id, 0)
+        if normalized_status == "annotated" and annotation_count <= 0:
+            continue
+        if normalized_status == "unannotated" and annotation_count > 0:
+            continue
+        filtered.append(image)
+    return filtered
 
 
 def _get_job_for_label_management(job_id: int, db: Session) -> Job:

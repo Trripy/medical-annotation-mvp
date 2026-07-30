@@ -106,6 +106,16 @@ POSTGRES_PORT=5433
 
 LOCAL_STORAGE_ROOT=/path/to/medical-annotation-mvp-gpu/storage
 
+# Optional. Leave empty to disable Research video server-side import.
+# JSON object: root alias -> absolute directory.
+RESEARCH_VIDEO_IMPORT_ROOTS={"dataset":"/data1/dataset","archive":"/data2/video_archive"}
+
+# Optional. Research video trimming uses ffmpeg/ffprobe. Leave blank to use PATH
+# or the bundled conda environment when available. Trimming requires libx264 or
+# libopenh264 so the generated MP4 remains browser-compatible H.264.
+RESEARCH_VIDEO_FFMPEG_BINARY=/path/to/ffmpeg
+RESEARCH_VIDEO_TRIM_MAX_CONCURRENCY=1
+
 CONDA_ENV=/path/to/conda/env
 SAM2_REPO_ROOT=/path/to/sam2
 SAM2_CHECKPOINT=/path/to/sam2/checkpoints/sam2.1_hiera_large.pt

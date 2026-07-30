@@ -5,6 +5,7 @@ import type { ComponentPublicInstance } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import type { AnnotationObject, Label } from '../stores/annotation'
+import { sortAnnotationsFrontToBack } from '../utils/annotationLayerOrder'
 import { getPolygonSmoothValue } from '../utils/polygon'
 
 const props = defineProps<{
@@ -31,13 +32,17 @@ const emit = defineEmits<{
   updatePolygonSmoothing: [id: number | string, value: number]
   commitPolygonSmoothing: [id: number | string, value: number]
   resetPolygonSmoothing: [id: number | string]
+  reorderAnnotation: [id: number | string, targetFrontIndex: number]
+  moveAnnotationLayer: [id: number | string, direction: 'up' | 'down' | 'top' | 'bottom']
 }>()
 
 const cardRefs = ref(new Map<number | string, HTMLElement>())
 const polygonSmoothingValue = ref(0)
+const draggingAnnotationId = ref<number | string | null>(null)
+const dragOverAnnotationId = ref<number | string | null>(null)
 
 const objectAnnotations = computed(() =>
-  props.annotations.filter((annotation) => !isClassificationAnnotation(annotation)),
+  sortAnnotationsFrontToBack(props.annotations.filter((annotation) => !isClassificationAnnotation(annotation))),
 )
 const objectCount = computed(() => objectAnnotations.value.length)
 const hiddenCount = computed(() => objectAnnotations.value.filter((annotation) => isHidden(annotation.id)).length)
@@ -91,6 +96,44 @@ function setCardRef(id: number | string, element: Element | ComponentPublicInsta
 
 function updateLabel(id: number | string, labelId: string | number) {
   emit('updateAnnotationLabel', id, Number(labelId))
+}
+
+function startDrag(annotationId: number | string, event: DragEvent) {
+  draggingAnnotationId.value = annotationId
+  dragOverAnnotationId.value = annotationId
+  event.dataTransfer?.setData('text/plain', String(annotationId))
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+  }
+}
+
+function updateDragTarget(annotationId: number | string, event: DragEvent) {
+  event.preventDefault()
+  if (draggingAnnotationId.value === null) {
+    return
+  }
+  dragOverAnnotationId.value = annotationId
+}
+
+function finishDrag(annotationId: number | string, event: DragEvent) {
+  event.preventDefault()
+  const draggedId = draggingAnnotationId.value
+  draggingAnnotationId.value = null
+  dragOverAnnotationId.value = null
+  if (draggedId === null) {
+    return
+  }
+
+  const targetIndex = objectAnnotations.value.findIndex((annotation) => annotation.id === annotationId)
+  if (targetIndex < 0) {
+    return
+  }
+  emit('reorderAnnotation', draggedId, targetIndex)
+}
+
+function clearDragState() {
+  draggingAnnotationId.value = null
+  dragOverAnnotationId.value = null
 }
 
 function updateSmoothing(value: number | null) {
@@ -198,14 +241,35 @@ function commitSmoothing(value: number | null) {
         :key="annotation.id"
         :ref="(element) => setCardRef(annotation.id, element)"
         class="object-card"
-        :class="{ selected: selectedAnnotationId === annotation.id, hidden: isHidden(annotation.id) }"
+        :class="{
+          selected: selectedAnnotationId === annotation.id,
+          hidden: isHidden(annotation.id),
+          dragging: draggingAnnotationId === annotation.id,
+          'drag-over': dragOverAnnotationId === annotation.id && draggingAnnotationId !== annotation.id,
+        }"
         :style="{ borderColor: selectedAnnotationId === annotation.id ? labelFor(annotation.label_id)?.color : undefined }"
+        @dragover="updateDragTarget(annotation.id, $event)"
+        @drop="finishDrag(annotation.id, $event)"
         @click="emit('selectAnnotation', annotation.id)"
       >
         <div class="object-card-top">
+          <button
+            class="object-drag-handle"
+            type="button"
+            draggable="true"
+            :aria-label="t('frameAnnotation.dragLayer')"
+            @click.stop
+            @dragstart.stop="startDrag(annotation.id, $event)"
+            @dragend="clearDragState"
+          >
+            ⋮⋮
+          </button>
           <div>
             <strong>{{ t('frameAnnotation.object') }} #{{ index + 1 }}</strong>
-            <span class="object-shape-type">{{ annotation.shape_type }} {{ t('frameAnnotation.shapeSuffix') }}</span>
+            <span class="object-shape-type">
+              {{ annotation.shape_type }} {{ t('frameAnnotation.shapeSuffix') }} ·
+              {{ index === 0 ? t('frameAnnotation.topLayer') : index === objectAnnotations.length - 1 ? t('frameAnnotation.bottomLayer') : t('frameAnnotation.layerOrder', { order: objectAnnotations.length - index }) }}
+            </span>
           </div>
           <span class="label-swatch" :style="{ backgroundColor: labelFor(annotation.label_id)?.color }"></span>
         </div>
@@ -226,6 +290,20 @@ function commitSmoothing(value: number | null) {
         </el-select>
 
         <div class="object-card-actions">
+          <el-button-group class="object-layer-actions" @click.stop>
+            <el-button size="small" text :disabled="index === 0" @click="emit('moveAnnotationLayer', annotation.id, 'up')">
+              {{ t('frameAnnotation.layerUp') }}
+            </el-button>
+            <el-button size="small" text :disabled="index === objectAnnotations.length - 1" @click="emit('moveAnnotationLayer', annotation.id, 'down')">
+              {{ t('frameAnnotation.layerDown') }}
+            </el-button>
+            <el-button size="small" text :disabled="index === 0" @click="emit('moveAnnotationLayer', annotation.id, 'top')">
+              {{ t('frameAnnotation.layerTop') }}
+            </el-button>
+            <el-button size="small" text :disabled="index === objectAnnotations.length - 1" @click="emit('moveAnnotationLayer', annotation.id, 'bottom')">
+              {{ t('frameAnnotation.layerBottom') }}
+            </el-button>
+          </el-button-group>
           <el-button size="small" text @click.stop="emit('toggleVisibility', annotation.id)">
             <el-icon><Hide v-if="isHidden(annotation.id)" /><View v-else /></el-icon>
             {{ isHidden(annotation.id) ? t('frameAnnotation.hidden') : t('frameAnnotation.visible') }}

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 import type { ResearchVideoFrame } from '../stores/researchVideos'
 import { getVirtualRange } from '../utils/researchVideoLayout'
@@ -23,6 +24,7 @@ const emit = defineEmits<{
   select: [index: number]
 }>()
 
+const { t } = useI18n()
 const viewportRef = ref<HTMLElement | null>(null)
 const scrollTop = ref(0)
 const viewportHeight = ref(0)
@@ -172,7 +174,7 @@ defineExpose({
             @click="emit('select', entry.index)"
           >
             <span>
-              {{ entry.frame ? `${entry.index + 1}. ${entry.frame.filename}` : `${entry.index + 1}. Loading frame...` }}
+              {{ entry.frame ? `${entry.index + 1}. ${entry.frame.filename}` : `${entry.index + 1}. ${t('common.loadingFrame')}` }}
             </span>
             <span class="frame-choice-badge review">
               {{ entry.frame ? formatTimestamp(entry.frame.timestamp_ms) : '--:--.--' }}

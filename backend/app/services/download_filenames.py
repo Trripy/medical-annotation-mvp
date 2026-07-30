@@ -4,7 +4,7 @@ import re
 from urllib.parse import quote
 
 from app.models.job import Job
-from app.services.export_scope import normalize_export_scope
+from app.services.export_scope import normalize_export_range, normalize_export_scope
 
 _ILLEGAL_FILENAME_CHARACTERS = {"/", "\\", ":", "*", "?", '"', "<", ">", "|"}
 _CONTROL_CHARACTERS_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
@@ -40,9 +40,14 @@ def build_job_export_filename(
     extension: str = ".zip",
     *,
     export_scope: str | None = "all",
+    export_range: str | None = None,
 ) -> str:
     safe_job_name = sanitize_filename(job.name, fallback=f"job_{job.id}")
-    scope_suffix = "_annotated_only" if normalize_export_scope(export_scope) == "annotated_only" else ""
+    if export_range is not None:
+        normalized_range = normalize_export_range(export_range, export_scope=export_scope)
+        scope_suffix = "_annotated_only" if normalized_range == "annotated" else f"_{normalized_range}" if normalized_range == "selected" else ""
+    else:
+        scope_suffix = "_annotated_only" if normalize_export_scope(export_scope) == "annotated_only" else ""
     return f"{safe_job_name}_{export_type}{scope_suffix}{extension}"
 
 

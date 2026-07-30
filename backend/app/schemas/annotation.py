@@ -34,6 +34,7 @@ class AnnotationRead(BaseModel):
     shape_type: ShapeType
     points: list[Point]
     attributes: dict | None = None
+    z_order: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -43,6 +44,7 @@ class AnnotationWrite(BaseModel):
     shape_type: ShapeType
     points: list[Point] = Field(default_factory=list)
     attributes: dict | None = None
+    z_order: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_points_for_shape(self) -> "AnnotationWrite":

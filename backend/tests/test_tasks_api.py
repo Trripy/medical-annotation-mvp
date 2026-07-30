@@ -21,9 +21,10 @@ from app.api.v1 import sam2 as sam2_api
 from app.api.v1 import tasks as tasks_api
 from app.core.config import settings
 from app.db.base import Base
-from app.models import Image, Job, Label, Project, User
+from app.models import Annotation, Image, Job, Label, Project, User
 from app.schemas.annotation import AnnotationSaveRequest
 from app.schemas.job import JobRead
+from app.schemas.job import JobExportRequest
 from app.schemas.project import ProjectCreate
 from app.schemas.sam2 import Sam2RefinePolygonRequest, Sam2TrackVideoRequest
 from app.schemas.task import TaskCreate
@@ -463,6 +464,354 @@ def test_job_exports_support_annotated_only_scope(db_session: Session) -> None:
         "Scoped_Export_labelme_annotated_only.zip",
         "export_labelme.zip",
     )
+
+
+def test_job_exports_support_selected_range_and_corresponding_originals(db_session: Session) -> None:
+    task = tasks_api.create_task(TaskCreate(project_id=1, name="Selected Export"), db_session)
+    upload_response = tasks_api.upload_task_data(
+        task.id,
+        files=[
+            make_upload("0.png", (100, 80)),
+            make_upload("1.png", (100, 80)),
+            make_upload("2.png", (100, 80)),
+            make_upload("3.png", (100, 80)),
+        ],
+        db=db_session,
+    )
+    detail = jobs_api.get_job(upload_response.job_id, db_session)
+    labels = detail.labels
+    annotated_ids = {detail.images[0].id, detail.images[2].id}
+    for image in detail.images:
+        jobs_api.save_image_annotations(
+            upload_response.job_id,
+            image.id,
+            AnnotationSaveRequest.model_validate(
+                {
+                    "annotations": [
+                        {
+                            "label_id": labels[0].id,
+                            "shape_type": "rectangle",
+                            "points": [[10, 10], [40, 40]],
+                        }
+                    ]
+                    if image.id in annotated_ids
+                    else []
+                }
+            ),
+            db_session,
+        )
+
+    job = db_session.get(Job, upload_response.job_id)
+    assert job is not None
+    selected_ids = [detail.images[2].id, detail.images[0].id, detail.images[2].id]
+
+    builders = [
+        (build_job_labelme_zip, ".json"),
+        (build_job_overlay_zip, "_overlay.png"),
+        (build_job_indexed_mask_zip, "_mask.png"),
+        (build_job_color_mask_zip, "_color_mask.png"),
+    ]
+    for builder, suffix in builders:
+        with ZipFile(builder(job, db_session, export_range="selected", selected_image_ids=selected_ids)) as archive:
+            names = archive.namelist()
+            assert not any(name.startswith("images/") for name in names)
+            assert len([name for name in names if name.endswith(".json") or name.endswith(".png")]) == 2
+            assert names[0].startswith("0")
+            assert names[1].startswith("2")
+            assert names[0].endswith(suffix)
+
+        with ZipFile(
+            builder(
+                job,
+                db_session,
+                export_range="selected",
+                selected_image_ids=selected_ids,
+                include_original_images=True,
+            )
+        ) as archive:
+            original_names = [name for name in archive.namelist() if name.startswith("images/")]
+            assert original_names == [
+                f"images/{detail.images[0].id}__0.png",
+                f"images/{detail.images[2].id}__2.png",
+            ]
+            first_image = db_session.get(Image, detail.images[0].id)
+            assert first_image is not None
+            assert archive.read(original_names[0]) == Path(first_image.file_path).read_bytes()
+
+
+def test_visual_and_labelme_exports_use_annotation_layer_order(db_session: Session) -> None:
+    task = tasks_api.create_task(TaskCreate(project_id=1, name="Layered Export"), db_session)
+    upload_response = tasks_api.upload_task_data(
+        task.id,
+        files=[make_upload("layered.png", (40, 40))],
+        db=db_session,
+    )
+    detail = jobs_api.get_job(upload_response.job_id, db_session)
+    image = detail.images[0]
+    labels = db_session.query(Label).filter(Label.job_id == upload_response.job_id).order_by(Label.sort_order, Label.id).all()
+    labels[0].color = "#ff0000"
+    labels[1].color = "#00ff00"
+    top_label = Label(name="Top", color="#0000ff", job_id=upload_response.job_id, sort_order=2)
+    db_session.add(top_label)
+    db_session.commit()
+    db_session.refresh(top_label)
+
+    jobs_api.save_image_annotations(
+        upload_response.job_id,
+        image.id,
+        AnnotationSaveRequest.model_validate(
+            {
+                "annotations": [
+                    {
+                        "label_id": top_label.id,
+                        "shape_type": "rectangle",
+                        "points": [[14, 14], [24, 24]],
+                        "z_order": 30,
+                    },
+                    {
+                        "label_id": labels[0].id,
+                        "shape_type": "rectangle",
+                        "points": [[2, 2], [30, 30]],
+                        "z_order": 10,
+                    },
+                    {
+                        "label_id": labels[1].id,
+                        "shape_type": "rectangle",
+                        "points": [[8, 8], [34, 34]],
+                        "z_order": 20,
+                    },
+                ]
+            }
+        ),
+        db_session,
+    )
+    saved = (
+        db_session.query(Annotation)
+        .filter(Annotation.image_id == image.id)
+        .order_by(Annotation.z_order, Annotation.id)
+        .all()
+    )
+    assert [annotation.label_id for annotation in saved] == [labels[0].id, labels[1].id, top_label.id]
+    assert [annotation.z_order for annotation in saved] == [0, 1, 2]
+
+    job = db_session.get(Job, upload_response.job_id)
+    assert job is not None
+
+    with ZipFile(build_job_labelme_zip(job, db_session)) as archive:
+        labelme = json.loads(archive.read("layered.json"))
+        assert [shape["label"] for shape in labelme["shapes"]] == ["Nodule", "Organ", "Top"]
+
+    with ZipFile(build_job_indexed_mask_zip(job, db_session)) as archive:
+        indexed_mask = PILImage.open(BytesIO(archive.read("layered_mask.png")))
+        assert indexed_mask.getpixel((4, 4)) == 1
+        assert indexed_mask.getpixel((10, 10)) == 2
+        assert indexed_mask.getpixel((16, 16)) == 3
+
+    with ZipFile(build_job_color_mask_zip(job, db_session)) as archive:
+        color_mask = PILImage.open(BytesIO(archive.read("layered_color_mask.png")))
+        assert color_mask.getpixel((4, 4)) == (255, 0, 0)
+        assert color_mask.getpixel((10, 10)) == (0, 255, 0)
+        assert color_mask.getpixel((16, 16)) == (0, 0, 255)
+
+    with ZipFile(build_job_overlay_zip(job, db_session)) as archive:
+        overlay = PILImage.open(BytesIO(archive.read("layered_overlay.png")))
+        top_pixel = overlay.getpixel((18, 18))
+        middle_pixel = overlay.getpixel((10, 10))
+        assert top_pixel[2] > top_pixel[0]
+        assert top_pixel[2] > top_pixel[1]
+        assert middle_pixel[1] > middle_pixel[0]
+
+
+def test_annotated_original_exports_match_emitted_images_only(db_session: Session) -> None:
+    task = tasks_api.create_task(TaskCreate(project_id=1, name="Original Match"), db_session)
+    upload_response = tasks_api.upload_task_data(
+        task.id,
+        files=[make_upload("0.png"), make_upload("1.png"), make_upload("2.png")],
+        db=db_session,
+    )
+    detail = jobs_api.get_job(upload_response.job_id, db_session)
+    jobs_api.save_image_annotations(
+        upload_response.job_id,
+        detail.images[1].id,
+        AnnotationSaveRequest.model_validate(
+            {
+                "annotations": [
+                    {
+                        "label_id": detail.labels[0].id,
+                        "shape_type": "polygon",
+                        "points": [[5, 5], [20, 5], [20, 20]],
+                    }
+                ]
+            }
+        ),
+        db_session,
+    )
+
+    job = db_session.get(Job, upload_response.job_id)
+    assert job is not None
+    with ZipFile(build_job_labelme_zip(job, db_session, export_range="annotated", include_original_images=True)) as archive:
+        assert archive.namelist() == ["1.json", f"images/{detail.images[1].id}__1.png"]
+
+    with ZipFile(build_job_labelme_zip(job, db_session, export_range="all", include_original_images=True)) as archive:
+        original_names = [name for name in archive.namelist() if name.startswith("images/")]
+        assert original_names == [
+            f"images/{detail.images[0].id}__0.png",
+            f"images/{detail.images[1].id}__1.png",
+            f"images/{detail.images[2].id}__2.png",
+        ]
+
+
+def test_selected_export_rejects_empty_foreign_and_missing_images(db_session: Session) -> None:
+    task = tasks_api.create_task(TaskCreate(project_id=1, name="Selected Errors"), db_session)
+    first = tasks_api.upload_task_data(task.id, files=[make_upload("a.png")], db=db_session)
+    second_task = tasks_api.create_task(TaskCreate(project_id=1, name="Other Job"), db_session)
+    second = tasks_api.upload_task_data(second_task.id, files=[make_upload("b.png")], db=db_session)
+
+    with pytest.raises(HTTPException) as empty_exc:
+        jobs_api.export_job_labelme_post(
+            first.job_id,
+            JobExportRequest(export_range="selected", selected_image_ids=[]),
+            db_session,
+        )
+    assert empty_exc.value.status_code == 422
+    assert empty_exc.value.detail == "At least one image must be selected for manual export."
+
+    foreign_image_id = second.images[0].id
+    with pytest.raises(HTTPException) as foreign_exc:
+        jobs_api.export_job_labelme_post(
+            first.job_id,
+            JobExportRequest(export_range="selected", selected_image_ids=[foreign_image_id]),
+            db_session,
+        )
+    assert foreign_exc.value.status_code == 422
+    assert foreign_exc.value.detail == "Selected images must belong to this job."
+
+    with pytest.raises(HTTPException) as missing_exc:
+        jobs_api.export_job_labelme_post(
+            first.job_id,
+            JobExportRequest(export_range="selected", selected_image_ids=[999999]),
+            db_session,
+        )
+    assert missing_exc.value.status_code == 422
+    assert missing_exc.value.detail == "Selected images must belong to this job."
+
+
+def test_original_export_handles_safe_names_and_missing_originals(db_session: Session) -> None:
+    task = tasks_api.create_task(TaskCreate(project_id=1, name="Original Safety"), db_session)
+    upload_response = tasks_api.upload_task_data(task.id, files=[make_upload("same.png"), make_upload("same.png")], db=db_session)
+    first_image = db_session.get(Image, upload_response.images[0].id)
+    second_image = db_session.get(Image, upload_response.images[1].id)
+    job = db_session.get(Job, upload_response.job_id)
+    assert first_image is not None
+    assert second_image is not None
+    assert job is not None
+
+    first_image.filename = "../unsafe name.png"
+    second_image.filename = "../unsafe name.png"
+    db_session.commit()
+
+    with ZipFile(build_job_labelme_zip(job, db_session, include_original_images=True)) as archive:
+        original_names = [name for name in archive.namelist() if name.startswith("images/")]
+        assert original_names == [
+            f"images/{first_image.id}__unsafe_name.png",
+            f"images/{second_image.id}__unsafe_name.png",
+        ]
+        assert ".." not in "".join(original_names)
+
+    Path(first_image.file_path).unlink()
+    with pytest.raises(HTTPException) as exc_info:
+        jobs_api.export_job_labelme_post(
+            upload_response.job_id,
+            JobExportRequest(export_range="all", include_original_images=True),
+            db_session,
+        )
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "A corresponding original image is missing or unreadable."
+    assert str(Path(settings.local_storage_root)) not in exc_info.value.detail
+
+
+def test_export_image_selector_is_paginated_and_filterable(db_session: Session) -> None:
+    task = tasks_api.create_task(TaskCreate(project_id=1, name="Selector"), db_session)
+    upload_response = tasks_api.upload_task_data(
+        task.id,
+        files=[make_upload("alpha.png"), make_upload("beta.png"), make_upload("gamma.png")],
+        db=db_session,
+    )
+    detail = jobs_api.get_job(upload_response.job_id, db_session)
+    jobs_api.save_image_annotations(
+        upload_response.job_id,
+        detail.images[1].id,
+        AnnotationSaveRequest.model_validate(
+            {
+                "annotations": [
+                    {
+                        "label_id": detail.labels[0].id,
+                        "shape_type": "point",
+                        "points": [[10, 10]],
+                    }
+                ]
+            }
+        ),
+        db_session,
+    )
+
+    page = jobs_api.list_job_export_images(upload_response.job_id, limit=2, offset=0, db=db_session)
+    assert page.total == 3
+    assert [item.filename for item in page.items] == ["alpha.png", "beta.png"]
+
+    annotated_page = jobs_api.list_job_export_images(
+        upload_response.job_id,
+        annotation_status="annotated",
+        limit=10,
+        offset=0,
+        db=db_session,
+    )
+    assert [item.filename for item in annotated_page.items] == ["beta.png"]
+    assert annotated_page.items[0].annotation_count == 1
+
+    search_page = jobs_api.list_job_export_images(
+        upload_response.job_id,
+        search="gam",
+        limit=10,
+        offset=0,
+        db=db_session,
+    )
+    assert [item.filename for item in search_page.items] == ["gamma.png"]
+
+    ids_page = jobs_api.list_job_export_image_ids(upload_response.job_id, db=db_session)
+    assert ids_page.image_ids == [image.id for image in detail.images]
+    assert ids_page.total == 3
+
+    annotated_ids = jobs_api.list_job_export_image_ids(
+        upload_response.job_id,
+        annotation_status="annotated",
+        db=db_session,
+    )
+    assert annotated_ids.image_ids == [detail.images[1].id]
+    assert annotated_ids.total == 1
+
+    unannotated_ids = jobs_api.list_job_export_image_ids(
+        upload_response.job_id,
+        annotation_status="unannotated",
+        db=db_session,
+    )
+    assert unannotated_ids.image_ids == [detail.images[0].id, detail.images[2].id]
+
+    searched_ids = jobs_api.list_job_export_image_ids(upload_response.job_id, search="alp", db=db_session)
+    assert searched_ids.image_ids == [detail.images[0].id]
+
+    other_task = tasks_api.create_task(TaskCreate(project_id=1, name="Other Selector"), db_session)
+    other_upload = tasks_api.upload_task_data(other_task.id, files=[make_upload("delta.png")], db=db_session)
+    isolated_ids = jobs_api.list_job_export_image_ids(upload_response.job_id, db=db_session)
+    assert other_upload.images[0].id not in isolated_ids.image_ids
+
+    serialized = ids_page.model_dump()
+    assert set(serialized) == {"image_ids", "total"}
+    assert not any(isinstance(value, str) and "/" in value for value in serialized.values())
+
+    with pytest.raises(HTTPException) as exc_info:
+        jobs_api.list_job_export_image_ids(999999, db=db_session)
+    assert exc_info.value.status_code == 404
 
 
 def test_annotated_only_export_without_annotations_returns_error(db_session: Session) -> None:

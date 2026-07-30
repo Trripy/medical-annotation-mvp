@@ -1,7 +1,10 @@
 import { defineStore } from 'pinia'
 
 import { apiUrl, resolveApiUrl } from '../utils/api'
+import { normalizeAnnotationLayerOrder } from '../utils/annotationLayerOrder'
 import { normalizeAnnotationObject, normalizeAnnotationObjects } from '../utils/polygon'
+
+export const SAM2_TRACK_FAILED_ERROR_PREFIX = 'SAM2_TRACK_FAILED'
 
 export type Label = {
   id: number
@@ -32,6 +35,7 @@ export type AnnotationObject = {
   shape_type: ShapeType
   points: number[][]
   attributes?: Record<string, unknown> | null
+  z_order?: number
 }
 
 export type JobDetail = {
@@ -176,7 +180,7 @@ export const useAnnotationStore = defineStore('annotation', {
       this.error = ''
 
       try {
-        const normalizedAnnotations = annotations.map((annotation) => normalizeAnnotationObject(annotation))
+        const normalizedAnnotations = normalizeAnnotationLayerOrder(annotations.map((annotation) => normalizeAnnotationObject(annotation)))
         const response = await fetch(apiUrl(`/api/jobs/${this.job.id}/images/${imageId}/annotations`), {
           method: 'PUT',
           headers: {
@@ -188,6 +192,7 @@ export const useAnnotationStore = defineStore('annotation', {
               shape_type: annotation.shape_type,
               points: annotation.points,
               attributes: annotation.attributes ?? null,
+              z_order: annotation.z_order ?? 0,
             })),
           }),
         })
@@ -230,7 +235,7 @@ export const useAnnotationStore = defineStore('annotation', {
 
         if (!response.ok) {
           const errorPayload = await response.json().catch(() => null)
-          throw new Error(typeof errorPayload?.detail === 'string' ? errorPayload.detail : `Track with SAM2 failed: ${response.status}`)
+          throw new Error(typeof errorPayload?.detail === 'string' ? errorPayload.detail : `${SAM2_TRACK_FAILED_ERROR_PREFIX}:${response.status}`)
         }
 
         return await response.json() as Sam2TrackVideoResponse

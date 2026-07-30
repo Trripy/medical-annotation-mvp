@@ -8,18 +8,33 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Annotation, Image, Job, Label, Task
-from app.services.export_scope import load_job_export_bundle
+from app.services.export_scope import add_original_images_to_archive, load_job_export_bundle
 
 OVERLAY_ALPHA = 90
 OVERLAY_OUTLINE_WIDTH = 2
 POINT_RADIUS = 4
 
 
-def build_job_overlay_zip(job: Job, db: Session, *, export_scope: str | None = "all") -> BytesIO:
-    images, annotations_by_image, _labels = _load_export_data(job, db, export_scope=export_scope)
+def build_job_overlay_zip(
+    job: Job,
+    db: Session,
+    *,
+    export_scope: str | None = "all",
+    export_range: str | None = None,
+    selected_image_ids: list[int] | None = None,
+    include_original_images: bool = False,
+) -> BytesIO:
+    images, annotations_by_image, _labels = _load_export_data(
+        job,
+        db,
+        export_scope=export_scope,
+        export_range=export_range,
+        selected_image_ids=selected_image_ids,
+    )
     buffer = BytesIO()
 
     with ZipFile(buffer, mode="w", compression=ZIP_DEFLATED) as zip_file:
+        emitted_image_ids: list[int] = []
         for image in images:
             with PILImage.open(image.file_path) as original:
                 base = original.convert("RGBA")
@@ -30,13 +45,31 @@ def build_job_overlay_zip(job: Job, db: Session, *, export_scope: str | None = "
 
                 rendered = PILImage.alpha_composite(base, overlay).convert("RGB")
                 zip_file.writestr(_output_name(image.filename, "_overlay.png"), _png_bytes(rendered))
+                emitted_image_ids.append(image.id)
+
+        if include_original_images:
+            add_original_images_to_archive(zip_file, images, emitted_image_ids)
 
     buffer.seek(0)
     return buffer
 
 
-def build_job_indexed_mask_zip(job: Job, db: Session, *, export_scope: str | None = "all") -> BytesIO:
-    images, annotations_by_image, labels = _load_export_data(job, db, export_scope=export_scope)
+def build_job_indexed_mask_zip(
+    job: Job,
+    db: Session,
+    *,
+    export_scope: str | None = "all",
+    export_range: str | None = None,
+    selected_image_ids: list[int] | None = None,
+    include_original_images: bool = False,
+) -> BytesIO:
+    images, annotations_by_image, labels = _load_export_data(
+        job,
+        db,
+        export_scope=export_scope,
+        export_range=export_range,
+        selected_image_ids=selected_image_ids,
+    )
     if len(labels) > 255:
         raise ValueError("Indexed mask export supports up to 255 labels")
 
@@ -44,6 +77,7 @@ def build_job_indexed_mask_zip(job: Job, db: Session, *, export_scope: str | Non
     buffer = BytesIO()
 
     with ZipFile(buffer, mode="w", compression=ZIP_DEFLATED) as zip_file:
+        emitted_image_ids: list[int] = []
         for image in images:
             size = _image_size(image)
             mask = PILImage.new("L", size, 0)
@@ -55,17 +89,36 @@ def build_job_indexed_mask_zip(job: Job, db: Session, *, export_scope: str | Non
                 _draw_mask_annotation(draw, annotation, class_index)
 
             zip_file.writestr(_output_name(image.filename, "_mask.png"), _png_bytes(mask))
+            emitted_image_ids.append(image.id)
+
+        if include_original_images:
+            add_original_images_to_archive(zip_file, images, emitted_image_ids)
 
     buffer.seek(0)
     return buffer
 
 
-def build_job_color_mask_zip(job: Job, db: Session, *, export_scope: str | None = "all") -> BytesIO:
-    images, annotations_by_image, labels = _load_export_data(job, db, export_scope=export_scope)
+def build_job_color_mask_zip(
+    job: Job,
+    db: Session,
+    *,
+    export_scope: str | None = "all",
+    export_range: str | None = None,
+    selected_image_ids: list[int] | None = None,
+    include_original_images: bool = False,
+) -> BytesIO:
+    images, annotations_by_image, labels = _load_export_data(
+        job,
+        db,
+        export_scope=export_scope,
+        export_range=export_range,
+        selected_image_ids=selected_image_ids,
+    )
     label_colors = {label.id: _hex_to_rgb(label.color) for label in labels}
     buffer = BytesIO()
 
     with ZipFile(buffer, mode="w", compression=ZIP_DEFLATED) as zip_file:
+        emitted_image_ids: list[int] = []
         for image in images:
             size = _image_size(image)
             mask = PILImage.new("RGB", size, (0, 0, 0))
@@ -77,6 +130,10 @@ def build_job_color_mask_zip(job: Job, db: Session, *, export_scope: str | None 
                 _draw_mask_annotation(draw, annotation, color)
 
             zip_file.writestr(_output_name(image.filename, "_color_mask.png"), _png_bytes(mask))
+            emitted_image_ids.append(image.id)
+
+        if include_original_images:
+            add_original_images_to_archive(zip_file, images, emitted_image_ids)
 
     buffer.seek(0)
     return buffer
@@ -87,8 +144,16 @@ def _load_export_data(
     db: Session,
     *,
     export_scope: str | None = "all",
+    export_range: str | None = None,
+    selected_image_ids: list[int] | None = None,
 ) -> tuple[list[Image], dict[int, list[Annotation]], list[Label]]:
-    images, annotations_by_image = load_job_export_bundle(job, db, export_scope=export_scope)
+    images, annotations_by_image = load_job_export_bundle(
+        job,
+        db,
+        export_scope=export_scope,
+        export_range=export_range,
+        selected_image_ids=selected_image_ids,
+    )
     return images, annotations_by_image, _job_labels(job, db)
 
 

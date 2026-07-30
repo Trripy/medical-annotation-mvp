@@ -8,7 +8,7 @@ import { useRouter } from 'vue-router'
 
 import AppSidebar from '../components/AppSidebar.vue'
 import {
-  JOB_UPLOAD_FILE_LIMIT_MESSAGE,
+  JOB_UPLOAD_FILE_LIMIT_ERROR,
   MAX_JOB_UPLOAD_FILES,
   useDatasetsStore,
   type JobLabelInput,
@@ -45,6 +45,7 @@ type BrowserFile = File & {
 const selectedFiles = computed(() => sortFiles(dedupeFiles([...imageFiles.value, ...folderFiles.value])))
 const previewFiles = computed(() => selectedFiles.value.slice(0, 100))
 const hiddenFileCount = computed(() => Math.max(0, selectedFiles.value.length - previewFiles.value.length))
+const localizedStoreError = computed(() => localizeDatasetError(error.value))
 const canCreateJob = computed(() =>
   form.projectId !== null &&
   form.jobName.trim().length > 0 &&
@@ -126,7 +127,7 @@ function canApplySelectedFiles(nextImageFiles: File[], nextFolderFiles: File[]):
   const nextSelectedFiles = dedupeFiles([...nextImageFiles, ...nextFolderFiles])
 
   if (nextSelectedFiles.length > MAX_JOB_UPLOAD_FILES) {
-    ElMessage.error(JOB_UPLOAD_FILE_LIMIT_MESSAGE)
+    ElMessage.error(t('datasets.uploadFileLimit', { count: MAX_JOB_UPLOAD_FILES }))
     return false
   }
 
@@ -210,7 +211,7 @@ async function createJob() {
     return
   }
   if (selectedFiles.value.length > MAX_JOB_UPLOAD_FILES) {
-    ElMessage.warning(JOB_UPLOAD_FILE_LIMIT_MESSAGE)
+    ElMessage.warning(t('datasets.uploadFileLimit', { count: MAX_JOB_UPLOAD_FILES }))
     return
   }
 
@@ -222,9 +223,16 @@ async function createJob() {
   })
 
   if (result) {
-    ElMessage.success('Job created successfully')
+    ElMessage.success(t('datasets.jobCreated'))
     void router.push('/jobs')
   }
+}
+
+function localizeDatasetError(message: string): string {
+  if (message === JOB_UPLOAD_FILE_LIMIT_ERROR) {
+    return t('datasets.uploadFileLimit', { count: MAX_JOB_UPLOAD_FILES })
+  }
+  return message
 }
 </script>
 
@@ -254,7 +262,7 @@ async function createJob() {
           </div>
 
           <label class="field-label">
-            Project
+            {{ t('datasets.project') }}
             <div class="project-picker-row">
               <el-select
                 v-model="form.projectId"
@@ -271,24 +279,24 @@ async function createJob() {
               </el-select>
               <el-button type="primary" plain @click="showProjectDialog = true">
                 <el-icon><Plus /></el-icon>
-                New Project
+                {{ t('datasets.newProject') }}
               </el-button>
             </div>
           </label>
 
           <label class="field-label">
-            Job name
-            <el-input v-model="form.jobName" placeholder="case001" required />
+            {{ t('datasets.jobName') }}
+            <el-input v-model="form.jobName" :placeholder="t('datasets.jobNamePlaceholder')" required />
           </label>
 
           <section class="label-builder">
             <p class="panel-label">{{ t('datasets.labels') }}</p>
             <div class="label-builder-row">
-              <el-input v-model="labelDraft.name" placeholder="layer_down" @keyup.enter="addLabel" />
+              <el-input v-model="labelDraft.name" :placeholder="t('datasets.labelNamePlaceholder')" @keyup.enter="addLabel" />
               <el-select v-model="labelDraft.shape_type" class="shape-type-select">
-                <el-option label="polygon" value="polygon" />
-                <el-option label="rectangle" value="rectangle" />
-                <el-option label="point" value="point" />
+                <el-option :label="t('frameAnnotation.polygon')" value="polygon" />
+                <el-option :label="t('frameAnnotation.rectangle')" value="rectangle" />
+                <el-option :label="t('frameAnnotation.point')" value="point" />
               </el-select>
               <input v-model="labelDraft.color" class="label-color-input" type="color" />
               <el-button type="primary" plain @click="addLabel">{{ t('datasets.add') }}</el-button>
@@ -298,7 +306,7 @@ async function createJob() {
               <div v-for="(label, index) in labels" :key="`${label.name}-${index}`" class="job-label-item">
                 <span class="label-swatch" :style="{ backgroundColor: label.color }"></span>
                 <strong>{{ label.name }}</strong>
-                <span>{{ label.shape_type }}</span>
+                <span>{{ t(`frameAnnotation.${label.shape_type}`) }}</span>
                 <small>{{ label.color }}</small>
                 <el-button size="small" text type="danger" @click="deleteLabel(index)">{{ t('common.delete') }}</el-button>
               </div>
@@ -317,7 +325,7 @@ async function createJob() {
                 <span>{{ t('datasets.chooseFolder') }}</span>
               </button>
               <p class="folder-picker-hint">
-                No need to zip. Select the image folder directly.
+                {{ t('datasets.chooseFolderHelp') }}
               </p>
             </div>
             <input
@@ -338,32 +346,32 @@ async function createJob() {
           </div>
 
           <p class="upload-selection-count">
-            {{ selectedFiles.length ? `${selectedFiles.length} images selected` : 'No images selected' }}
+            {{ selectedFiles.length ? t('datasets.imagesSelected', { count: selectedFiles.length }) : t('datasets.noImages') }}
           </p>
 
-          <el-alert v-if="error" :title="error" type="error" show-icon />
+          <el-alert v-if="localizedStoreError" :title="localizedStoreError" type="error" show-icon />
 
           <el-button native-type="submit" type="primary" :loading="uploading" :disabled="!canCreateJob">
-            Create Job
+            {{ t('datasets.createJob') }}
           </el-button>
         </form>
 
         <section class="upload-summary">
           <h3>{{ t('datasets.selectedImages') }}</h3>
           <div v-if="selectedFiles.length" class="selected-file-list">
-            <p>{{ selectedFiles.length }} images selected. Showing first {{ previewFiles.length }}.</p>
+            <p>{{ t('datasets.selectedImagesPreview', { count: selectedFiles.length, shown: previewFiles.length }) }}</p>
             <div v-for="file in previewFiles" :key="`${file.name}-${file.size}-${file.lastModified}`" class="selected-file">
               <span>{{ displayPath(file) }}</span>
               <small>{{ Math.round(file.size / 1024) }} KB</small>
             </div>
-            <p v-if="hiddenFileCount">... {{ hiddenFileCount }} more images not shown.</p>
+            <p v-if="hiddenFileCount">{{ t('datasets.moreImagesNotShown', { count: hiddenFileCount }) }}</p>
           </div>
           <p v-else>{{ t('datasets.noImages') }}</p>
 
           <div v-if="lastUpload" class="upload-result">
             <strong>{{ t('datasets.lastCreatedJob') }}</strong>
-            <span>Project #{{ lastUpload.project_id }}</span>
-            <span>Job #{{ lastUpload.id }}</span>
+            <span>{{ t('common.projectWithId', { id: lastUpload.project_id }) }}</span>
+            <span>{{ t('common.jobWithId', { id: lastUpload.id }) }}</span>
             <span>{{ lastUpload.name }}</span>
           </div>
         </section>
@@ -372,8 +380,8 @@ async function createJob() {
 
     <el-dialog v-model="showProjectDialog" :title="t('datasets.createProject')" width="420px">
       <label class="field-label">
-        Project name
-        <el-input v-model="newProjectName" placeholder="Pig Eye OCT" @keyup.enter="createProject" />
+        {{ t('datasets.projectName') }}
+        <el-input v-model="newProjectName" :placeholder="t('datasets.projectNamePlaceholder')" @keyup.enter="createProject" />
       </label>
       <template #footer>
         <el-button @click="showProjectDialog = false">{{ t('common.cancel') }}</el-button>

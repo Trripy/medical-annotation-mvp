@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 
 import type { AnnotationObject, JobImage, Label } from '../stores/annotation'
 import type { Shortcut, UserSettings } from '../stores/userSettings'
 import { apiUrl } from '../utils/api'
+import { nextTopLayerOrder, sortAnnotationsBackToFront } from '../utils/annotationLayerOrder'
 import { generateClientId } from '../utils/id'
 import { extractTopBoundaryFromPolygon, removeDuplicatePoints, resamplePolylineByX } from '../utils/layerBoundary'
 import { buildPolygonSmoothingAttributes, clonePoints } from '../utils/polygon'
@@ -101,6 +103,7 @@ const emit = defineEmits<{
   sam2PreviewChange: [available: boolean]
 }>()
 
+const { t } = useI18n()
 const imageElement = ref<HTMLImageElement | null>(null)
 const canvasElement = ref<HTMLDivElement | null>(null)
 const containerSize = ref({ width: 1, height: 1 })
@@ -170,7 +173,7 @@ let samPointDeleteHideTimer: ReturnType<typeof window.setTimeout> | null = null
 let sam2RequestSequence = 0
 
 const currentAnnotations = computed(() =>
-  props.annotations.filter((annotation) => annotation.image_id === props.image.id && !isClassificationAnnotation(annotation)),
+  sortAnnotationsBackToFront(props.annotations.filter((annotation) => annotation.image_id === props.image.id && !isClassificationAnnotation(annotation))),
 )
 const visibleAnnotations = computed(() =>
   currentAnnotations.value.filter((annotation) => !props.hiddenAnnotationIds.includes(annotation.id)),
@@ -482,7 +485,7 @@ watch(
       props.image.height || 1,
     )
     if (referenceBoundary.length < 2) {
-      ElMessage.warning('Cannot extract the top boundary from the selected lower polygon.')
+      ElMessage.warning(t('annotationCanvas.cannotExtractTopBoundary'))
       clearBoundaryAssistState()
       emit('boundaryAssistCancel')
       return
@@ -889,6 +892,8 @@ function onPointerUp(event: PointerEvent) {
     label_id: props.selectedLabelId,
     shape_type: 'rectangle',
     points: [rectangleStart.value, point],
+    attributes: null,
+      z_order: nextTopLayerOrder(props.annotations),
   })
 }
 
@@ -988,7 +993,7 @@ function clearBoundaryAssistState() {
 function initializeBoundaryAssist(referenceBoundary: number[][]) {
   const normalizedBoundary = prepareBoundaryAssistPointsForEditing(referenceBoundary)
   if (normalizedBoundary.length < 2) {
-    throw new Error('Cannot extract the top boundary from the selected lower polygon.')
+    throw new Error(t('annotationCanvas.cannotExtractTopBoundary'))
   }
 
   boundaryAssistPhase.value = 'edit_generated_boundary'
@@ -1073,7 +1078,7 @@ function confirmBoundaryAssistBoundary() {
 
   const normalizedBoundary = normalizeEditedBoundaryPoints(boundaryAssistEditedBoundary.value)
   if (normalizedBoundary.length < 2) {
-    ElMessage.warning('The generated boundary must keep at least 2 points.')
+    ElMessage.warning(t('annotationCanvas.generatedBoundaryTooShort'))
     return false
   }
 
@@ -1108,6 +1113,7 @@ function finishPolygon() {
     shape_type: 'polygon' as const,
     points: draftPoints.value,
     attributes: buildPolygonSmoothingAttributes(draftPoints.value, 0, draftPolygonAttributes.value),
+    z_order: nextTopLayerOrder(props.annotations),
   }
   commitAnnotation(annotation)
   if (draftPolygonAttributes.value?.generated_by === 'boundary_assisted_polygon') {
@@ -1268,7 +1274,7 @@ async function runSamPrediction(): Promise<boolean> {
     if (isStaleSam2Request(request)) {
       return false
     }
-    sam2Error.value = error instanceof Error ? error.message : 'SAM2 prediction failed'
+    sam2Error.value = error instanceof Error ? error.message : t('frameAnnotation.sam2PredictionFailed')
     console.error('sam predict failed', error)
     return false
   }
@@ -1333,11 +1339,11 @@ function acceptSam2Preview(): Sam2PreviewAcceptPayload | null {
 
 async function refineSelectedPolygonWithSam2(annotation: AnnotationObject): Promise<boolean> {
   if (annotation.shape_type !== 'polygon') {
-    throw new Error('Only polygon annotations can be refined with SAM2.')
+    throw new Error(t('annotationCanvas.polygonOnlyRefine'))
   }
 
   if (annotation.points.length < 3) {
-    throw new Error('Polygon must have at least 3 points.')
+    throw new Error(t('annotationCanvas.polygonNeedsThreePoints'))
   }
 
   clearSamPredictionDebounce()
@@ -1375,7 +1381,7 @@ async function refineSelectedPolygonWithSam2(annotation: AnnotationObject): Prom
       if (isStaleSam2Request(request)) {
         return false
       }
-      throw new Error(body?.detail ?? `SAM2 refine failed: ${response.status}`)
+      throw new Error(body?.detail ?? `${t('frameAnnotation.sam2RefineFailed')}: ${response.status}`)
     }
 
     const result: Sam2RefinePolygonResponse = await response.json()
@@ -1383,7 +1389,7 @@ async function refineSelectedPolygonWithSam2(annotation: AnnotationObject): Prom
       return false
     }
     if (!Array.isArray(result.points) || result.points.length < 3) {
-      throw new Error('Refined mask is invalid.')
+      throw new Error(t('annotationCanvas.refinedMaskInvalid'))
     }
 
     setSam2Preview(
@@ -1409,8 +1415,8 @@ async function refineSelectedPolygonWithSam2(annotation: AnnotationObject): Prom
     if (isStaleSam2Request(request)) {
       return false
     }
-    sam2Error.value = error instanceof Error ? error.message : 'SAM2 refine failed'
-    throw error instanceof Error ? error : new Error('SAM2 refine failed')
+    sam2Error.value = error instanceof Error ? error.message : t('frameAnnotation.sam2RefineFailed')
+    throw error instanceof Error ? error : new Error(t('frameAnnotation.sam2RefineFailed'))
   }
 }
 
@@ -1768,7 +1774,7 @@ function deletePolygonVertex(annotationId: number | string, pointIndex: number, 
   }
 
   if (annotation.points.length <= 3) {
-    ElMessage.warning('Polygon must have at least 3 points.')
+    ElMessage.warning(t('annotationCanvas.polygonNeedsThreePoints'))
     return
   }
 
@@ -1790,7 +1796,7 @@ function deleteBoundaryAssistVertex(pointIndex: number, event: MouseEvent | Poin
   }
 
   if (boundaryAssistEditedBoundary.value.length <= 2) {
-    ElMessage.warning('The generated boundary must keep at least 2 points.')
+    ElMessage.warning(t('annotationCanvas.generatedBoundaryTooShort'))
     return
   }
 

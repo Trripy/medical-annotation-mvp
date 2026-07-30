@@ -55,12 +55,14 @@ export function normalizeAnnotationObject(annotation: AnnotationObject): Annotat
   const attributes = annotation.attributes && typeof annotation.attributes === 'object'
     ? { ...annotation.attributes }
     : annotation.attributes ?? null
+  const zOrder = Number.isFinite(annotation.z_order) ? annotation.z_order : 0
 
   if (annotation.shape_type === 'classification') {
     return {
       ...annotation,
       points: [],
       attributes,
+      z_order: zOrder,
     }
   }
 
@@ -69,6 +71,7 @@ export function normalizeAnnotationObject(annotation: AnnotationObject): Annotat
       ...annotation,
       points: normalizedPoints,
       attributes,
+      z_order: zOrder,
     }
   }
 
@@ -76,6 +79,7 @@ export function normalizeAnnotationObject(annotation: AnnotationObject): Annotat
     ...annotation,
     points: normalizedPoints,
     attributes,
+    z_order: zOrder,
   }
 
   return {

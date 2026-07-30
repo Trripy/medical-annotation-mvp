@@ -5,7 +5,7 @@ export function parseContentDispositionFilename(contentDisposition: string | nul
 
   const encodedMatch = contentDisposition.match(/filename\*\s*=\s*([^;]+)/i)
   if (encodedMatch) {
-    const encodedValue = encodedMatch[1].trim().replace(/^"|"$/g, '')
+    const encodedValue = stripHeaderQuotes(encodedMatch[1].trim())
     const normalizedValue = encodedValue.replace(/^UTF-8''/i, '')
     try {
       return decodeURIComponent(normalizedValue)
@@ -19,7 +19,11 @@ export function parseContentDispositionFilename(contentDisposition: string | nul
     return null
   }
 
-  return basicMatch[1].trim().replace(/^"|"$/g, '')
+  return stripHeaderQuotes(basicMatch[1].trim())
+}
+
+function stripHeaderQuotes(value: string) {
+  return value.replace(/^["']|["']$/g, '')
 }
 
 export type DownloadBlobOptions = {
@@ -39,5 +43,7 @@ export function downloadBlobWithFilename(options: DownloadBlobOptions) {
   documentLike.body.appendChild(link)
   link.click()
   link.remove()
-  urlLike.revokeObjectURL(objectUrl)
+  setTimeout(() => {
+    urlLike.revokeObjectURL(objectUrl)
+  }, 0)
 }

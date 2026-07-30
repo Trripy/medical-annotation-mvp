@@ -9,6 +9,7 @@ ImportMode = Literal["append", "replace_matched_images", "replace_all_job"]
 MissingLabelPolicy = Literal["auto_create", "skip"]
 LabelDeleteStrategy = Literal["reassign", "move_to_undefined", "delete_annotations"]
 ExportScope = Literal["all", "annotated_only"]
+ExportRange = Literal["all", "annotated", "selected"]
 
 
 class JobLabelCreate(BaseModel):
@@ -72,6 +73,32 @@ class JobRead(BaseModel):
     frames: int
     annotated_images_count: int = 0
     thumbnail_url: str | None
+
+
+class JobExportRequest(BaseModel):
+    export_range: ExportRange | None = None
+    include_original_images: bool = False
+    selected_image_ids: list[int] = Field(default_factory=list)
+
+
+class JobExportImageRead(BaseModel):
+    id: int
+    filename: str
+    frame_index: int | None = None
+    thumbnail_url: str
+    annotation_count: int = 0
+
+
+class JobExportImagePageRead(BaseModel):
+    items: list[JobExportImageRead]
+    total: int
+    limit: int
+    offset: int
+
+
+class JobExportImageIdsRead(BaseModel):
+    image_ids: list[int]
+    total: int
 
 
 class JobImportRequest(BaseModel):

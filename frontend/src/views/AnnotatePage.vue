@@ -3,11 +3,13 @@ import { Back, Delete, Finished, Pointer, RefreshRight } from '@element-plus/ico
 import { ElMessage } from 'element-plus'
 import { storeToRefs } from 'pinia'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
 import AnnotationCanvas from '../components/AnnotationCanvas.vue'
 import ObjectPanel from '../components/ObjectPanel.vue'
 import {
+  SAM2_TRACK_FAILED_ERROR_PREFIX,
   useAnnotationStore,
   type AnnotationObject,
   type Sam2ExistingAnnotationPolicy,
@@ -32,6 +34,14 @@ import {
   normalizeHexColor,
   pickDistinctLabelColor,
 } from '../utils/labelColors'
+import {
+  moveAnnotationLayer,
+  moveAnnotationLayerByStep,
+  moveAnnotationToBack,
+  moveAnnotationToFront,
+  nextTopLayerOrder,
+  normalizeAnnotationLayerOrder,
+} from '../utils/annotationLayerOrder'
 import {
   buildPolygonSmoothingAttributes,
   clampPolygonSmoothValue,
@@ -126,6 +136,7 @@ const props = defineProps<{
 
 const route = useRoute()
 const router = useRouter()
+const { t } = useI18n()
 const annotationStore = useAnnotationStore()
 const usersStore = useUsersStore()
 const userSettingsStore = useUserSettingsStore()
@@ -171,6 +182,13 @@ const acceptingTrackingPreview = ref(false)
 const trackingDialogAnnotationId = ref<number | string | null>(null)
 const trackingReviewRangeStart = ref(0)
 const trackingReviewRangeEnd = ref(0)
+const toolLabelKeys: Record<ToolType, string> = {
+  cursor: 'frameAnnotation.cursor',
+  rectangle: 'frameAnnotation.rectangle',
+  polygon: 'frameAnnotation.polygon',
+  sam2: 'frameAnnotation.sam2',
+  classify: 'frameAnnotation.class',
+}
 const isRightPanelOpen = ref(false)
 const trackWithSam2Form = ref<TrackWithSam2FormState>({
   direction: 'forward',
@@ -313,7 +331,7 @@ const trackingPreviewNeedsFixCount = computed(() =>
 const trackingPreviewReviewFramesText = computed(() => {
   const reviewFrames = trackingPreviewState.value?.reviewFrames ?? []
   if (reviewFrames.length === 0) {
-    return 'none'
+    return t('frameAnnotation.tracking.none')
   }
   if (reviewFrames.length <= 3) {
     return reviewFrames.join(', ')
@@ -327,7 +345,13 @@ const trackingPreviewCompactText = computed(() => {
   if (!trackingPreviewState.value) {
     return ''
   }
-  return `Tracking preview · ${trackingPreviewDirectionText.value} · Pending ${trackingPreviewPendingCount.value} · Accepted ${trackingPreviewAcceptedCount.value} · Fix ${trackingPreviewNeedsFixCount.value} · Review ${trackingPreviewState.value.reviewFrames.length}`
+  return t('frameAnnotation.tracking.compact', {
+    direction: trackingPreviewDirectionText.value,
+    pending: trackingPreviewPendingCount.value,
+    accepted: trackingPreviewAcceptedCount.value,
+    fix: trackingPreviewNeedsFixCount.value,
+    review: trackingPreviewState.value.reviewFrames.length,
+  })
 })
 const trackingPreviewMinFrameIndex = computed(() => {
   const results = trackingPreviewState.value?.results ?? []
@@ -492,7 +516,7 @@ function applyDefaultTool() {
 
 function setTool(nextTool: ToolType) {
   if (nextTool === 'classify' && !canUseClassificationTool.value) {
-    ElMessage.info('Add image classification labels in Manage Labels first.')
+    ElMessage.info(t('frameAnnotation.addClassificationLabelsFirst'))
     return
   }
   hasUserChangedTool.value = true
@@ -603,7 +627,7 @@ async function loadManagedLabels() {
   labelManagerLoading.value = false
 
   if (!labels) {
-    ElMessage.error(annotationStore.error || 'Failed to load labels.')
+    ElMessage.error(annotationStore.error || t('frameAnnotation.failedLoadLabels'))
     return
   }
 
@@ -647,7 +671,7 @@ async function ensureCurrentFrameSavedBeforeLabelMutation() {
 
   const saved = await saveAnnotations()
   if (!saved) {
-    ElMessage.error('Failed to save current annotations. Label change was not applied.')
+    ElMessage.error(t('frameAnnotation.failedSaveCurrentAnnotations'))
     return false
   }
 
@@ -657,14 +681,14 @@ async function ensureCurrentFrameSavedBeforeLabelMutation() {
 async function addManagedLabel() {
   const name = newLabelName.value.trim()
   if (!name) {
-    ElMessage.warning('Label name is required.')
+    ElMessage.warning(t('frameAnnotation.labelNameRequired'))
     return
   }
 
   const usedColors = new Set(labelDrafts.value.map((label) => label.color).filter(Boolean))
   const color = pickDistinctLabelColor(newLabelColor.value, usedColors)
   if (normalizeHexColor(newLabelColor.value) !== color) {
-    ElMessage.warning(`Label color is too similar to another label color. Using ${color} instead.`)
+    ElMessage.warning(t('frameAnnotation.labelColorAdjusted', { color }))
   }
 
   const shapeType = newLabelKind.value === 'image_classification' ? 'classification' : newLabelShapeType.value
@@ -678,11 +702,11 @@ async function addManagedLabel() {
   labelActionLoading.value = false
 
   if (!created) {
-    ElMessage.error(annotationStore.error || 'Create label failed.')
+    ElMessage.error(annotationStore.error || t('frameAnnotation.failedCreateLabel'))
     return
   }
 
-  ElMessage.success('Label created.')
+  ElMessage.success(t('frameAnnotation.labelCreated'))
   resetNewLabelForm()
   await refreshJobAfterLabelChange(created.id)
 }
@@ -690,7 +714,7 @@ async function addManagedLabel() {
 async function saveManagedLabel(label: LabelDraft) {
   const name = label.name.trim()
   if (!name) {
-    ElMessage.warning('Label name is required.')
+    ElMessage.warning(t('frameAnnotation.labelNameRequired'))
     return
   }
 
@@ -699,11 +723,11 @@ async function saveManagedLabel(label: LabelDraft) {
   )
   const normalizedColor = normalizeHexColor(label.color)
   if (!normalizedColor) {
-    ElMessage.warning('Label color must be a 6-digit hex color.')
+    ElMessage.warning(t('frameAnnotation.labelColorInvalid'))
     return
   }
   if (isColorConflict(normalizedColor, usedColors)) {
-    ElMessage.warning('This color is too similar to another label color.')
+    ElMessage.warning(t('frameAnnotation.labelColorConflict'))
     return
   }
 
@@ -718,11 +742,11 @@ async function saveManagedLabel(label: LabelDraft) {
   labelActionLoading.value = false
 
   if (!updated) {
-    ElMessage.error(annotationStore.error || 'Update label failed.')
+    ElMessage.error(annotationStore.error || t('frameAnnotation.failedUpdateLabel'))
     return
   }
 
-  ElMessage.success('Label updated.')
+  ElMessage.success(t('frameAnnotation.labelUpdated'))
   await refreshJobAfterLabelChange(selectedLabelId.value)
 }
 
@@ -733,7 +757,7 @@ async function requestDeleteManagedLabel(label: LabelDraft) {
 
   const usage = await annotationStore.getJobLabelUsage(props.jobId, label.id)
   if (!usage) {
-    ElMessage.error(annotationStore.error || 'Failed to check label usage.')
+    ElMessage.error(annotationStore.error || t('frameAnnotation.failedCheckLabelUsage'))
     return
   }
 
@@ -779,7 +803,7 @@ async function confirmDeleteUsedLabel() {
   }
 
   if (deleteLabelStrategy.value === 'reassign' && !reassignTargetLabelId.value) {
-    ElMessage.warning('Choose a target label.')
+    ElMessage.warning(t('frameAnnotation.chooseTargetLabel'))
     return
   }
 
@@ -814,7 +838,7 @@ async function executeDeleteManagedLabel(
   labelActionLoading.value = false
 
   if (!result) {
-    ElMessage.error(annotationStore.error || 'Delete label failed.')
+    ElMessage.error(annotationStore.error || t('frameAnnotation.failedDeleteLabel'))
     return false
   }
 
@@ -822,7 +846,7 @@ async function executeDeleteManagedLabel(
   if (selectedLabelId.value === label.id) {
     preferredLabelId = options.targetLabelId ?? null
   }
-  ElMessage.success('Label deleted.')
+  ElMessage.success(t('frameAnnotation.labelDeleted'))
   await refreshJobAfterLabelChange(preferredLabelId)
   if (options.strategy === 'move_to_undefined') {
     const undefinedLabel = job.value?.labels.find(isUndefinedLabel)
@@ -844,7 +868,7 @@ function updateAnnotationsForImage(imageId: number, nextAnnotations: AnnotationO
     return
   }
 
-  const normalizedAnnotations = nextAnnotations.map((annotation) => normalizeAnnotationObject(annotation))
+  const normalizedAnnotations = normalizeAnnotationLayerOrder(nextAnnotations.map((annotation) => normalizeAnnotationObject(annotation)))
   job.value.annotations = [
     ...job.value.annotations.filter((annotation) => annotation.image_id !== imageId),
     ...normalizedAnnotations,
@@ -864,6 +888,7 @@ function buildClassificationAnnotation(imageId: number, labelId: number): Annota
     label_id: labelId,
     shape_type: 'classification',
     points: [],
+    z_order: nextTopLayerOrder(imageAnnotationsFor(imageId)),
     attributes: {
       annotation_kind: 'image_classification',
       classification: true,
@@ -894,11 +919,11 @@ async function saveClassificationForCurrentImage(labelId: number | null) {
     return false
   }
   if (canvasRef.value?.isDrawingPolygon()) {
-    ElMessage.warning('Please finish or cancel the current polygon first.')
+    ElMessage.warning(t('frameAnnotation.finishPolygonFirst'))
     return false
   }
   if (canvasRef.value?.isBoundaryAssistActive) {
-    ElMessage.warning('Please finish or cancel the boundary-assisted polygon first.')
+    ElMessage.warning(t('frameAnnotation.finishBoundaryFirst'))
     return false
   }
 
@@ -925,19 +950,19 @@ async function applyImageClassification(labelId: number) {
 
   const saved = await saveClassificationForCurrentImage(labelId)
   if (!saved) {
-    ElMessage.error('Failed to save classification. Please retry.')
+    ElMessage.error(t('frameAnnotation.classificationSaveFailed'))
     return
   }
 
   const nextIndex = nextImageIndexForClassification()
   if (nextIndex === null) {
-    ElMessage.success('Classification saved. This is the last frame.')
+    ElMessage.success(t('frameAnnotation.classificationSavedLast'))
     return
   }
 
   selectedImageIndex.value = nextIndex
   hasUnsavedChanges.value = false
-  ElMessage.success(`Classification saved: ${label.name}.`)
+  ElMessage.success(t('frameAnnotation.classificationSaved', { label: label.name }))
 }
 
 async function clearImageClassification() {
@@ -947,11 +972,11 @@ async function clearImageClassification() {
 
   const saved = await saveClassificationForCurrentImage(null)
   if (!saved) {
-    ElMessage.error('Failed to clear classification. Please retry.')
+    ElMessage.error(t('frameAnnotation.classificationClearFailed'))
     return
   }
 
-  ElMessage.success('Classification cleared.')
+  ElMessage.success(t('frameAnnotation.classificationCleared'))
 }
 
 function pushUndoState() {
@@ -992,14 +1017,14 @@ function selectAnnotation(id: number | string | null) {
 function startBoundaryAssist(annotationId: number | string) {
   const annotation = currentImageAnnotations.value.find((item) => item.id === annotationId)
   if (!annotation || annotation.shape_type !== 'polygon') {
-    ElMessage.warning('Select a polygon annotation first.')
+    ElMessage.warning(t('frameAnnotation.selectPolygonFirst'))
     return
   }
 
   const preferredLabel = job.value?.labels.find((label) => label.name.trim().toLowerCase() === 'layer_up')
   const fallbackLabelId = preferredLabel?.id ?? selectedLabelId.value ?? job.value?.labels[0]?.id ?? null
   if (!fallbackLabelId) {
-    ElMessage.warning('Create a label before using boundary-assisted polygon.')
+    ElMessage.warning(t('frameAnnotation.createLabelBeforeBoundary'))
     return
   }
 
@@ -1040,6 +1065,29 @@ function deleteAnnotation(id: number | string | null = selectedAnnotationId.valu
   updateCurrentImageAnnotations(currentImageAnnotations.value.filter((annotation) => annotation.id !== id))
   hiddenAnnotationIds.value = hiddenAnnotationIds.value.filter((hiddenId) => hiddenId !== id)
   selectedAnnotationId.value = null
+}
+
+function reorderAnnotation(id: number | string, targetFrontIndex: number) {
+  if (!job.value || !currentImage.value) {
+    return
+  }
+  pushUndoState()
+  updateCurrentImageAnnotations(moveAnnotationLayer(currentImageAnnotations.value, id, targetFrontIndex))
+}
+
+function moveAnnotationLayerAction(id: number | string, direction: 'up' | 'down' | 'top' | 'bottom') {
+  if (!job.value || !currentImage.value) {
+    return
+  }
+  pushUndoState()
+  const nextAnnotations = direction === 'up'
+    ? moveAnnotationLayerByStep(currentImageAnnotations.value, id, -1)
+    : direction === 'down'
+      ? moveAnnotationLayerByStep(currentImageAnnotations.value, id, 1)
+      : direction === 'top'
+        ? moveAnnotationToFront(currentImageAnnotations.value, id)
+        : moveAnnotationToBack(currentImageAnnotations.value, id)
+  updateCurrentImageAnnotations(nextAnnotations)
 }
 
 function updateAnnotationLabel(id: number | string, labelId: number) {
@@ -1155,13 +1203,13 @@ async function generateSam2Mask() {
   }
 
   if (!selectedLabelId.value) {
-    ElMessage.warning('Please select a label before generating a SAM2 mask.')
+    ElMessage.warning(t('frameAnnotation.selectLabelFirst'))
     return
   }
 
   const prompt = canvasRef.value?.getSam2Prompt()
   if (!prompt || (prompt.point_coords.length === 0 && prompt.box === null)) {
-    ElMessage.warning('Add foreground/background points or draw a box prompt first.')
+    ElMessage.warning(t('frameAnnotation.addPromptFirst'))
     return
   }
 
@@ -1169,11 +1217,11 @@ async function generateSam2Mask() {
   try {
     const generated = await canvasRef.value?.runSamPrediction()
     if (!generated) {
-      throw new Error('SAM2 prediction failed')
+      throw new Error(t('frameAnnotation.sam2PredictionFailed'))
     }
-    ElMessage.success('SAM2 mask generated.')
+    ElMessage.success(t('frameAnnotation.sam2PreviewGenerated'))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : 'SAM2 prediction failed')
+    ElMessage.error(error instanceof Error ? error.message : t('frameAnnotation.sam2PredictionFailed'))
   } finally {
     generatingSam2.value = false
   }
@@ -1182,24 +1230,24 @@ async function generateSam2Mask() {
 function acceptSam2Mask() {
   const preview = canvasRef.value?.acceptSam2Preview?.() as Sam2PreviewAcceptPayload | null | undefined
   if (!preview) {
-    ElMessage.warning('No SAM2 mask preview to accept.')
+    ElMessage.warning(t('frameAnnotation.noSam2Preview'))
     return
   }
 
   hasSam2Preview.value = false
   if (preview.source === 'refine_annotation') {
     if (applyRefinedSam2Polygon(preview)) {
-      ElMessage.success('Polygon refined with SAM2.')
+      ElMessage.success(t('frameAnnotation.polygonRefined'))
     }
     return
   }
 
   if (!acceptSam2GeneratedPolygon(preview)) {
-    ElMessage.warning('No SAM2 mask preview to accept.')
+    ElMessage.warning(t('frameAnnotation.noSam2Preview'))
     return
   }
 
-  ElMessage.success('SAM2 mask accepted.')
+  ElMessage.success(t('frameAnnotation.sam2Accepted'))
   applyToolAfterSamAccept()
 }
 
@@ -1234,6 +1282,7 @@ function acceptSam2GeneratedPolygon(preview: Sam2PreviewAcceptPayload) {
     label_id: selectedLabelId.value,
     shape_type: 'polygon',
     points: clonePoints(preview.points),
+    z_order: nextTopLayerOrder(currentImageAnnotations.value),
     attributes: buildPolygonSmoothingAttributes(preview.points, 0),
   })
   updateCurrentImageAnnotations([...currentImageAnnotations.value, annotation])
@@ -1253,7 +1302,7 @@ function applyRefinedSam2Polygon(preview: Sam2PreviewAcceptPayload) {
 
   const target = currentImageAnnotations.value.find((annotation) => annotation.id === preview.targetAnnotationId)
   if (!target || target.shape_type !== 'polygon') {
-    ElMessage.warning('Selected polygon is no longer available.')
+    ElMessage.warning(t('frameAnnotation.selectedPolygonUnavailable'))
     return false
   }
 
@@ -1295,17 +1344,17 @@ function applyRefinedSam2Polygon(preview: Sam2PreviewAcceptPayload) {
 async function handleRefineSelectedPolygonWithSam2(annotationId: number | string) {
   const annotation = currentImageAnnotations.value.find((item) => item.id === annotationId)
   if (!annotation) {
-    ElMessage.warning('Please select a polygon annotation first.')
+    ElMessage.warning(t('frameAnnotation.selectPolygonFirst'))
     return
   }
 
   if (annotation.shape_type !== 'polygon') {
-    ElMessage.warning('Only polygon annotations can be refined with SAM2.')
+    ElMessage.warning(t('frameAnnotation.refinePolygonOnly'))
     return
   }
 
   if (annotation.points.length < 3) {
-    ElMessage.warning('Polygon must have at least 3 points.')
+    ElMessage.warning(t('frameAnnotation.polygonNeedsThreePoints'))
     return
   }
 
@@ -1313,12 +1362,12 @@ async function handleRefineSelectedPolygonWithSam2(annotationId: number | string
   try {
     const refined = await canvasRef.value?.refineSelectedPolygonWithSam2?.(annotation)
     if (!refined) {
-      throw new Error('Cannot refine selected polygon with SAM2.')
+      throw new Error(t('frameAnnotation.refinePolygonOnly'))
     }
     hasSam2Preview.value = true
-    ElMessage.success('SAM2 refine preview generated.')
+    ElMessage.success(t('frameAnnotation.sam2RefinePreviewGenerated'))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : 'SAM2 refine failed')
+    ElMessage.error(error instanceof Error ? error.message : t('frameAnnotation.sam2RefineFailed'))
   } finally {
     refiningSelectedPolygonWithSam2.value = false
   }
@@ -1406,22 +1455,53 @@ function initializeTrackingReviewRange(targetFrameIndex = imageFrameIndex()) {
 
 function formatTrackingDirection(direction: Sam2TrackDirection) {
   if (direction === 'backward') {
-    return 'Backward'
+    return t('frameAnnotation.tracking.backward')
   }
   if (direction === 'both') {
-    return 'Both'
+    return t('frameAnnotation.tracking.bothShort')
   }
-  return 'Forward'
+  return t('frameAnnotation.tracking.forward')
 }
 
 function formatPropagationDirection(direction: TrackingPreviewFrameResult['propagation_direction']) {
   if (direction === 'backward') {
-    return 'Backward'
+    return t('frameAnnotation.tracking.backward')
   }
   if (direction === 'forward') {
-    return 'Forward'
+    return t('frameAnnotation.tracking.forward')
   }
-  return 'Source'
+  return t('frameAnnotation.tracking.source')
+}
+
+function formatTrackingResultStatus(status: TrackingPreviewFrameResult['status']) {
+  if (status === 'tracked') {
+    return t('frameAnnotation.tracking.tracked')
+  }
+  if (status === 'failed') {
+    return t('frameAnnotation.tracking.failed')
+  }
+  return status
+}
+
+function formatTrackingReviewStatus(status: TrackingPreviewFrameResult['review_status']) {
+  if (status === 'accepted') {
+    return t('frameAnnotation.tracking.accepted')
+  }
+  if (status === 'rejected') {
+    return t('frameAnnotation.tracking.rejected')
+  }
+  if (status === 'needs_fix') {
+    return t('frameAnnotation.tracking.needsFix')
+  }
+  return t('frameAnnotation.tracking.pending')
+}
+
+function localizeAnnotationStoreError(message: string): string {
+  if (message.startsWith(`${SAM2_TRACK_FAILED_ERROR_PREFIX}:`)) {
+    const status = message.slice(SAM2_TRACK_FAILED_ERROR_PREFIX.length + 1)
+    return status ? `${t('frameAnnotation.tracking.trackFailed')} (${status})` : t('frameAnnotation.tracking.trackFailed')
+  }
+  return message
 }
 
 function openRightPanel() {
@@ -1587,6 +1667,7 @@ function buildTrackingFixAnnotation(
     label_id: previewState.labelId,
     shape_type: 'polygon',
     points: clonePoints(trackedPoints),
+    z_order: nextTopLayerOrder(imageAnnotationsFor(result.image_id)),
     attributes: buildPolygonSmoothingAttributes(trackedPoints, 0, {
       generated_by: 'sam2_video_tracking_needs_fix',
       source_annotation_id: previewState.sourceAnnotationId,
@@ -1709,7 +1790,7 @@ function rejectTrackingFrame(imageId: number) {
     return
   }
   if (result.committed) {
-    ElMessage.info('This tracking result has already been accepted. Edit the saved annotation directly if it needs changes.')
+    ElMessage.info(t('frameAnnotation.tracking.alreadyAcceptedEditSaved'))
     return
   }
   setTrackingFrameReviewStatus(imageId, 'rejected')
@@ -1721,7 +1802,7 @@ async function markTrackingFrameNeedsFix(imageId: number) {
     return
   }
   if (result.committed) {
-    ElMessage.info('This tracking result has already been accepted. Edit the saved annotation directly if it needs changes.')
+    ElMessage.info(t('frameAnnotation.tracking.alreadyAcceptedEditSaved'))
     return
   }
   if (!trackingPreviewState.value) {
@@ -1731,7 +1812,7 @@ async function markTrackingFrameNeedsFix(imageId: number) {
   trackingReviewDialogVisible.value = false
   const ensuredFixAnnotation = await ensureEditableFixAnnotation(imageId)
   if (!ensuredFixAnnotation) {
-    ElMessage.warning('Unable to create an editable fix annotation for this frame.')
+    ElMessage.warning(t('frameAnnotation.tracking.createFixFailed'))
     return
   }
 
@@ -1743,7 +1824,7 @@ async function markTrackingFrameNeedsFix(imageId: number) {
   }
 
   if (currentImage.value?.id !== imageId) {
-    ElMessage.warning('Unable to switch to the fix frame.')
+    ElMessage.warning(t('frameAnnotation.tracking.switchFixFrameFailed'))
     return
   }
 
@@ -1756,8 +1837,8 @@ async function markTrackingFrameNeedsFix(imageId: number) {
   setTool('cursor')
   ElMessage[ensuredFixAnnotation.created ? 'success' : 'info'](
     ensuredFixAnnotation.created
-      ? 'Fix annotation created. You can now edit the polygon and save it.'
-      : 'This frame already has an editable fix annotation.',
+      ? t('frameAnnotation.tracking.fixAnnotationCreated')
+      : t('frameAnnotation.tracking.fixAnnotationAlreadyExists'),
   )
 }
 
@@ -1768,7 +1849,7 @@ function findImageIndexById(imageId: number) {
 async function goToTrackingFrame(imageId: number) {
   const index = findImageIndexById(imageId)
   if (index < 0) {
-    ElMessage.warning('Tracking frame is no longer available in this job.')
+    ElMessage.warning(t('frameAnnotation.tracking.frameUnavailable'))
     return
   }
   trackingReviewDialogVisible.value = false
@@ -1781,7 +1862,7 @@ function acceptTrackingRange() {
   }
 
   if (!Number.isFinite(trackingReviewRangeStart.value) || !Number.isFinite(trackingReviewRangeEnd.value)) {
-    ElMessage.warning('Enter a valid tracking frame range first.')
+    ElMessage.warning(t('frameAnnotation.tracking.invalidRange'))
     return
   }
 
@@ -1797,28 +1878,28 @@ function acceptTrackingRange() {
   ))
 
   if (candidates.length === 0) {
-    ElMessage.warning('No valid tracked frames were found in the selected range.')
+    ElMessage.warning(t('frameAnnotation.tracking.noValidFrames'))
     return
   }
 
   for (const result of candidates) {
     setTrackingFrameReviewStatus(result.image_id, 'accepted')
   }
-  ElMessage.success(`Marked ${candidates.length} frame(s) as accepted for review.`)
+  ElMessage.success(t('frameAnnotation.tracking.markedAccepted', { count: candidates.length }))
 }
 
 function openTrackWithSam2(annotationId: number | string) {
   const annotation = currentImageAnnotations.value.find((item) => item.id === annotationId)
   if (!annotation) {
-    ElMessage.warning('Please select a polygon annotation first.')
+    ElMessage.warning(t('frameAnnotation.selectPolygonFirst'))
     return
   }
   if (annotation.shape_type !== 'polygon') {
-    ElMessage.warning('Only polygon annotations can be tracked with SAM2.')
+    ElMessage.warning(t('frameAnnotation.trackPolygonOnly'))
     return
   }
   if (annotation.points.length < 3) {
-    ElMessage.warning('Polygon must have at least 3 points.')
+    ElMessage.warning(t('frameAnnotation.polygonNeedsThreePoints'))
     return
   }
 
@@ -1926,27 +2007,25 @@ async function startTrackWithSam2() {
 
   const annotation = trackingDialogTargetAnnotation.value
   if (!annotation || annotation.shape_type !== 'polygon') {
-    ElMessage.warning('Select a polygon annotation to track it through frames with SAM2.')
+    ElMessage.warning(t('frameAnnotation.tracking.selectPolygonToTrack'))
     return
   }
   if (annotation.points.length < 3) {
-    ElMessage.warning('Polygon must have at least 3 points.')
+    ElMessage.warning(t('frameAnnotation.polygonNeedsThreePoints'))
     return
   }
 
   if (trackingPreviewState.value) {
     const discardPreviewMessage = trackWithSam2Form.value.outputMode === 'direct_create'
-      ? 'A tracking preview is already active. Starting direct tracking will discard the current preview. Continue?'
-      : 'A tracking preview is already active. Starting a new tracking run will discard the current preview. Continue?'
+      ? t('frameAnnotation.tracking.discardPreviewForDirectConfirm')
+      : t('frameAnnotation.tracking.discardPreviewForNewRunConfirm')
     if (!window.confirm(discardPreviewMessage)) {
       return
     }
   }
 
   if (trackWithSam2Form.value.outputMode === 'direct_create') {
-    const confirmed = window.confirm(
-      'Directly create annotations will skip the review step and automatically save generated annotations to the database. Continue?',
-    )
+    const confirmed = window.confirm(t('frameAnnotation.tracking.directCreateConfirm'))
     if (!confirmed) {
       return
     }
@@ -1968,33 +2047,33 @@ async function startTrackWithSam2() {
 
   if (trackWithSam2Form.value.direction === 'forward') {
     if (!canTrackForwardFromCurrentFrame.value) {
-      ElMessage.warning('Cannot track forward from the last frame.')
+      ElMessage.warning(t('frameAnnotation.tracking.cannotTrackForwardLast'))
       return
     }
     if (clampedForwardEndFrameIndex <= startFrameIndex) {
-      ElMessage.warning('End frame must be after the selected start frame.')
+      ElMessage.warning(t('frameAnnotation.tracking.forwardEndAfterStart'))
       return
     }
   } else if (trackWithSam2Form.value.direction === 'backward') {
     if (!canTrackBackwardFromCurrentFrame.value) {
-      ElMessage.warning('Cannot track backward from the first frame.')
+      ElMessage.warning(t('frameAnnotation.tracking.cannotTrackBackwardFirst'))
       return
     }
     if (clampedBackwardEndFrameIndex >= startFrameIndex) {
-      ElMessage.warning('End frame must be before the selected start frame.')
+      ElMessage.warning(t('frameAnnotation.tracking.backwardEndBeforeStart'))
       return
     }
   } else {
     if (!canTrackBothDirectionsFromCurrentFrame.value) {
-      ElMessage.warning('No additional frames are available for bidirectional tracking.')
+      ElMessage.warning(t('frameAnnotation.tracking.noAdditionalFrames'))
       return
     }
     if (clampedBackwardEndFrameIndex > startFrameIndex) {
-      ElMessage.warning('Backward end frame must be before or equal to the selected start frame.')
+      ElMessage.warning(t('frameAnnotation.tracking.backwardEndBeforeOrEqualStart'))
       return
     }
     if (clampedForwardEndFrameIndex < startFrameIndex) {
-      ElMessage.warning('Forward end frame must be after or equal to the selected start frame.')
+      ElMessage.warning(t('frameAnnotation.tracking.forwardEndAfterOrEqualStart'))
       return
     }
   }
@@ -2029,7 +2108,7 @@ async function startTrackWithSam2() {
     })
 
     if (!response) {
-      throw new Error(annotationStore.error || 'Track with SAM2 failed.')
+      throw new Error(annotationStore.error ? localizeAnnotationStoreError(annotationStore.error) : t('frameAnnotation.tracking.trackFailed'))
     }
 
     if (trackWithSam2Form.value.outputMode === 'direct_create') {
@@ -2044,27 +2123,29 @@ async function startTrackWithSam2() {
       if (report.saveFailedCount > 0) {
         if (report.savedCount > 0) {
           ElMessage.error(
-            `Created ${report.savedCount + report.saveFailedCount} tracking annotation(s), saved ${report.savedCount}, failed to save ${report.saveFailedCount} frame(s).`,
+            t('frameAnnotation.tracking.directPartialSaveFailed', {
+              total: report.savedCount + report.saveFailedCount,
+              saved: report.savedCount,
+              failed: report.saveFailedCount,
+            }),
           )
         } else {
-          ElMessage.error('Tracking annotations were generated but failed to save. Please retry or use Preview mode.')
+          ElMessage.error(t('frameAnnotation.tracking.directSaveFailed'))
         }
         return
       }
 
       if (report.savedCount === 0) {
         if (report.skippedCount > 0 || report.failedCount > 0) {
-          ElMessage.warning(
-            `No tracking annotations were created.${report.skippedCount > 0 ? ` Skipped ${report.skippedCount}.` : ''}${report.failedCount > 0 ? ` Failed ${report.failedCount}.` : ''}`,
-          )
+          ElMessage.warning(t('frameAnnotation.tracking.noneCreatedWithCounts', { skipped: report.skippedCount, failed: report.failedCount }))
         } else {
-          ElMessage.info('No tracking annotations were created.')
+          ElMessage.info(t('frameAnnotation.tracking.noneCreated'))
         }
         return
       }
 
       ElMessage.success(
-        `Created and saved ${report.savedCount} tracking annotation(s).${report.skippedCount > 0 ? ` Skipped ${report.skippedCount}.` : ''}${report.failedCount > 0 ? ` Failed ${report.failedCount}.` : ''}`,
+        t('frameAnnotation.tracking.directCreated', { saved: report.savedCount, skipped: report.skippedCount, failed: report.failedCount }),
       )
       return
     }
@@ -2073,12 +2154,12 @@ async function startTrackWithSam2() {
     trackWithSam2DialogVisible.value = false
     trackingDialogAnnotationId.value = null
     if (response.warnings.length > 0) {
-      ElMessage.warning(`Tracking preview generated with ${response.warnings.length} warning(s).`)
+      ElMessage.warning(t('frameAnnotation.tracking.previewGeneratedWarnings', { count: response.warnings.length }))
     } else {
-      ElMessage.success('Tracking preview generated.')
+      ElMessage.success(t('frameAnnotation.tracking.previewGenerated'))
     }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : 'Track with SAM2 failed.')
+    ElMessage.error(error instanceof Error ? error.message : t('frameAnnotation.tracking.trackFailed'))
   } finally {
     trackingWithSam2.value = false
   }
@@ -2092,24 +2173,24 @@ function trackingFrameBadge(imageId: number, frameIndex: number) {
   const result = trackingPreviewMap.value.get(imageId)
   if (result) {
     if (result.status === 'failed') {
-      return { label: 'Failed', className: 'failed' }
+      return { label: t('frameAnnotation.tracking.failed'), className: 'failed' }
     }
     if (result.review_status === 'needs_fix') {
-      return { label: 'Fix', className: 'needs-fix' }
+      return { label: t('frameAnnotation.tracking.fix'), className: 'needs-fix' }
     }
     if (result.review_status === 'accepted') {
-      return { label: 'Accepted', className: 'accepted' }
+      return { label: t('frameAnnotation.tracking.accepted'), className: 'accepted' }
     }
     if (result.review_status === 'rejected') {
-      return { label: 'Rejected', className: 'rejected' }
+      return { label: t('frameAnnotation.tracking.rejected'), className: 'rejected' }
     }
     if (trackingResultHasValidPolygon(result)) {
-      return { label: 'Preview', className: 'preview' }
+      return { label: t('frameAnnotation.tracking.preview'), className: 'preview' }
     }
   }
 
   if (isTrackingReviewFrame(frameIndex)) {
-    return { label: 'Review', className: 'review' }
+    return { label: t('frameAnnotation.tracking.review'), className: 'review' }
   }
   return null
 }
@@ -2167,6 +2248,7 @@ function buildAnnotationFromTrackingResult(
     label_id: context.labelId,
     shape_type: 'polygon',
     points: trackedPoints,
+    z_order: nextTopLayerOrder(imageAnnotationsFor(result.image_id)),
     attributes: buildPolygonSmoothingAttributes(trackedPoints, 0, {
       ...baseAttributes,
       ...modeSpecificAttributes,
@@ -2215,7 +2297,7 @@ async function ensureCurrentFrameSavedBeforeTrackingCommit() {
 
   const saved = await saveAnnotations()
   if (!saved) {
-    ElMessage.error('Failed to save current annotations before applying tracking results.')
+    ElMessage.error(t('frameAnnotation.tracking.saveBeforeApplyFailed'))
     return false
   }
   return true
@@ -2275,14 +2357,14 @@ function acceptFixedTrackingFrame(
   const fixAnnotation = existingFixAnnotationForResult(result)
   if (!fixAnnotation || fixAnnotation.image_id !== result.image_id) {
     if (options.showMessages !== false) {
-      ElMessage.warning('No editable fix annotation found for this frame.')
+      ElMessage.warning(t('frameAnnotation.tracking.noEditableFix'))
     }
     return 'invalid'
   }
 
   if (fixAnnotation.shape_type !== 'polygon' || fixAnnotation.points.length < 3) {
     if (options.showMessages !== false) {
-      ElMessage.warning('Fix annotation must be a valid polygon.')
+      ElMessage.warning(t('frameAnnotation.tracking.fixMustBePolygon'))
     }
     return 'invalid'
   }
@@ -2299,7 +2381,7 @@ function acceptFixedTrackingFrame(
 
   if (previewState.existingAnnotationPolicy === 'skip_same_label' && sameLabelAnnotations.length > 0) {
     if (options.showMessages !== false) {
-      ElMessage.warning('This frame already has an annotation with the same label.')
+      ElMessage.warning(t('frameAnnotation.tracking.sameLabelExists'))
     }
     return 'skipped'
   }
@@ -2349,9 +2431,9 @@ function acceptFixedTrackingFrame(
 
   if (options.showMessages !== false) {
     if (previewState.existingAnnotationPolicy === 'replace_same_label' && sameLabelAnnotations.length > 0) {
-      ElMessage.success('Fixed annotation accepted. Existing annotations with the same label were replaced. Click Save to persist it.')
+      ElMessage.success(t('frameAnnotation.tracking.fixedAcceptedReplace'))
     } else {
-      ElMessage.success('Fixed annotation accepted. Click Save to persist it.')
+      ElMessage.success(t('frameAnnotation.tracking.fixedAccepted'))
     }
   }
 
@@ -2414,7 +2496,7 @@ async function commitTrackingResults(
   if (failedCount > 0) {
     if (options.showMessages !== false) {
       ElMessage.error(
-        `${messages.partialPrefix} ${savedCount} frame(s)${skippedCount > 0 ? `, skipped ${skippedCount}` : ''}, failed ${failedCount}.`,
+        t('frameAnnotation.tracking.partialAccept', { prefix: messages.partialPrefix, saved: savedCount, skipped: skippedCount, failed: failedCount }),
       )
     }
     return {
@@ -2427,7 +2509,7 @@ async function commitTrackingResults(
 
   if (options.showMessages !== false) {
     ElMessage.success(
-      `${messages.successPrefix} ${savedCount} frame(s)${skippedCount > 0 ? `, skipped ${skippedCount}` : ''}.`,
+      t('frameAnnotation.tracking.successAccept', { prefix: messages.successPrefix, saved: savedCount, skipped: skippedCount }),
     )
   }
   return {
@@ -2441,7 +2523,7 @@ async function commitTrackingResults(
 async function acceptCurrentTrackingFrame() {
   const result = currentTrackingPreviewResult.value
   if (!result) {
-    ElMessage.warning('No tracking preview is available on the current frame.')
+    ElMessage.warning(t('frameAnnotation.tracking.noPreviewCurrent'))
     return
   }
 
@@ -2451,11 +2533,11 @@ async function acceptCurrentTrackingFrame() {
 async function acceptTrackingFrame(imageId: number) {
   const result = trackingPreviewMap.value.get(imageId)
   if (!result) {
-    ElMessage.warning('No tracking preview is available on this frame.')
+    ElMessage.warning(t('frameAnnotation.tracking.noPreviewFrame'))
     return
   }
   if (result.committed) {
-    ElMessage.info('This tracking result has already been accepted.')
+    ElMessage.info(t('frameAnnotation.tracking.alreadyAccepted'))
     return
   }
 
@@ -2468,15 +2550,15 @@ async function acceptTrackingFrame(imageId: number) {
   }
 
   if (!trackingResultHasValidPolygon(result)) {
-    ElMessage.warning('This tracking frame does not contain a valid polygon.')
+    ElMessage.warning(t('frameAnnotation.tracking.invalidTrackingPolygon'))
     return
   }
 
   setTrackingFrameReviewStatus(result.image_id, 'accepted')
   await commitTrackingResults([result], {
-    empty: 'No valid tracking frame is available to accept.',
-    successPrefix: 'Saved accepted tracking',
-    partialPrefix: 'Saved accepted tracking',
+    empty: t('frameAnnotation.tracking.noValidFrameToAccept'),
+    successPrefix: t('frameAnnotation.tracking.savedAcceptedPrefix'),
+    partialPrefix: t('frameAnnotation.tracking.savedAcceptedPrefix'),
   })
 }
 
@@ -2491,9 +2573,9 @@ async function acceptReviewedTrackingFrames() {
     !result.committed
   ))
   await commitTrackingResults(reviewedResults, {
-    empty: 'No reviewed tracking frames are ready to save.',
-    successPrefix: 'Saved reviewed tracked',
-    partialPrefix: 'Saved reviewed tracked',
+    empty: t('frameAnnotation.tracking.noReviewedReady'),
+    successPrefix: t('frameAnnotation.tracking.savedReviewedPrefix'),
+    partialPrefix: t('frameAnnotation.tracking.savedReviewedPrefix'),
   })
 }
 
@@ -2507,7 +2589,7 @@ async function acceptTrackingPreview() {
   )
   if (blockedResults.length > 0) {
     const confirmed = window.confirm(
-      'Some frames are marked as rejected or needs fix. Accept All will save all currently acceptable results and skip unresolved frames. Continue?',
+      t('frameAnnotation.tracking.acceptAllConfirm'),
     )
     if (!confirmed) {
       return
@@ -2518,9 +2600,9 @@ async function acceptTrackingPreview() {
     canAcceptTrackingResult(result)
   ))
   const report = await commitTrackingResults(acceptedResults, {
-    empty: 'No valid tracking frames are available to accept.',
-    successPrefix: 'Saved tracked',
-    partialPrefix: 'Saved tracked',
+    empty: t('frameAnnotation.tracking.noValidFrameToAccept'),
+    successPrefix: t('frameAnnotation.tracking.savedTrackedPrefix'),
+    partialPrefix: t('frameAnnotation.tracking.savedTrackedPrefix'),
   }, {
     showMessages: false,
   })
@@ -2531,29 +2613,29 @@ async function acceptTrackingPreview() {
 
   if (report.failedCount > 0) {
     ElMessage.error(
-      `Saved tracked ${report.savedCount} frame(s)${report.skippedCount > 0 ? `, skipped ${report.skippedCount}` : ''}, failed ${report.failedCount}.`,
+      t('frameAnnotation.tracking.partialAccept', { prefix: t('frameAnnotation.tracking.savedTrackedPrefix'), saved: report.savedCount, skipped: report.skippedCount, failed: report.failedCount }),
     )
     return
   }
 
   const remainingResults = trackingPreviewState.value?.results ?? []
   if (trackingPreviewHasUnresolvedFrames(remainingResults)) {
-    ElMessage.warning('Some frames still need fixing.')
+    ElMessage.warning(t('frameAnnotation.tracking.stillNeedsFix'))
     return
   }
 
   clearTrackingPreview()
   if (report.attemptedCount === 0) {
-    ElMessage.info('No pending tracking frames remain. Tracking preview closed.')
+    ElMessage.info(t('frameAnnotation.tracking.noPendingRemain'))
     return
   }
-  ElMessage.success('Tracking results accepted. Click Save to persist the annotations.')
+  ElMessage.success(t('frameAnnotation.tracking.resultsAccepted'))
 }
 
 function rejectCurrentTrackingFrame() {
   const result = currentTrackingPreviewResult.value
   if (!result || result.status !== 'tracked') {
-    ElMessage.warning('No tracked preview is available on the current frame.')
+    ElMessage.warning(t('frameAnnotation.tracking.noTrackedPreviewCurrent'))
     return
   }
   rejectTrackingFrame(result.image_id)
@@ -2562,7 +2644,7 @@ function rejectCurrentTrackingFrame() {
 function markCurrentTrackingFrameNeedsFix() {
   const result = currentTrackingPreviewResult.value
   if (!result || result.status !== 'tracked') {
-    ElMessage.warning('No tracked preview is available on the current frame.')
+    ElMessage.warning(t('frameAnnotation.tracking.noTrackedPreviewCurrent'))
     return
   }
   markTrackingFrameNeedsFix(result.image_id)
@@ -2570,7 +2652,7 @@ function markCurrentTrackingFrameNeedsFix() {
 
 function rejectTrackingPreview() {
   clearTrackingPreview()
-  ElMessage.info('Tracking preview discarded. Saved annotations remain unchanged.')
+  ElMessage.info(t('frameAnnotation.tracking.previewDiscarded'))
 }
 
 function frameIndexFromQuery() {
@@ -2700,24 +2782,24 @@ async function goToImage(index: number) {
   }
 
   if (index < 0 || index >= job.value.images.length) {
-    ElMessage.warning(`Image index must be between 1 and ${job.value.images.length}`)
+    ElMessage.warning(t('frameAnnotation.imageIndexRange', { max: job.value.images.length }))
     return
   }
 
   if (canvasRef.value?.isDrawingPolygon()) {
-    ElMessage.warning('Please finish or cancel the current polygon first.')
+    ElMessage.warning(t('frameAnnotation.finishPolygonFirst'))
     return
   }
 
   if (canvasRef.value?.isBoundaryAssistActive) {
-    ElMessage.warning('Please finish or cancel the boundary-assisted polygon first.')
+    ElMessage.warning(t('frameAnnotation.finishBoundaryFirst'))
     return
   }
 
   if (hasUnsavedChanges.value) {
     const saved = await saveAnnotations()
     if (!saved) {
-      ElMessage.error('Failed to save annotations. Image was not changed.')
+      ElMessage.error(t('frameAnnotation.annotationsSaveFailedImageUnchanged'))
       return
     }
   }
@@ -2738,7 +2820,7 @@ function submitGoToIndex() {
   const nextIndex = Number.parseInt(goToIndex.value, 10)
 
   if (!Number.isInteger(nextIndex) || nextIndex < 1 || nextIndex > totalImages.value) {
-    ElMessage.warning(`Image index must be between 1 and ${totalImages.value}`)
+    ElMessage.warning(t('frameAnnotation.imageIndexRange', { max: totalImages.value }))
     return
   }
 
@@ -2803,17 +2885,17 @@ function isTextEntryTarget(target: EventTarget | null) {
       <div class="sidebar-header">
         <router-link :to="jobsBackRoute" class="annotate-back">
           <el-icon><Back /></el-icon>
-          Jobs
+          {{ t('frameAnnotation.jobs') }}
         </router-link>
 
         <div>
-          <p class="eyebrow">Annotation workspace</p>
+          <p class="eyebrow">{{ t('frameAnnotation.annotationWorkspace') }}</p>
           <h1 class="job-title">{{ job?.name ?? `Job ${jobId}` }}</h1>
           <p v-if="job" class="job-subtitle">ID: #{{ job.id }}</p>
         </div>
 
         <section class="tool-panel">
-          <p class="panel-label">Tool</p>
+          <p class="panel-label">{{ t('frameAnnotation.tool') }}</p>
           <div class="annotation-tool-grid">
             <button
               v-for="toolName in ['cursor', 'rectangle', 'polygon']"
@@ -2823,7 +2905,7 @@ function isTextEntryTarget(target: EventTarget | null) {
               type="button"
               @click="setTool(toolName as ToolType)"
             >
-              {{ toolName }}
+              {{ t(toolLabelKeys[toolName as ToolType]) }}
             </button>
             <button
               class="annotation-tool-button annotation-tool-button-sam2"
@@ -2831,17 +2913,17 @@ function isTextEntryTarget(target: EventTarget | null) {
               type="button"
               @click="setTool('sam2')"
             >
-              sam2
+              {{ t('frameAnnotation.sam2') }}
             </button>
             <button
               class="annotation-tool-button annotation-tool-button-classify"
               :class="{ active: tool === 'classify', disabled: !canUseClassificationTool }"
               :disabled="!canUseClassificationTool"
-              :title="canUseClassificationTool ? '' : 'Add image classification labels in Manage Labels first.'"
+              :title="canUseClassificationTool ? '' : t('frameAnnotation.addClassificationLabelsFirst')"
               type="button"
               @click="setTool('classify')"
             >
-              classify
+              {{ t('frameAnnotation.class') }}
             </button>
           </div>
         </section>
@@ -2851,9 +2933,9 @@ function isTextEntryTarget(target: EventTarget | null) {
         <div class="sidebar-settings-labels sidebar-label-settings-scroll">
           <section class="tool-panel sidebar-labels">
             <div class="panel-label-row">
-              <p class="panel-label">Label</p>
+              <p class="panel-label">{{ t('frameAnnotation.label') }}</p>
               <button class="panel-link-button" type="button" @click="openLabelManager">
-                Manage
+                {{ t('frameAnnotation.manage') }}
               </button>
             </div>
             <div class="label-list">
@@ -2870,15 +2952,15 @@ function isTextEntryTarget(target: EventTarget | null) {
               </button>
             </div>
             <p v-if="objectLabels.length === 0" class="tool-panel-hint">
-              Add object annotation labels in Manage Labels to draw polygons, rectangles, or points.
+              {{ t('frameAnnotation.noObjectLabelsHelp') }}
             </p>
           </section>
 
           <div v-if="tool === 'sam2'" class="sidebar-sam2-settings">
             <section class="tool-panel sam2-settings-panel">
-              <p class="panel-label">SAM2 Settings</p>
+              <p class="panel-label">{{ t('frameAnnotation.sam2Settings') }}</p>
               <label class="sam2-setting-row">
-                <span>Model</span>
+                <span>{{ t('frameAnnotation.model') }}</span>
                 <select v-model="sam2Settings.model_name" @change="markSam2SettingsChanged">
                   <option value="sam2_hiera_tiny">sam2_hiera_tiny</option>
                   <option value="sam2_hiera_small">sam2_hiera_small</option>
@@ -2887,15 +2969,15 @@ function isTextEntryTarget(target: EventTarget | null) {
                 </select>
               </label>
               <label class="sam2-setting-row">
-                <span>multimask_output</span>
+                <span>{{ t('frameAnnotation.multimaskOutput') }}</span>
                 <input v-model="sam2Settings.multimask_output" type="checkbox" @change="markSam2SettingsChanged" />
               </label>
               <label class="sam2-setting-row">
-                <span>Show prompt points</span>
+                <span>{{ t('frameAnnotation.showPromptPoints') }}</span>
                 <input v-model="sam2Settings.show_prompt_points" type="checkbox" @change="markSam2SettingsChanged" />
               </label>
               <label class="sam2-setting-row">
-                <span>candidate</span>
+                <span>{{ t('frameAnnotation.candidate') }}</span>
                 <select v-model="sam2Settings.candidate" @change="markSam2SettingsChanged">
                   <option value="best">best</option>
                   <option value="0">0</option>
@@ -2904,7 +2986,7 @@ function isTextEntryTarget(target: EventTarget | null) {
                 </select>
               </label>
               <label class="sam2-setting-slider">
-                <span>polygon simplification</span>
+                <span>{{ t('frameAnnotation.polygonSimplification') }}</span>
                 <input
                   v-model.number="sam2Settings.polygon_epsilon"
                   max="0.02"
@@ -2913,11 +2995,11 @@ function isTextEntryTarget(target: EventTarget | null) {
                   type="range"
                   @input="markSam2SettingsChanged"
                 />
-                <small>fine outline</small>
-                <small>coarse outline</small>
+                <small>{{ t('settings.fineOutline') }}</small>
+                <small>{{ t('settings.coarseOutline') }}</small>
               </label>
               <label class="sam2-setting-slider">
-                <span>mask threshold: {{ sam2Settings.mask_threshold.toFixed(1) }}</span>
+                <span>{{ t('frameAnnotation.maskThreshold', { value: sam2Settings.mask_threshold.toFixed(1) }) }}</span>
                 <input
                   v-model.number="sam2Settings.mask_threshold"
                   max="5"
@@ -2926,11 +3008,11 @@ function isTextEntryTarget(target: EventTarget | null) {
                   type="range"
                   @input="markSam2SettingsChanged"
                 />
-                <small>loose mask</small>
-                <small>strict mask</small>
+                <small>{{ t('settings.looseMask') }}</small>
+                <small>{{ t('settings.strictMask') }}</small>
               </label>
               <label class="sam2-setting-row">
-                <span>min mask area</span>
+                <span>{{ t('frameAnnotation.minMaskArea') }}</span>
                 <input
                   v-model.number="sam2Settings.min_mask_area"
                   max="100000"
@@ -2942,7 +3024,7 @@ function isTextEntryTarget(target: EventTarget | null) {
                 />
               </label>
               <label class="sam2-setting-row">
-                <span>max hole area</span>
+                <span>{{ t('frameAnnotation.maxHoleArea') }}</span>
                 <input
                   v-model.number="sam2Settings.max_hole_area"
                   max="100000"
@@ -2958,7 +3040,7 @@ function isTextEntryTarget(target: EventTarget | null) {
         </div>
 
         <div class="sidebar-frames">
-          <p class="panel-label">Frames</p>
+          <p class="panel-label">{{ t('frameAnnotation.framesPanel') }}</p>
           <div class="frame-list">
             <button
               v-for="(image, index) in job?.images ?? []"
@@ -2994,9 +3076,9 @@ function isTextEntryTarget(target: EventTarget | null) {
       </div>
 
       <div class="sidebar-footer sidebar-bottom annotate-actions left-panel-footer">
-        <el-button :icon="Delete" @click="deleteAnnotation()">Delete current</el-button>
+        <el-button :icon="Delete" @click="deleteAnnotation()">{{ t('frameAnnotation.deleteCurrent') }}</el-button>
         <el-button :loading="saving" type="primary" :icon="Finished" @click="saveAnnotations">
-          Save
+          {{ t('common.save') }}
         </el-button>
       </div>
     </aside>
@@ -3004,18 +3086,18 @@ function isTextEntryTarget(target: EventTarget | null) {
     <section class="annotate-stage annotation-main">
       <header class="annotate-stage-bar">
         <div class="annotate-stage-title">
-          <strong>{{ currentImage?.filename ?? 'No image' }}</strong>
+          <strong>{{ currentImage?.filename ?? t('frameAnnotation.noImage') }}</strong>
           <span v-if="currentImage">
             {{ currentImage.width }} x {{ currentImage.height }} · {{ currentImageNumber }} / {{ totalImages }}
           </span>
         </div>
         <div class="annotation-toolbar">
           <div class="toolbar-group toolbar-group-frames">
-            <el-button :disabled="isFirstImage || saving" @click="goPrevious">Previous</el-button>
+            <el-button :disabled="isFirstImage || saving" @click="goPrevious">{{ t('common.previous') }}</el-button>
             <span class="frame-counter">{{ currentImageNumber }} / {{ totalImages }}</span>
-            <el-button :disabled="isLastImage || saving" @click="goNext">Next</el-button>
+            <el-button :disabled="isLastImage || saving" @click="goNext">{{ t('common.next') }}</el-button>
             <form class="image-jump" @submit.prevent="submitGoToIndex">
-              <label for="go-to-image">Go to:</label>
+              <label for="go-to-image">{{ t('common.goTo') }}:</label>
               <el-input
                 id="go-to-image"
                 v-model="goToIndex"
@@ -3024,17 +3106,17 @@ function isTextEntryTarget(target: EventTarget | null) {
                 :min="1"
                 type="number"
               />
-              <el-button :disabled="saving || totalImages === 0" native-type="submit">Go</el-button>
+              <el-button :disabled="saving || totalImages === 0" native-type="submit">{{ t('common.go') }}</el-button>
             </form>
           </div>
 
           <div class="toolbar-group toolbar-group-view">
-            <el-button :disabled="!canUndo" @click="undo">Undo</el-button>
-            <el-button @click="canvasRef?.zoomOut()">Zoom -</el-button>
-            <span class="zoom-label">Zoom: {{ canvasRef?.zoomPercent ?? 100 }}%</span>
-            <el-button @click="canvasRef?.zoomIn()">Zoom +</el-button>
-            <el-button @click="canvasRef?.fitToScreen()">Fit</el-button>
-            <el-button @click="canvasRef?.resetView()">Reset</el-button>
+            <el-button :disabled="!canUndo" @click="undo">{{ t('frameAnnotation.undo') }}</el-button>
+            <el-button @click="canvasRef?.zoomOut()">{{ t('frameAnnotation.zoomOut') }}</el-button>
+            <span class="zoom-label">{{ t('frameAnnotation.zoom') }}: {{ canvasRef?.zoomPercent ?? 100 }}%</span>
+            <el-button @click="canvasRef?.zoomIn()">{{ t('frameAnnotation.zoomIn') }}</el-button>
+            <el-button @click="canvasRef?.fitToScreen()">{{ t('frameAnnotation.fit') }}</el-button>
+            <el-button @click="canvasRef?.resetView()">{{ t('common.reset') }}</el-button>
           </div>
 
           <div v-if="tool === 'sam2' || hasSam2Preview" class="toolbar-group toolbar-group-sam2">
@@ -3046,7 +3128,7 @@ function isTextEntryTarget(target: EventTarget | null) {
               type="primary"
               @click="generateSam2Mask"
             >
-              Generate Mask
+              {{ t('frameAnnotation.generateMask') }}
             </el-button>
             <el-button
               class="sam-accept-btn"
@@ -3055,14 +3137,14 @@ function isTextEntryTarget(target: EventTarget | null) {
               type="success"
               @click="acceptSam2Mask"
             >
-              Accept
+              {{ t('frameAnnotation.accept') }}
             </el-button>
-            <el-button :disabled="!hasSam2Preview" @click="rejectSam2Mask">Reject</el-button>
+            <el-button :disabled="!hasSam2Preview" @click="rejectSam2Mask">{{ t('frameAnnotation.reject') }}</el-button>
           </div>
 
           <div class="toolbar-group toolbar-group-reload">
             <el-button :loading="loading" :icon="RefreshRight" @click="annotationStore.fetchJob(jobId)">
-              Reload
+              {{ t('frameAnnotation.reload') }}
             </el-button>
           </div>
 
@@ -3072,7 +3154,7 @@ function isTextEntryTarget(target: EventTarget | null) {
               :aria-expanded="isRightPanelOpen"
               @click="toggleRightPanel"
             >
-              Objects {{ currentImageObjectAnnotations.length }}
+              {{ t('frameAnnotation.objects') }} {{ currentImageObjectAnnotations.length }}
             </el-button>
           </div>
         </div>
@@ -3083,14 +3165,14 @@ function isTextEntryTarget(target: EventTarget | null) {
 
         <section v-if="tool === 'classify' && classificationLabels.length > 0" class="classification-toolbar">
           <div class="classification-toolbar-copy">
-            <strong>Image class</strong>
+            <strong>{{ t('frameAnnotation.imageClass') }}</strong>
             <span>
-              Current:
+              {{ t('frameAnnotation.currentClass') }}:
               <template v-if="currentImageClassificationLabel">
                 {{ currentImageClassificationLabel.name }}
               </template>
               <template v-else>
-                Unclassified
+                {{ t('frameAnnotation.unclassified') }}
               </template>
             </span>
           </div>
@@ -3113,7 +3195,7 @@ function isTextEntryTarget(target: EventTarget | null) {
               type="button"
               @click="clearImageClassification"
             >
-              Clear class
+              {{ t('frameAnnotation.clearClass') }}
             </button>
           </div>
         </section>
@@ -3123,50 +3205,50 @@ function isTextEntryTarget(target: EventTarget | null) {
           class="tracking-preview-banner tracking-preview-banner-wide"
         >
           <div class="tracking-preview-summary">
-            <div class="tracking-preview-title">Tracking preview active</div>
+            <div class="tracking-preview-title">{{ t('frameAnnotation.tracking.previewActive') }}</div>
             <div class="tracking-preview-compact-summary">
               {{ trackingPreviewCompactText }}
             </div>
             <div class="tracking-preview-stats">
-              <span>Direction: {{ trackingPreviewDirectionText }}</span>
-              <span>Frames: {{ trackingPreviewProcessedCount }}</span>
-              <span>Pending: {{ trackingPreviewPendingCount }}</span>
-              <span>Accepted: {{ trackingPreviewAcceptedCount }}</span>
-              <span>Rejected: {{ trackingPreviewRejectedCount }}</span>
-              <span>Needs fix: {{ trackingPreviewNeedsFixCount }}</span>
-              <span>Failed: {{ trackingPreviewFailedCount }}</span>
+              <span>{{ t('frameAnnotation.tracking.direction') }}: {{ trackingPreviewDirectionText }}</span>
+              <span>{{ t('frameAnnotation.tracking.frames') }}: {{ trackingPreviewProcessedCount }}</span>
+              <span>{{ t('frameAnnotation.tracking.pending') }}: {{ trackingPreviewPendingCount }}</span>
+              <span>{{ t('frameAnnotation.tracking.accepted') }}: {{ trackingPreviewAcceptedCount }}</span>
+              <span>{{ t('frameAnnotation.tracking.rejected') }}: {{ trackingPreviewRejectedCount }}</span>
+              <span>{{ t('frameAnnotation.tracking.needsFix') }}: {{ trackingPreviewNeedsFixCount }}</span>
+              <span>{{ t('frameAnnotation.tracking.failed') }}: {{ trackingPreviewFailedCount }}</span>
             </div>
             <div class="tracking-preview-review-frames">
-              Review frames: {{ trackingPreviewReviewFramesText }}
+              {{ t('frameAnnotation.tracking.reviewFrames') }}: {{ trackingPreviewReviewFramesText }}
             </div>
             <div
               v-if="currentTrackingPreviewResult?.status === 'failed' && currentTrackingPreviewResult.detail"
               class="tracking-preview-warning"
             >
-              Current frame warning: {{ currentTrackingPreviewResult.detail }}
+              {{ t('frameAnnotation.tracking.currentFrameWarning', { detail: currentTrackingPreviewResult.detail }) }}
             </div>
           </div>
           <div class="tracking-preview-actions">
             <el-button :disabled="acceptingTrackingPreview" @click="openTrackingReviewDialog">
-              Review Results
+              {{ t('frameAnnotation.tracking.reviewResults') }}
             </el-button>
             <el-button :disabled="acceptingTrackingPreview || !currentTrackingFrameCanAccept" @click="acceptCurrentTrackingFrame">
-              Accept Current
+              {{ t('frameAnnotation.tracking.acceptCurrent') }}
             </el-button>
             <el-button :disabled="acceptingTrackingPreview || !currentTrackingFrameCanFlag" @click="rejectCurrentTrackingFrame">
-              Reject Current
+              {{ t('frameAnnotation.tracking.rejectCurrent') }}
             </el-button>
             <el-button :disabled="acceptingTrackingPreview || !currentTrackingFrameCanFlag" @click="markCurrentTrackingFrameNeedsFix">
-              Mark Needs Fix
+              {{ t('frameAnnotation.tracking.markNeedsFix') }}
             </el-button>
             <el-button :disabled="acceptingTrackingPreview" @click="acceptReviewedTrackingFrames">
-              Accept Reviewed
+              {{ t('frameAnnotation.tracking.acceptReviewed') }}
             </el-button>
             <el-button :disabled="acceptingTrackingPreview" @click="rejectTrackingPreview">
-              Reject All
+              {{ t('frameAnnotation.tracking.rejectAll') }}
             </el-button>
             <el-button type="primary" :loading="acceptingTrackingPreview" @click="acceptTrackingPreview">
-              Accept All
+              {{ t('frameAnnotation.tracking.acceptAll') }}
             </el-button>
           </div>
         </section>
@@ -3199,7 +3281,7 @@ function isTextEntryTarget(target: EventTarget | null) {
 
           <div v-else v-loading="loading" class="annotate-empty">
             <el-icon><Pointer /></el-icon>
-            <p>No image loaded</p>
+            <p>{{ t('frameAnnotation.noImageLoaded') }}</p>
           </div>
         </section>
       </div>
@@ -3213,8 +3295,8 @@ function isTextEntryTarget(target: EventTarget | null) {
 
     <div class="annotate-right-panel-shell" :class="{ 'is-open': isRightPanelOpen }">
       <div class="right-panel-drawer-header">
-        <strong>Objects {{ currentImageObjectAnnotations.length }}</strong>
-        <button type="button" @click="closeRightPanel">Close</button>
+        <strong>{{ t('frameAnnotation.objects') }} {{ currentImageObjectAnnotations.length }}</strong>
+        <button type="button" @click="closeRightPanel">{{ t('common.close') }}</button>
       </div>
       <ObjectPanel
         class="annotate-right-panel"
@@ -3232,6 +3314,8 @@ function isTextEntryTarget(target: EventTarget | null) {
         @show-all="showAllAnnotations"
         @select-annotation="selectAnnotation"
         @commit-polygon-smoothing="commitPolygonSmoothing"
+        @move-annotation-layer="moveAnnotationLayerAction"
+        @reorder-annotation="reorderAnnotation"
         @reset-polygon-smoothing="resetPolygonSmoothing"
         @toggle-visibility="toggleAnnotationVisibility"
         @update-annotation-label="updateAnnotationLabel"
@@ -3245,30 +3329,30 @@ function isTextEntryTarget(target: EventTarget | null) {
       :class="{ 'is-hidden': isRightPanelOpen }"
       @click="openRightPanel"
     >
-      Objects {{ currentImageObjectAnnotations.length }}
+      {{ t('frameAnnotation.objects') }} {{ currentImageObjectAnnotations.length }}
     </button>
 
     <div v-if="trackWithSam2DialogVisible" class="app-modal-backdrop" @click.self="closeTrackWithSam2Dialog">
       <section class="app-modal track-sam2-modal" @click.stop>
         <header class="track-sam2-modal-header">
           <div>
-            <p class="eyebrow">SAM2 video tracking</p>
-            <h2>Track with SAM2</h2>
-            <span>Select a polygon annotation to track it through frames with SAM2.</span>
+            <p class="eyebrow">{{ t('frameAnnotation.tracking.eyebrow') }}</p>
+            <h2>{{ t('frameAnnotation.tracking.title') }}</h2>
+            <span>{{ t('frameAnnotation.tracking.help') }}</span>
           </div>
-          <el-button :disabled="trackingWithSam2" @click="closeTrackWithSam2Dialog">Close</el-button>
+          <el-button :disabled="trackingWithSam2" @click="closeTrackWithSam2Dialog">{{ t('common.close') }}</el-button>
         </header>
 
         <div class="track-sam2-modal-body">
           <section class="track-sam2-summary">
-            <h3>Selected object</h3>
-            <p>Label: {{ trackingDialogTargetLabel?.name ?? 'Unknown' }}</p>
-            <p>Current frame: {{ currentImageNumber }} / {{ totalImages }}</p>
-            <p>Image: {{ currentImage?.filename ?? 'Unknown' }}</p>
+            <h3>{{ t('frameAnnotation.tracking.selectedObject') }}</h3>
+            <p>{{ t('frameAnnotation.tracking.label') }}: {{ trackingDialogTargetLabel?.name ?? t('common.unknown') }}</p>
+            <p>{{ t('frameAnnotation.tracking.currentFrame') }}: {{ currentImageNumber }} / {{ totalImages }}</p>
+            <p>{{ t('frameAnnotation.tracking.image') }}: {{ currentImage?.filename ?? t('common.unknown') }}</p>
           </section>
 
           <section class="track-sam2-section">
-            <h3>Tracking direction</h3>
+            <h3>{{ t('frameAnnotation.tracking.trackingDirection') }}</h3>
             <label class="track-sam2-radio" :class="{ disabled: !canTrackForwardFromCurrentFrame }">
               <input
                 v-model="trackWithSam2Form.direction"
@@ -3276,7 +3360,7 @@ function isTextEntryTarget(target: EventTarget | null) {
                 type="radio"
                 value="forward"
               />
-              <span>Forward</span>
+              <span>{{ t('frameAnnotation.tracking.forward') }}</span>
             </label>
             <label class="track-sam2-radio" :class="{ disabled: !canTrackBackwardFromCurrentFrame }">
               <input
@@ -3285,7 +3369,7 @@ function isTextEntryTarget(target: EventTarget | null) {
                 type="radio"
                 value="backward"
               />
-              <span>Backward</span>
+              <span>{{ t('frameAnnotation.tracking.backward') }}</span>
             </label>
             <label class="track-sam2-radio" :class="{ disabled: !canTrackBothDirectionsFromCurrentFrame }">
               <input
@@ -3294,19 +3378,19 @@ function isTextEntryTarget(target: EventTarget | null) {
                 type="radio"
                 value="both"
               />
-              <span>Both directions</span>
+              <span>{{ t('frameAnnotation.tracking.both') }}</span>
             </label>
           </section>
 
           <section class="track-sam2-section">
-            <h3>Tracking range</h3>
+            <h3>{{ t('frameAnnotation.tracking.trackingRange') }}</h3>
             <label class="track-sam2-field">
-              <span>Start frame</span>
+              <span>{{ t('frameAnnotation.tracking.startFrame') }}</span>
               <input :value="imageFrameIndex()" disabled type="number" />
             </label>
             <template v-if="trackWithSam2Form.direction === 'forward'">
               <label class="track-sam2-field">
-                <span>End frame</span>
+                <span>{{ t('frameAnnotation.tracking.endFrame') }}</span>
                 <input
                   v-model.number="trackWithSam2Form.forwardEndFrameIndex"
                   :max="lastJobFrameIndex()"
@@ -3317,7 +3401,7 @@ function isTextEntryTarget(target: EventTarget | null) {
             </template>
             <template v-else-if="trackWithSam2Form.direction === 'backward'">
               <label class="track-sam2-field">
-                <span>End frame</span>
+                <span>{{ t('frameAnnotation.tracking.endFrame') }}</span>
                 <input
                   v-model.number="trackWithSam2Form.backwardEndFrameIndex"
                   :max="imageFrameIndex()"
@@ -3328,7 +3412,7 @@ function isTextEntryTarget(target: EventTarget | null) {
             </template>
             <template v-else>
               <label class="track-sam2-field">
-                <span>Backward end frame</span>
+                <span>{{ t('frameAnnotation.tracking.backwardEndFrame') }}</span>
                 <input
                   v-model.number="trackWithSam2Form.backwardEndFrameIndex"
                   :max="imageFrameIndex()"
@@ -3337,7 +3421,7 @@ function isTextEntryTarget(target: EventTarget | null) {
                 />
               </label>
               <label class="track-sam2-field">
-                <span>Forward end frame</span>
+                <span>{{ t('frameAnnotation.tracking.forwardEndFrame') }}</span>
                 <input
                   v-model.number="trackWithSam2Form.forwardEndFrameIndex"
                   :max="lastJobFrameIndex()"
@@ -3349,52 +3433,52 @@ function isTextEntryTarget(target: EventTarget | null) {
           </section>
 
           <section class="track-sam2-section">
-            <h3>Review interval</h3>
+            <h3>{{ t('frameAnnotation.tracking.reviewInterval') }}</h3>
             <label class="track-sam2-field">
-              <span>Review every N frames</span>
+              <span>{{ t('frameAnnotation.tracking.reviewEvery') }}</span>
               <input v-model.number="trackWithSam2Form.reviewInterval" max="1000" min="1" type="number" />
             </label>
             <p class="track-sam2-help">
-              Recommended: review every 10–20 frames. If tracking drifts, correct the mask on an intermediate frame and continue tracking from there.
+              {{ t('frameAnnotation.tracking.reviewIntervalHelp') }}
             </p>
           </section>
 
           <section class="track-sam2-section">
-            <h3>Output mode</h3>
+            <h3>{{ t('frameAnnotation.tracking.outputMode') }}</h3>
             <label class="track-sam2-radio">
               <input v-model="trackWithSam2Form.outputMode" type="radio" value="preview_first" />
-              <span>Preview first, then accept</span>
+              <span>{{ t('frameAnnotation.tracking.previewFirst') }}</span>
             </label>
             <label class="track-sam2-radio">
               <input v-model="trackWithSam2Form.outputMode" type="radio" value="direct_create" />
-              <span>Directly create annotations</span>
+              <span>{{ t('frameAnnotation.tracking.directCreate') }}</span>
             </label>
             <p v-if="trackWithSam2Form.outputMode === 'direct_create'" class="track-sam2-help">
-              Direct mode will create annotations and save them automatically. Use Preview mode if you want to review or fix tracking results before saving.
+              {{ t('frameAnnotation.tracking.directCreateHelp') }}
             </p>
           </section>
 
           <section class="track-sam2-section">
-            <h3>Existing annotations</h3>
+            <h3>{{ t('frameAnnotation.tracking.existingAnnotations') }}</h3>
             <label class="track-sam2-radio">
               <input v-model="trackWithSam2Form.existingAnnotationPolicy" type="radio" value="skip_same_label" />
-              <span>Skip frames that already have this label</span>
+              <span>{{ t('frameAnnotation.tracking.skipSameLabel') }}</span>
             </label>
             <label class="track-sam2-radio">
               <input v-model="trackWithSam2Form.existingAnnotationPolicy" type="radio" value="replace_same_label" />
-              <span>Replace existing annotations with same label</span>
+              <span>{{ t('frameAnnotation.tracking.replaceSameLabel') }}</span>
             </label>
             <label class="track-sam2-radio">
               <input v-model="trackWithSam2Form.existingAnnotationPolicy" type="radio" value="append" />
-              <span>Append as new annotations</span>
+              <span>{{ t('frameAnnotation.tracking.appendNew') }}</span>
             </label>
           </section>
         </div>
 
         <footer class="track-sam2-modal-footer">
-          <el-button :disabled="trackingWithSam2" @click="closeTrackWithSam2Dialog">Cancel</el-button>
+          <el-button :disabled="trackingWithSam2" @click="closeTrackWithSam2Dialog">{{ t('common.cancel') }}</el-button>
           <el-button type="primary" :loading="trackingWithSam2" @click="startTrackWithSam2">
-            Start Tracking
+            {{ t('frameAnnotation.tracking.startTracking') }}
           </el-button>
         </footer>
       </section>
@@ -3404,46 +3488,46 @@ function isTextEntryTarget(target: EventTarget | null) {
       <section class="app-modal tracking-review-modal" @click.stop>
         <header class="track-sam2-modal-header">
           <div>
-            <p class="eyebrow">Tracking workflow</p>
-            <h2>Tracking Review</h2>
-            <span>Review frames, jump to drift points, and accept only the tracking results you trust.</span>
+            <p class="eyebrow">{{ t('frameAnnotation.tracking.workflow') }}</p>
+            <h2>{{ t('frameAnnotation.tracking.reviewTitle') }}</h2>
+            <span>{{ t('frameAnnotation.tracking.reviewHelp') }}</span>
           </div>
-          <el-button :disabled="acceptingTrackingPreview" @click="closeTrackingReviewDialog">Close</el-button>
+          <el-button :disabled="acceptingTrackingPreview" @click="closeTrackingReviewDialog">{{ t('common.close') }}</el-button>
         </header>
 
         <div class="track-sam2-modal-body tracking-review-modal-body">
           <section class="tracking-review-summary">
             <div class="tracking-review-summary-card">
-              <strong>Frames processed</strong>
+              <strong>{{ t('frameAnnotation.tracking.framesProcessed') }}</strong>
               <span>{{ trackingPreviewProcessedCount }}</span>
             </div>
             <div class="tracking-review-summary-card">
-              <strong>Pending</strong>
+              <strong>{{ t('frameAnnotation.tracking.pending') }}</strong>
               <span>{{ trackingPreviewPendingCount }}</span>
             </div>
             <div class="tracking-review-summary-card">
-              <strong>Accepted</strong>
+              <strong>{{ t('frameAnnotation.tracking.accepted') }}</strong>
               <span>{{ trackingPreviewAcceptedCount }}</span>
             </div>
             <div class="tracking-review-summary-card">
-              <strong>Rejected</strong>
+              <strong>{{ t('frameAnnotation.tracking.rejected') }}</strong>
               <span>{{ trackingPreviewRejectedCount }}</span>
             </div>
             <div class="tracking-review-summary-card">
-              <strong>Needs fix</strong>
+              <strong>{{ t('frameAnnotation.tracking.needsFix') }}</strong>
               <span>{{ trackingPreviewNeedsFixCount }}</span>
             </div>
             <div class="tracking-review-summary-card">
-              <strong>Failed</strong>
+              <strong>{{ t('frameAnnotation.tracking.failed') }}</strong>
               <span>{{ trackingPreviewFailedCount }}</span>
             </div>
           </section>
 
           <section class="track-sam2-section">
-            <h3>Accept selected range</h3>
+            <h3>{{ t('frameAnnotation.tracking.acceptSelectedRange') }}</h3>
             <div class="tracking-review-range">
               <label class="track-sam2-field">
-                <span>Start frame</span>
+                <span>{{ t('frameAnnotation.tracking.startFrame') }}</span>
                 <input
                   v-model.number="trackingReviewRangeStart"
                   :max="trackingPreviewState.endFrameIndex"
@@ -3452,7 +3536,7 @@ function isTextEntryTarget(target: EventTarget | null) {
                 />
               </label>
               <label class="track-sam2-field">
-                <span>End frame</span>
+                <span>{{ t('frameAnnotation.tracking.endFrame') }}</span>
                 <input
                   v-model.number="trackingReviewRangeEnd"
                   :max="trackingPreviewState.endFrameIndex"
@@ -3461,25 +3545,25 @@ function isTextEntryTarget(target: EventTarget | null) {
                 />
               </label>
               <el-button :disabled="acceptingTrackingPreview" @click="acceptTrackingRange">
-                Accept Range
+                {{ t('frameAnnotation.tracking.acceptRange') }}
               </el-button>
             </div>
             <p class="track-sam2-help">
-              Recommended workflow: review every 10–20 frames. If drift is visible, mark that frame as needs fix, correct the polygon there, then run Track with SAM2 again from the corrected frame.
+              {{ t('frameAnnotation.tracking.reviewWorkflowHelp') }}
             </p>
           </section>
 
           <section class="track-sam2-section">
-            <h3>Tracking results</h3>
+            <h3>{{ t('frameAnnotation.tracking.results') }}</h3>
             <div class="tracking-review-table-scroll">
               <div class="tracking-review-table">
                 <div class="tracking-review-row tracking-review-row-head">
-                  <span>Frame</span>
-                  <span>Filename</span>
-                  <span>Direction</span>
-                  <span>Status</span>
-                  <span>Review</span>
-                  <span>Action</span>
+                  <span>{{ t('common.frame') }}</span>
+                  <span>{{ t('frameAnnotation.tracking.filename') }}</span>
+                  <span>{{ t('frameAnnotation.tracking.direction') }}</span>
+                  <span>{{ t('common.status') }}</span>
+                  <span>{{ t('frameAnnotation.tracking.review') }}</span>
+                  <span>{{ t('frameAnnotation.tracking.action') }}</span>
                 </div>
                 <div
                   v-for="result in trackingPreviewState.results"
@@ -3493,39 +3577,39 @@ function isTextEntryTarget(target: EventTarget | null) {
                 >
                   <span>
                     {{ result.frame_index }}
-                    <span v-if="isTrackingReviewFrame(result.frame_index)" class="tracking-review-tag review">Review</span>
+                    <span v-if="isTrackingReviewFrame(result.frame_index)" class="tracking-review-tag review">{{ t('frameAnnotation.tracking.review') }}</span>
                   </span>
                   <span>{{ result.filename }}</span>
                   <span>{{ formatPropagationDirection(result.propagation_direction) }}</span>
                   <span>
-                    <span class="tracking-review-tag" :class="result.status">{{ result.status }}</span>
+                    <span class="tracking-review-tag" :class="result.status">{{ formatTrackingResultStatus(result.status) }}</span>
                   </span>
                   <span>
-                    <span class="tracking-review-tag" :class="result.review_status">{{ result.review_status }}</span>
-                    <span v-if="result.committed" class="tracking-review-tag committed">saved</span>
+                    <span class="tracking-review-tag" :class="result.review_status">{{ formatTrackingReviewStatus(result.review_status) }}</span>
+                    <span v-if="result.committed" class="tracking-review-tag committed">{{ t('frameAnnotation.tracking.saved') }}</span>
                   </span>
                   <span class="tracking-review-actions">
-                    <el-button size="small" @click="goToTrackingFrame(result.image_id)">Go</el-button>
+                    <el-button size="small" @click="goToTrackingFrame(result.image_id)">{{ t('common.go') }}</el-button>
                   <el-button
                     size="small"
                     :disabled="result.status !== 'tracked' || !canAcceptTrackingResult(result)"
                     @click="acceptTrackingFrame(result.image_id)"
                   >
-                    Accept
+                    {{ t('frameAnnotation.accept') }}
                   </el-button>
                     <el-button
                       size="small"
                       :disabled="result.status !== 'tracked' || result.committed"
                       @click="rejectTrackingFrame(result.image_id)"
                     >
-                      Reject
+                      {{ t('frameAnnotation.reject') }}
                     </el-button>
                     <el-button
                       size="small"
                       :disabled="result.status !== 'tracked' || result.committed"
                       @click="markTrackingFrameNeedsFix(result.image_id)"
                     >
-                      Needs Fix
+                      {{ t('frameAnnotation.tracking.needsFix') }}
                     </el-button>
                   </span>
                 </div>
@@ -3535,12 +3619,12 @@ function isTextEntryTarget(target: EventTarget | null) {
         </div>
 
         <footer class="track-sam2-modal-footer tracking-review-modal-footer">
-          <el-button :disabled="acceptingTrackingPreview" @click="closeTrackingReviewDialog">Close</el-button>
+          <el-button :disabled="acceptingTrackingPreview" @click="closeTrackingReviewDialog">{{ t('common.close') }}</el-button>
           <el-button :disabled="acceptingTrackingPreview" @click="acceptReviewedTrackingFrames">
-            Accept Reviewed
+            {{ t('frameAnnotation.tracking.acceptReviewed') }}
           </el-button>
           <el-button type="primary" :loading="acceptingTrackingPreview" @click="acceptTrackingPreview">
-            Accept All
+            {{ t('frameAnnotation.tracking.acceptAll') }}
           </el-button>
         </footer>
       </section>
@@ -3550,26 +3634,26 @@ function isTextEntryTarget(target: EventTarget | null) {
       <section class="app-modal label-management-modal" @click.stop>
         <header class="label-management-modal-header">
           <div>
-            <p class="eyebrow">Job labels</p>
-            <h2>Manage Labels</h2>
+            <p class="eyebrow">{{ t('frameAnnotation.manageLabels') }}</p>
+            <h2>{{ t('frameAnnotation.manageLabels') }}</h2>
             <span>{{ job?.name ?? `Job ${jobId}` }}</span>
           </div>
-          <el-button :disabled="labelActionLoading" @click="closeLabelManager">Close</el-button>
+          <el-button :disabled="labelActionLoading" @click="closeLabelManager">{{ t('common.close') }}</el-button>
         </header>
 
         <div v-loading="labelManagerLoading" class="label-management-modal-body">
           <section class="label-management-section">
             <div class="label-management-section-header">
-              <h3>Object annotation labels</h3>
-              <span>Polygon, rectangle, and point labels used on the canvas.</span>
+              <h3>{{ t('frameAnnotation.objectAnnotationLabels') }}</h3>
+              <span>{{ t('frameAnnotation.objectAnnotationLabelsHelp') }}</span>
             </div>
             <div class="label-management-table">
               <div class="label-management-row label-management-row-head">
-                <span>Color</span>
-                <span>Name</span>
-                <span>Shape</span>
-                <span>Used</span>
-                <span>Actions</span>
+                <span>{{ t('common.color') }}</span>
+                <span>{{ t('common.name') }}</span>
+                <span>{{ t('common.shape') }}</span>
+                <span>{{ t('common.used') }}</span>
+                <span>{{ t('common.actions') }}</span>
               </div>
 
               <div v-for="label in objectLabelDrafts" :key="label.id" class="label-management-row">
@@ -3581,14 +3665,14 @@ function isTextEntryTarget(target: EventTarget | null) {
                   type="text"
                 />
                 <select v-model="label.shape_type" class="label-management-shape">
-                  <option value="polygon">polygon</option>
-                  <option value="rectangle">rectangle</option>
-                  <option value="point">point</option>
+                  <option value="polygon">{{ t('frameAnnotation.polygon') }}</option>
+                  <option value="rectangle">{{ t('frameAnnotation.rectangle') }}</option>
+                  <option value="point">{{ t('frameAnnotation.point') }}</option>
                 </select>
                 <span class="label-management-used">{{ labelUsedCount(label) }}</span>
                 <div class="label-management-actions">
                   <el-button size="small" :loading="labelActionLoading" @click="saveManagedLabel(label)">
-                    Save
+                    {{ t('common.save') }}
                   </el-button>
                   <el-button
                     size="small"
@@ -3597,29 +3681,29 @@ function isTextEntryTarget(target: EventTarget | null) {
                     :loading="labelActionLoading"
                     @click="requestDeleteManagedLabel(label)"
                   >
-                    Delete
+                    {{ t('common.delete') }}
                   </el-button>
                 </div>
               </div>
 
               <div v-if="objectLabelDrafts.length === 0" class="label-management-empty">
-                No object annotation labels yet.
+                {{ t('frameAnnotation.noObjectLabels') }}
               </div>
             </div>
           </section>
 
           <section class="label-management-section">
             <div class="label-management-section-header">
-              <h3>Image classification labels</h3>
-              <span>Whole-image classes used by the classify tool.</span>
+              <h3>{{ t('frameAnnotation.imageClassificationLabels') }}</h3>
+              <span>{{ t('frameAnnotation.imageClassificationLabelsHelp') }}</span>
             </div>
             <div class="label-management-table">
               <div class="label-management-row label-management-row-head">
-                <span>Color</span>
-                <span>Name</span>
-                <span>Type</span>
-                <span>Used</span>
-                <span>Actions</span>
+                <span>{{ t('common.color') }}</span>
+                <span>{{ t('common.name') }}</span>
+                <span>{{ t('common.type') }}</span>
+                <span>{{ t('common.used') }}</span>
+                <span>{{ t('common.actions') }}</span>
               </div>
 
               <div v-for="label in classificationLabelDrafts" :key="label.id" class="label-management-row">
@@ -3629,11 +3713,11 @@ function isTextEntryTarget(target: EventTarget | null) {
                   class="label-management-name"
                   type="text"
                 />
-                <input class="label-management-shape" disabled type="text" value="classification" />
+                <input class="label-management-shape" disabled type="text" :value="t('frameAnnotation.class')" />
                 <span class="label-management-used">{{ labelUsedCount(label) }}</span>
                 <div class="label-management-actions">
                   <el-button size="small" :loading="labelActionLoading" @click="saveManagedLabel(label)">
-                    Save
+                    {{ t('common.save') }}
                   </el-button>
                   <el-button
                     size="small"
@@ -3642,44 +3726,44 @@ function isTextEntryTarget(target: EventTarget | null) {
                     :loading="labelActionLoading"
                     @click="requestDeleteManagedLabel(label)"
                   >
-                    Delete
+                    {{ t('common.delete') }}
                   </el-button>
                 </div>
               </div>
 
               <div v-if="classificationLabelDrafts.length === 0" class="label-management-empty">
-                No image classification labels yet.
+                {{ t('frameAnnotation.noClassificationLabels') }}
               </div>
             </div>
           </section>
 
           <section class="label-management-add">
-            <h3>Add Label</h3>
+            <h3>{{ t('frameAnnotation.addLabelTitle') }}</h3>
             <div class="label-management-add-row label-management-add-row-extended">
               <input v-model="newLabelColor" class="label-management-color" type="color" />
-              <input v-model="newLabelName" class="label-management-name" placeholder="Label name" type="text" />
+              <input v-model="newLabelName" class="label-management-name" :placeholder="t('frameAnnotation.labelName')" type="text" />
               <select v-model="newLabelKind" class="label-management-shape">
-                <option value="object_annotation">Object annotation</option>
-                <option value="image_classification">Image classification</option>
+                <option value="object_annotation">{{ t('frameAnnotation.objectAnnotationLabels') }}</option>
+                <option value="image_classification">{{ t('frameAnnotation.imageClassificationLabels') }}</option>
               </select>
               <select
                 v-if="newLabelKind === 'object_annotation'"
                 v-model="newLabelShapeType"
                 class="label-management-shape"
               >
-                <option value="polygon">polygon</option>
-                <option value="rectangle">rectangle</option>
-                <option value="point">point</option>
+                <option value="polygon">{{ t('frameAnnotation.polygon') }}</option>
+                <option value="rectangle">{{ t('frameAnnotation.rectangle') }}</option>
+                <option value="point">{{ t('frameAnnotation.point') }}</option>
               </select>
               <input
                 v-else
                 class="label-management-shape"
                 disabled
                 type="text"
-                value="classification"
+                :value="t('frameAnnotation.class')"
               />
               <el-button type="primary" :loading="labelActionLoading" @click="addManagedLabel">
-                Add Label
+                {{ t('frameAnnotation.addLabel') }}
               </el-button>
             </div>
           </section>
@@ -3696,29 +3780,27 @@ function isTextEntryTarget(target: EventTarget | null) {
         <section class="label-delete-dialog" @click.stop>
           <button class="label-delete-dialog-close" type="button" @click="closeDeleteLabelModal">×</button>
 
-          <h3>Delete Label</h3>
+          <h3>{{ t('frameAnnotation.deleteLabelTitle') }}</h3>
 
           <template v-if="pendingDeleteUsage?.annotation_count === 0">
-            <p>Delete label "{{ pendingDeleteLabel?.name }}"?</p>
+            <p>{{ t('frameAnnotation.deleteLabelConfirm', { name: pendingDeleteLabel?.name }) }}</p>
 
             <div class="modal-actions">
-              <el-button @click="closeDeleteLabelModal">Cancel</el-button>
+              <el-button @click="closeDeleteLabelModal">{{ t('common.cancel') }}</el-button>
               <el-button type="danger" :loading="labelActionLoading" @click="confirmDeleteUnusedLabel">
-                Delete Label
+                {{ t('frameAnnotation.deleteLabelTitle') }}
               </el-button>
             </div>
           </template>
 
           <template v-else>
             <p>
-              This label is used by {{ pendingDeleteUsage?.annotation_count ?? 0 }}
-              annotations in {{ pendingDeleteUsage?.frame_count ?? 0 }} frames.
-              Please choose how to handle these annotations.
+              {{ t('frameAnnotation.deleteLabelUsage', { annotations: pendingDeleteUsage?.annotation_count ?? 0, frames: pendingDeleteUsage?.frame_count ?? 0 }) }}
             </p>
 
             <el-radio-group v-model="deleteLabelStrategy" class="delete-label-strategy-group">
               <el-radio label="reassign" value="reassign">
-                Reassign annotations to another label
+                {{ t('frameAnnotation.reassignAnnotations') }}
               </el-radio>
 
               <el-radio
@@ -3726,11 +3808,11 @@ function isTextEntryTarget(target: EventTarget | null) {
                 label="move_to_undefined"
                 value="move_to_undefined"
               >
-                Move annotations to undefined
+                {{ t('frameAnnotation.moveToUndefined') }}
               </el-radio>
 
               <el-radio label="delete_annotations" value="delete_annotations">
-                Delete annotations using this label
+                {{ t('frameAnnotation.deleteAnnotationsWithLabel') }}
               </el-radio>
             </el-radio-group>
 
@@ -3739,7 +3821,7 @@ function isTextEntryTarget(target: EventTarget | null) {
               v-model="reassignTargetLabelId"
               teleported
               class="delete-label-target-select"
-              placeholder="Select target label"
+              :placeholder="t('frameAnnotation.selectTargetLabel')"
             >
               <el-option
                 v-for="label in compatibleReassignLabelOptions(pendingDeleteLabel)"
@@ -3750,13 +3832,13 @@ function isTextEntryTarget(target: EventTarget | null) {
             </el-select>
 
             <div v-if="deleteLabelStrategy === 'delete_annotations'" class="danger-warning">
-              This will permanently delete all annotations using this label. This action cannot be undone.
+              {{ t('frameAnnotation.deleteAnnotationsWarning') }}
             </div>
 
             <div class="modal-actions">
-              <el-button @click="closeDeleteLabelModal">Cancel</el-button>
+              <el-button @click="closeDeleteLabelModal">{{ t('common.cancel') }}</el-button>
               <el-button type="danger" :loading="labelActionLoading" @click="confirmDeleteUsedLabel">
-                Confirm Delete
+                {{ t('frameAnnotation.confirmDelete') }}
               </el-button>
             </div>
           </template>
