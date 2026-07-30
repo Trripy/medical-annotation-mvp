@@ -108,7 +108,10 @@ function normalizeForType() {
     form.min_value = null
     form.max_value = null
     form.step = null
-    form.options_json ??= [{ value: 'option_1', label: 'Option 1' }, { value: 'option_2', label: 'Option 2' }]
+    form.options_json ??= [
+      { value: 'option_1', label: t('skillAssessment.defaultOptionOne') },
+      { value: 'option_2', label: t('skillAssessment.defaultOptionTwo') },
+    ]
   } else {
     form.min_value = null
     form.max_value = null

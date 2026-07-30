@@ -47,6 +47,7 @@ const activePhaseCriteria = computed(() => {
   return getApplicableCriteria(props.currentAssessment, 'phase', segment)
 })
 const visibleCriteria = computed(() => props.selectedTargetType === 'overall' ? activeOverallCriteria.value : activePhaseCriteria.value)
+const selectedSegment = computed(() => phaseSegments.value.find((item) => item.id === props.selectedPhaseSegmentId) ?? null)
 
 function criterionCompleted(criterion: ResearchSkillCriterion, segment: ResearchSkillPhaseSegment | null) {
   const score = findSkillScore(
@@ -56,6 +57,20 @@ function criterionCompleted(criterion: ResearchSkillCriterion, segment: Research
     segment?.id ?? null,
   )
   return isSkillScoreComplete(score)
+}
+
+function criterionHasIssue(criterion: ResearchSkillCriterion) {
+  return Boolean(props.validation?.issues.some((issue) => issue.criterion_id === criterion.id && issue.severity === 'error'))
+}
+
+function criterionStatusText(criterion: ResearchSkillCriterion) {
+  if (criterionHasIssue(criterion)) {
+    return t('phaseAnnotation.errors')
+  }
+  if (criterionCompleted(criterion, selectedSegment.value)) {
+    return t('skillAssessment.complete')
+  }
+  return t('skillAssessment.missing')
 }
 
 function segmentCompletion(segment: ResearchSkillPhaseSegment) {
@@ -86,17 +101,19 @@ function localizedPhaseSegmentLabel(segment: ResearchSkillPhaseSegment & { occur
         </div>
         <el-button size="small" type="primary" @click="emit('createAssessment')">{{ t('common.create') }}</el-button>
       </div>
-      <button
-        v-for="assessment in assessments"
-        :key="assessment.id"
-        type="button"
-        class="skill-assessment-choice"
-        :class="{ active: selectedAssessmentId === assessment.id }"
-        @click="emit('selectAssessment', assessment.id)"
-      >
-        <strong>{{ assessment.rubric_name }} v{{ assessment.rubric_version }}</strong>
-        <span>{{ assessment.rater_username }} · {{ translateStatus(assessment.status, t) }} · {{ t('skillAssessment.scoreCount', { count: assessment.score_count }) }}</span>
-      </button>
+      <div class="skill-nav-scroll skill-assessment-scroll">
+        <button
+          v-for="assessment in assessments"
+          :key="assessment.id"
+          type="button"
+          class="skill-assessment-choice"
+          :class="{ active: selectedAssessmentId === assessment.id }"
+          @click="emit('selectAssessment', assessment.id)"
+        >
+          <strong>{{ assessment.rubric_name }} v{{ assessment.rubric_version }}</strong>
+          <span>{{ assessment.rater_username }} · {{ translateStatus(assessment.status, t) }} · {{ t('skillAssessment.scoreCount', { count: assessment.score_count }) }}</span>
+        </button>
+      </div>
       <el-button class="skill-wide-button" @click="emit('openRubrics')">{{ t('rubricManager.title') }}</el-button>
     </section>
 
@@ -122,17 +139,19 @@ function localizedPhaseSegmentLabel(segment: ResearchSkillPhaseSegment & { occur
         <span>{{ activeOverallCriteria.filter((criterion) => criterionCompleted(criterion, null)).length }}/{{ activeOverallCriteria.length }} {{ t('skillAssessment.complete') }}</span>
       </button>
       <h4>{{ t('skillAssessment.phaseSegments') }}</h4>
-      <button
-        v-for="segment in phaseSegments"
-        :key="segment.id"
-        type="button"
-        class="skill-target-choice"
-        :class="{ active: selectedPhaseSegmentId === segment.id }"
-        @click="emit('selectPhaseSegment', segment.id)"
-      >
-        <strong>{{ localizedPhaseSegmentLabel(segment) }}</strong>
-        <span>{{ formatSkillFrameRange(segment.start_frame, segment.end_frame_exclusive) }} · {{ segmentCompletion(segment) }}</span>
-      </button>
+      <div class="skill-nav-scroll skill-target-scroll">
+        <button
+          v-for="segment in phaseSegments"
+          :key="segment.id"
+          type="button"
+          class="skill-target-choice"
+          :class="{ active: selectedPhaseSegmentId === segment.id }"
+          @click="emit('selectPhaseSegment', segment.id)"
+        >
+          <strong>{{ localizedPhaseSegmentLabel(segment) }}</strong>
+          <span>{{ formatSkillFrameRange(segment.start_frame, segment.end_frame_exclusive) }} · {{ segmentCompletion(segment) }}</span>
+        </button>
+      </div>
       <p v-if="phaseSegments.length === 0" class="skill-muted">
         {{ t('skillAssessment.matchingPhaseSetRequired') }}
       </p>
@@ -140,17 +159,23 @@ function localizedPhaseSegmentLabel(segment: ResearchSkillPhaseSegment & { occur
 
     <section v-if="currentAssessment" class="skill-nav-card">
       <h3>{{ t('skillAssessment.criteria') }}</h3>
-      <button
-        v-for="criterion in visibleCriteria"
-        :key="criterion.id"
-        type="button"
-        class="skill-criterion-choice"
-        :class="{ active: selectedCriterionId === criterion.id, complete: criterionCompleted(criterion, phaseSegments.find((segment) => segment.id === selectedPhaseSegmentId) ?? null) }"
-        @click="emit('selectCriterion', criterion.id)"
-      >
-        <strong>{{ criterion.name }}</strong>
-        <span>{{ criterion.required ? t('skillAssessment.required') : t('skillAssessment.optional') }} · {{ criterion.score_type }}</span>
-      </button>
+      <div class="skill-nav-scroll skill-criterion-scroll">
+        <button
+          v-for="criterion in visibleCriteria"
+          :key="criterion.id"
+          type="button"
+          class="skill-criterion-choice"
+          :class="{
+            active: selectedCriterionId === criterion.id,
+            complete: criterionCompleted(criterion, selectedSegment),
+            error: criterionHasIssue(criterion),
+          }"
+          @click="emit('selectCriterion', criterion.id)"
+        >
+          <strong>{{ criterion.name }}</strong>
+          <span>{{ criterion.required ? t('skillAssessment.required') : t('skillAssessment.optional') }} · {{ criterion.score_type }} · {{ criterionStatusText(criterion) }}</span>
+        </button>
+      </div>
       <p v-if="visibleCriteria.length === 0" class="skill-muted">
         {{ t('skillAssessment.noCriteriaForTarget') }}
       </p>
@@ -161,15 +186,15 @@ function localizedPhaseSegmentLabel(segment: ResearchSkillPhaseSegment & { occur
 <style scoped>
 .skill-assessment-nav {
   display: grid;
-  gap: 1rem;
+  gap: 0.72rem;
   align-content: start;
 }
 
 .skill-nav-card {
   display: grid;
-  gap: 0.7rem;
-  padding: 1rem;
-  border-radius: 1.1rem;
+  gap: 0.52rem;
+  padding: 0.78rem;
+  border-radius: 0.72rem;
   background: rgba(15, 23, 42, 0.78);
   border: 1px solid rgba(148, 163, 184, 0.18);
 }
@@ -200,8 +225,8 @@ function localizedPhaseSegmentLabel(segment: ResearchSkillPhaseSegment & { occur
   width: 100%;
   display: grid;
   gap: 0.2rem;
-  padding: 0.75rem;
-  border-radius: 0.85rem;
+  padding: 0.56rem 0.62rem;
+  border-radius: 0.58rem;
   border: 1px solid rgba(148, 163, 184, 0.16);
   background: rgba(30, 41, 59, 0.64);
   color: #cbd5e1;
@@ -222,6 +247,10 @@ function localizedPhaseSegmentLabel(segment: ResearchSkillPhaseSegment & { occur
   color: #22c55e;
 }
 
+.skill-criterion-choice.error {
+  border-color: rgba(248, 113, 113, 0.5);
+}
+
 .skill-assessment-choice span,
 .skill-target-choice span,
 .skill-criterion-choice span {
@@ -231,5 +260,24 @@ function localizedPhaseSegmentLabel(segment: ResearchSkillPhaseSegment & { occur
 
 .skill-wide-button {
   width: 100%;
+}
+
+.skill-nav-scroll {
+  display: grid;
+  gap: 0.42rem;
+  overflow: auto;
+  padding-right: 0.12rem;
+}
+
+.skill-assessment-scroll {
+  max-height: 8.5rem;
+}
+
+.skill-target-scroll {
+  max-height: 15rem;
+}
+
+.skill-criterion-scroll {
+  max-height: 34vh;
 }
 </style>

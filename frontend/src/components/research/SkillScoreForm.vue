@@ -152,7 +152,7 @@ onBeforeUnmount(() => {
         <el-tag v-else type="info">{{ t('skillAssessment.missing') }}</el-tag>
       </header>
 
-      <p v-if="criterion.description" class="skill-muted">{{ criterion.description }}</p>
+      <p v-if="criterion.description" class="skill-muted skill-criterion-description">{{ criterion.description }}</p>
 
       <div class="skill-score-control">
         <template v-if="criterion.score_type === 'integer_scale'">
@@ -190,35 +190,26 @@ onBeforeUnmount(() => {
           @blur="saveNumberValue"
         />
 
-        <el-radio-group
-          v-else-if="criterion.score_type === 'single_choice' && (criterion.options_json?.length ?? 0) <= 6"
-          :model-value="localValue"
-          :disabled="readonly || saving || isNa"
-          @change="saveValue"
-        >
-          <el-radio-button
-            v-for="option in criterion.options_json ?? []"
-            :key="option.value"
-            :label="option.value"
-          >
-            {{ option.label }}
-          </el-radio-button>
-        </el-radio-group>
-
-        <el-select
+        <div
           v-else-if="criterion.score_type === 'single_choice'"
-          v-model="localValue"
-          :disabled="readonly || saving || isNa"
-          :placeholder="t('skillAssessment.selectOption')"
-          @change="saveValue"
+          class="skill-choice-card-list"
+          role="radiogroup"
         >
-          <el-option
+          <button
             v-for="option in criterion.options_json ?? []"
             :key="option.value"
-            :label="option.label"
-            :value="option.value"
-          />
-        </el-select>
+            type="button"
+            class="skill-choice-card"
+            :class="{ active: localValue === option.value }"
+            :disabled="readonly || saving || isNa"
+            role="radio"
+            :aria-checked="localValue === option.value"
+            @click="saveValue(option.value)"
+          >
+            <span class="skill-choice-card-score">{{ option.value }}</span>
+            <span class="skill-choice-card-label">{{ option.label }}</span>
+          </button>
+        </div>
 
         <el-radio-group
           v-else-if="criterion.score_type === 'boolean'"
@@ -253,7 +244,10 @@ onBeforeUnmount(() => {
       </el-checkbox>
 
       <div class="skill-score-comment">
-        <label>{{ t('skillAssessment.scoreComment') }}</label>
+        <div class="skill-score-comment-heading">
+          <label>{{ t('skillAssessment.scoreComment') }}</label>
+          <el-button size="small" :disabled="readonly || saving || !score?.comment" @click="clearComment">{{ t('phaseAnnotation.clearNotes') }}</el-button>
+        </div>
         <el-input
           v-model="localComment"
           type="textarea"
@@ -263,7 +257,6 @@ onBeforeUnmount(() => {
           :placeholder="t('skillAssessment.scoreCommentPlaceholder')"
           @input="scheduleCommentSave"
         />
-        <el-button size="small" :disabled="readonly || saving || !score?.comment" @click="clearComment">{{ t('phaseAnnotation.clearNotes') }}</el-button>
       </div>
 
       <el-button
@@ -282,7 +275,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .skill-score-form {
   display: grid;
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
 .skill-score-form-header {
@@ -303,13 +296,80 @@ onBeforeUnmount(() => {
   color: rgba(148, 163, 184, 0.92);
 }
 
+.skill-criterion-description {
+  padding: 0.62rem;
+  border-radius: 0.58rem;
+  background: rgba(15, 23, 42, 0.54);
+  max-height: 14rem;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+  white-space: pre-line;
+}
+
 .skill-score-control {
   min-width: 0;
+}
+
+.skill-choice-card-list {
+  display: grid;
+  gap: 0.45rem;
+  max-height: 22rem;
+  overflow: auto;
+}
+
+.skill-choice-card {
+  display: grid;
+  grid-template-columns: 3.4rem minmax(0, 1fr);
+  gap: 0.62rem;
+  align-items: start;
+  width: 100%;
+  padding: 0.58rem 0.65rem;
+  border-radius: 0.58rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.62);
+  color: #dbeafe;
+  text-align: left;
+}
+
+.skill-choice-card.active {
+  border-color: rgba(34, 211, 238, 0.58);
+  background: rgba(8, 47, 73, 0.8);
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.16);
+}
+
+.skill-choice-card:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.skill-choice-card-score {
+  display: inline-flex;
+  justify-content: center;
+  min-width: 2.4rem;
+  padding: 0.22rem 0.42rem;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.82);
+  color: #f8fafc;
+  font-weight: 800;
+}
+
+.skill-choice-card-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
 }
 
 .skill-score-comment {
   display: grid;
   gap: 0.5rem;
+}
+
+.skill-score-comment-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: center;
 }
 
 .skill-score-comment label {

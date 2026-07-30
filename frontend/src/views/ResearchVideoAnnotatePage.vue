@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Back, Delete, Finished, Pointer, RefreshRight, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { Delete, Finished, Pointer, RefreshRight, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { storeToRefs } from 'pinia'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowReactive, shallowRef, watch } from 'vue'
@@ -8,7 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import AnnotationCanvas from '../components/AnnotationCanvas.vue'
 import ObjectPanel from '../components/ObjectPanel.vue'
-import ResearchVideoTaskNav from '../components/research/ResearchVideoTaskNav.vue'
+import ResearchVideoWorkspaceHeader from '../components/research/ResearchVideoWorkspaceHeader.vue'
 import VideoPlaybackRateControl from '../components/VideoPlaybackRateControl.vue'
 import VirtualFrameList from '../components/VirtualFrameList.vue'
 import { useVideoPlaybackRate } from '../composables/useVideoPlaybackRate.ts'
@@ -21,6 +21,14 @@ import {
 } from '../stores/researchVideos'
 import { useUsersStore } from '../stores/users'
 import { useUserSettingsStore, type Sam2Candidate, type Sam2ModelName } from '../stores/userSettings'
+import {
+  moveAnnotationLayer,
+  moveAnnotationLayerByStep,
+  moveAnnotationToBack,
+  moveAnnotationToFront,
+  nextTopLayerOrder,
+  normalizeAnnotationLayerOrder,
+} from '../utils/annotationLayerOrder'
 import { clonePoints, normalizeAnnotationObject } from '../utils/polygon'
 import {
   DEFAULT_FRAME_PAGE_SIZE,
@@ -215,10 +223,14 @@ const playerPaneMetaText = computed(() => {
     return t('common.noFrameSelected')
   }
   if (!currentFrame.value) {
-    return `Frame ${currentFrameNumber.value} / ${totalFrames.value} · Loading frame...`
+    return `${t('common.frameRange', { current: currentFrameNumber.value, total: totalFrames.value })} · ${t('common.loadingFrame')}`
   }
-  return `Frame ${currentFrameNumber.value} / ${totalFrames.value} · ${formatTimestamp(currentFrame.value.timestamp_ms)}`
+  return `${t('common.frameRange', { current: currentFrameNumber.value, total: totalFrames.value })} · ${formatTimestamp(currentFrame.value.timestamp_ms)}`
 })
+const workspaceHeaderMetaItems = computed(() => [
+  `${t('common.frame')} ${currentFrameNumber.value} / ${totalFrames.value}`,
+  currentFrame.value ? formatTimestamp(currentFrame.value.timestamp_ms) : compactVideoTimeText.value,
+])
 const currentObjectCount = computed(() => currentFrameAnnotations.value.length)
 const splitHandleSize = computed(() => (isCompactResearchLayout.value ? COMPACT_PLAYER_SPLIT_HANDLE_HEIGHT : PLAYER_SPLIT_HANDLE_HEIGHT))
 const playerHeightBounds = computed(() => getPlayerHeightBounds())
@@ -407,6 +419,7 @@ async function loadFrameAnnotations(frameIndex: number, generation = videoLoadGe
             shape_type: annotation.shape_type,
             points: annotation.points,
             attributes: annotation.attributes ?? null,
+            z_order: annotation.z_order ?? 0,
           }),
           frame_id: annotation.frame_id,
           frame_index: annotation.frame_index,
@@ -550,9 +563,10 @@ function updateCurrentFrameAnnotations(nextAnnotations: AnnotationObject[]) {
   if (!currentFrame.value) {
     return
   }
+  const normalizedAnnotations = normalizeAnnotationLayerOrder(nextAnnotations.map((annotation) => normalizeAnnotationObject(annotation)))
   annotationsByFrame.value = {
     ...annotationsByFrame.value,
-    [currentFrame.value.frame_index]: nextAnnotations.map((annotation) => ({
+    [currentFrame.value.frame_index]: normalizedAnnotations.map((annotation) => ({
       ...(annotation as ResearchVideoAnnotation),
       frame_id: currentFrame.value?.id ?? 0,
       frame_index: currentFrame.value?.frame_index ?? 0,
@@ -575,6 +589,7 @@ async function saveAnnotations() {
       points: clonePoints(annotation.points),
       attributes: annotation.attributes ?? null,
       visible: true,
+      z_order: annotation.z_order,
     })),
   )
   if (!saved) {
@@ -671,6 +686,21 @@ function updateAnnotationLabel(id: number | string, labelId: number) {
   )
 }
 
+function reorderAnnotation(id: number | string, targetFrontIndex: number) {
+  updateCurrentFrameAnnotations(moveAnnotationLayer(currentFrameAnnotations.value, id, targetFrontIndex))
+}
+
+function moveAnnotationLayerAction(id: number | string, direction: 'up' | 'down' | 'top' | 'bottom') {
+  const nextAnnotations = direction === 'up'
+    ? moveAnnotationLayerByStep(currentFrameAnnotations.value, id, -1)
+    : direction === 'down'
+      ? moveAnnotationLayerByStep(currentFrameAnnotations.value, id, 1)
+      : direction === 'top'
+        ? moveAnnotationToFront(currentFrameAnnotations.value, id)
+        : moveAnnotationToBack(currentFrameAnnotations.value, id)
+  updateCurrentFrameAnnotations(nextAnnotations)
+}
+
 function updatePolygonSmoothing() {}
 function commitPolygonSmoothing() {}
 function resetPolygonSmoothing() {}
@@ -747,6 +777,7 @@ function acceptSam2Mask() {
     shape_type: 'polygon',
     points: clonePoints(preview.points),
     attributes: preview.score === null ? null : { tracking_score: preview.score },
+    z_order: nextTopLayerOrder(currentFrameAnnotations.value),
   })
   updateCurrentFrameAnnotations([...currentFrameAnnotations.value, nextAnnotation])
   selectedAnnotationId.value = nextAnnotation.id
@@ -859,7 +890,7 @@ function parseGoToFrameInput() {
   }
 
   const normalizedInput = gotoFrameInput.value.trim()
-  const rangeMessage = `Frame number must be between 1 and ${totalFrames.value}.`
+  const rangeMessage = t('frameAnnotation.imageIndexRange', { max: totalFrames.value })
 
   if (!normalizedInput || !/^\d+$/.test(normalizedInput)) {
     gotoFrameError.value = rangeMessage
@@ -1244,26 +1275,21 @@ function startDevMeasure(name: string) {
 
 <template>
   <main class="annotate-page research-annotate-page">
+    <ResearchVideoWorkspaceHeader
+      active-task="frame"
+      :current-frame-index="selectedFrameIndex"
+      :meta-items="workspaceHeaderMetaItems"
+      :task-label="t('taskNav.frame')"
+      :title="video?.name ?? t('research.videoFallback', { id: videoId })"
+      :video-id="videoId"
+    />
+
     <aside class="annotate-sidebar annotation-sidebar-left">
       <div class="sidebar-header">
-        <router-link to="/research/videos" class="annotate-back">
-          <el-icon><Back /></el-icon>
-          Research Videos
-        </router-link>
-
         <div>
           <p class="eyebrow">{{ t('frameAnnotation.eyebrow') }}</p>
-          <h1 class="research-video-title job-title" :title="video?.name ?? `Video ${videoId}`">
-            {{ video?.name ?? `Video ${videoId}` }}
-          </h1>
           <p class="job-subtitle">{{ t('frameAnnotation.experimentalWorkspace') }}</p>
         </div>
-
-        <ResearchVideoTaskNav
-          :active-task="'frame'"
-          :current-frame-index="selectedFrameIndex"
-          :video-id="videoId"
-        />
 
         <section class="tool-panel">
           <p class="panel-label">{{ t('frameAnnotation.tool') }}</p>
@@ -1337,14 +1363,8 @@ function startDevMeasure(name: string) {
 
     <section class="annotate-stage annotation-main">
       <header class="annotate-stage-bar research-video-stage-bar">
-        <div class="annotate-stage-title">
-          <strong>{{ currentFrame?.filename ?? `Frame ${currentFrameNumber}` }}</strong>
-          <span v-if="currentFrame">
-            {{ currentFrame.width }} x {{ currentFrame.height }} · Frame {{ currentFrameNumber }} / {{ totalFrames }}
-          </span>
-          <span v-else-if="totalFrames">
-            Loading frame {{ currentFrameNumber }} / {{ totalFrames }}
-          </span>
+        <div class="annotate-stage-title research-video-stage-compact-title">
+          <strong>{{ currentFrame?.filename ?? t('common.frameWithNumber', { number: currentFrameNumber }) }}</strong>
         </div>
         <div class="annotation-toolbar">
           <div class="toolbar-group toolbar-group-frames">
@@ -1447,8 +1467,8 @@ function startDevMeasure(name: string) {
 
             <div v-if="isPlayerCollapsed" class="research-player-compact-bar">
               <div class="research-player-compact-meta">
-                <strong :title="video?.original_filename ?? video?.name ?? `Video ${videoId}`">
-                  {{ video?.original_filename ?? video?.name ?? `Video ${videoId}` }}
+                <strong :title="video?.original_filename ?? video?.name ?? t('research.videoFallback', { id: videoId })">
+                  {{ video?.original_filename ?? video?.name ?? t('research.videoFallback', { id: videoId }) }}
                 </strong>
                 <span>{{ compactVideoTimeText }} / {{ totalVideoTimeText }}</span>
               </div>
@@ -1553,6 +1573,8 @@ function startDevMeasure(name: string) {
         @show-all="showAllAnnotations"
         @select-annotation="selectAnnotation"
         @commit-polygon-smoothing="commitPolygonSmoothing"
+        @move-annotation-layer="moveAnnotationLayerAction"
+        @reorder-annotation="reorderAnnotation"
         @reset-polygon-smoothing="resetPolygonSmoothing"
         @toggle-visibility="toggleAnnotationVisibility"
         @update-annotation-label="updateAnnotationLabel"
@@ -1575,7 +1597,7 @@ function startDevMeasure(name: string) {
           <div>
             <p class="eyebrow">{{ t('frameAnnotation.researchLabels') }}</p>
             <h2>{{ t('frameAnnotation.manageLabels') }}</h2>
-            <span>{{ video?.name ?? `Video ${videoId}` }}</span>
+            <span>{{ video?.name ?? t('research.videoFallback', { id: videoId }) }}</span>
           </div>
           <el-button :disabled="labelActionLoading" @click="closeLabelManager">{{ t('common.close') }}</el-button>
         </header>

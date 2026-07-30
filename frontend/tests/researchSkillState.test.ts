@@ -176,11 +176,15 @@ test('export does not modify revision and revokes object URL', async () => {
     revokeObjectURL(value: string) { revoked = value },
   } as unknown as typeof URL
 
-  const result = await store.downloadJson()
+  try {
+    const result = await store.downloadJson()
 
-  assert.equal(result.ok, true)
-  assert.equal(store.currentAssessment?.revision, 1)
-  assert.equal(revoked, 'blob:skill')
-  globalThis.document = originalDocument
-  globalThis.URL = originalUrl
+    assert.equal(result.ok, true)
+    assert.equal(store.currentAssessment?.revision, 1)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(revoked, 'blob:skill')
+  } finally {
+    globalThis.document = originalDocument
+    globalThis.URL = originalUrl
+  }
 })

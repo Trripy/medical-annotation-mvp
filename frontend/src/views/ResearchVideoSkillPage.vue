@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Back, RefreshRight, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { RefreshRight, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { storeToRefs } from 'pinia'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, shallowRef, watch } from 'vue'
@@ -12,7 +12,7 @@ import SkillEvidenceTimeline from '../components/research/SkillEvidenceTimeline.
 import SkillRubricManager from '../components/research/SkillRubricManager.vue'
 import SkillScoreForm from '../components/research/SkillScoreForm.vue'
 import SkillValidationPanel from '../components/research/SkillValidationPanel.vue'
-import ResearchVideoTaskNav from '../components/research/ResearchVideoTaskNav.vue'
+import ResearchVideoWorkspaceHeader from '../components/research/ResearchVideoWorkspaceHeader.vue'
 import VideoPlaybackRateControl from '../components/VideoPlaybackRateControl.vue'
 import { useVideoPlaybackRate } from '../composables/useVideoPlaybackRate.ts'
 import { useResearchPhasesStore } from '../stores/researchPhases.ts'
@@ -129,6 +129,13 @@ const saveStateLabel = computed(() => {
   if (saveState.value === 'error') return t('status.failed')
   return t('status.idle')
 })
+const workspaceHeaderMetaItems = computed(() => [
+  `${t('common.frame')} ${totalFrames.value > 0 ? selectedFrameIndex.value + 1 : 0} / ${totalFrames.value}`,
+  formatSkillTime(selectedFrameIndex.value, video.value?.fps),
+  currentAssessment.value
+    ? `${t('skillAssessment.assessment')} ${translateStatus(currentAssessment.value.status, t)} · ${Math.round(currentAssessment.value.completion.completion_percent)}%`
+    : t('skillAssessment.noAssessment'),
+])
 
 onMounted(async () => {
   await loadSkillWorkspace()
@@ -532,7 +539,7 @@ function nextFrame() {
 function goToInputFrame() {
   const parsed = Number.parseInt(gotoFrameInput.value, 10)
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > totalFrames.value) {
-    ElMessage.warning(`Frame number must be between 1 and ${totalFrames.value}.`)
+    ElMessage.warning(t('frameAnnotation.imageIndexRange', { max: totalFrames.value }))
     return
   }
   void goToFrame(parsed - 1)
@@ -566,18 +573,14 @@ function togglePlayback() {
 
 <template>
   <div class="research-skill-page">
-    <header class="research-skill-header">
-      <router-link class="research-back-link" to="/research/videos">
-        <el-icon><Back /></el-icon>
-        {{ t('phaseAnnotation.researchVideos') }}
-      </router-link>
-      <div>
-        <h1>{{ video?.name ?? t('skillAssessment.title') }}</h1>
-        <p>{{ t('common.frame') }} {{ totalFrames > 0 ? selectedFrameIndex + 1 : 0 }} / {{ totalFrames }} · {{ formatSkillTime(selectedFrameIndex, video?.fps) }}</p>
-      </div>
-      <ResearchVideoTaskNav active-task="skill" :video-id="videoId" :current-frame-index="selectedFrameIndex" />
-      <el-tag :type="saveState === 'conflict' ? 'danger' : saveState === 'saved' ? 'success' : 'info'">{{ saveStateLabel }}</el-tag>
-    </header>
+    <ResearchVideoWorkspaceHeader
+      active-task="skill"
+      :current-frame-index="selectedFrameIndex"
+      :meta-items="workspaceHeaderMetaItems"
+      :task-label="t('taskNav.skill')"
+      :title="video?.name ?? t('skillAssessment.title')"
+      :video-id="videoId"
+    />
 
     <el-alert v-if="pageError" :title="pageError" type="error" show-icon />
 
@@ -631,6 +634,7 @@ function togglePlayback() {
           :current-frame-index="selectedFrameIndex"
           :phase-segments="currentAssessment?.phase_annotation_set?.segments ?? []"
           :score="selectedScore"
+          :selected-evidence-id="selectedEvidenceId"
           :pending-start-frame="pendingEvidenceStartFrame"
           @seek="goToFrame"
           @select-evidence="goEvidence"
@@ -690,24 +694,37 @@ function togglePlayback() {
 
     <el-dialog v-model="showCreateAssessment" :title="t('skillAssessment.createAssessment')" width="min(560px, 94vw)">
       <div class="research-skill-create-dialog">
-        <el-select v-model="createAssessmentForm.rubric_id" :placeholder="t('skillAssessment.activeRubric')" @change="(id: number) => skillsStore.fetchRubric(id)">
-          <el-option
-            v-for="rubric in activeRubrics"
-            :key="rubric.id"
-            :label="`${rubric.name} v${rubric.version}`"
-            :value="rubric.id"
-          />
-        </el-select>
-        <el-select v-model="createAssessmentForm.phase_annotation_set_id" clearable :placeholder="t('skillAssessment.optionalPhaseSet')">
-          <el-option
-            v-for="set in matchingPhaseSets"
-            :key="set.id"
-            :label="`${getPhaseProtocolDisplayName({ name: set.protocol_name, is_default: true }, currentLocale)} v${set.protocol_version} · ${set.annotator_username} · ${translateStatus(set.status, t)} · ${set.segment_count} ${t('common.frames')}`"
-            :value="set.id"
-          />
-        </el-select>
-        <p>{{ t('skillAssessment.rater') }}: {{ currentUsername || t('skillAssessment.noCurrentUser') }}</p>
-        <el-button type="primary" @click="createAssessment">{{ t('skillAssessment.createOpenAssessment') }}</el-button>
+        <div v-if="activeRubrics.length === 0" class="research-skill-create-empty">
+          <strong>{{ t('skillAssessment.noActiveRubric') }}</strong>
+          <p>{{ t('skillAssessment.createRubricFirst') }}</p>
+          <el-button @click="showRubricManager = true">{{ t('rubricManager.title') }}</el-button>
+        </div>
+        <template v-else>
+          <el-select v-model="createAssessmentForm.rubric_id" :placeholder="t('skillAssessment.activeRubric')" @change="(id: number) => skillsStore.fetchRubric(id)">
+            <el-option
+              v-for="rubric in activeRubrics"
+              :key="rubric.id"
+              :label="`${rubric.name} v${rubric.version} · ${rubric.criterion_count} ${t('skillAssessment.criteria')}`"
+              :value="rubric.id"
+            />
+          </el-select>
+          <p v-if="selectedCreateRubric">
+            {{ selectedCreateRubric.name }} · v{{ selectedCreateRubric.version }} · {{ selectedCreateRubric.criterion_count }} {{ t('skillAssessment.criteria') }}
+          </p>
+          <el-select v-model="createAssessmentForm.phase_annotation_set_id" clearable :placeholder="t('skillAssessment.optionalPhaseSet')">
+            <el-option
+              v-for="set in matchingPhaseSets"
+              :key="set.id"
+              :label="`${getPhaseProtocolDisplayName({ name: set.protocol_name, is_default: true }, currentLocale)} v${set.protocol_version} · ${set.annotator_username} · ${translateStatus(set.status, t)} · ${set.segment_count} ${t('common.frames')}`"
+              :value="set.id"
+            />
+          </el-select>
+          <p>{{ t('skillAssessment.rater') }}: {{ currentUsername || t('skillAssessment.noCurrentUser') }}</p>
+          <div class="research-skill-create-actions">
+            <el-button @click="showCreateAssessment = false">{{ t('common.cancel') }}</el-button>
+            <el-button type="primary" :disabled="!createAssessmentForm.rubric_id" @click="createAssessment">{{ t('skillAssessment.createOpenAssessment') }}</el-button>
+          </div>
+        </template>
       </div>
     </el-dialog>
 
@@ -742,8 +759,12 @@ function togglePlayback() {
 
 <style scoped>
 .research-skill-page {
-  min-height: 100vh;
-  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  min-height: 0;
+  padding: 1rem;
+  overflow: hidden;
   background:
     radial-gradient(circle at 15% 10%, rgba(20, 184, 166, 0.2), transparent 30rem),
     radial-gradient(circle at 85% 0%, rgba(234, 179, 8, 0.16), transparent 28rem),
@@ -751,47 +772,33 @@ function togglePlayback() {
   color: #e2e8f0;
 }
 
-.research-skill-header {
-  display: grid;
-  grid-template-columns: auto minmax(180px, 1fr) auto auto;
-  gap: 1rem;
-  align-items: center;
-  margin-bottom: 1rem;
-}
-
-.research-back-link {
-  display: inline-flex;
-  gap: 0.35rem;
-  color: #bae6fd;
-  text-decoration: none;
-  align-items: center;
-}
-
-.research-skill-header h1,
-.research-skill-header p {
-  margin: 0;
-}
-
-.research-skill-header p {
-  color: rgba(148, 163, 184, 0.92);
+.research-skill-page > .research-workspace-header {
+  margin: -1rem -1rem 0.85rem;
 }
 
 .research-skill-grid {
   display: grid;
-  grid-template-columns: minmax(250px, 0.82fr) minmax(420px, 1.45fr) minmax(300px, 0.95fr);
-  gap: 1rem;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(260px, 310px) minmax(0, 1fr) minmax(300px, 360px);
+  gap: 0.85rem;
   align-items: start;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .research-skill-center,
 .research-skill-right {
   display: grid;
-  gap: 1rem;
+  gap: 0.72rem;
+  min-height: 0;
+  overflow: auto;
 }
 
 .research-skill-right {
-  padding: 1rem;
-  border-radius: 1.1rem;
+  position: sticky;
+  top: 0.85rem;
+  padding: 0.78rem;
+  border-radius: 0.72rem;
   background: rgba(15, 23, 42, 0.78);
   border: 1px solid rgba(148, 163, 184, 0.18);
 }
@@ -799,17 +806,17 @@ function togglePlayback() {
 .research-skill-video-card,
 .research-skill-actions {
   display: grid;
-  gap: 0.8rem;
-  padding: 1rem;
-  border-radius: 1.1rem;
+  gap: 0.62rem;
+  padding: 0.78rem;
+  border-radius: 0.72rem;
   background: rgba(15, 23, 42, 0.78);
   border: 1px solid rgba(148, 163, 184, 0.18);
 }
 
 .research-skill-video {
   width: 100%;
-  max-height: 46vh;
-  border-radius: 1rem;
+  max-height: 42vh;
+  border-radius: 0.62rem;
   background: #000;
 }
 
@@ -817,17 +824,35 @@ function togglePlayback() {
 .research-skill-action-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 0.42rem;
   align-items: center;
 }
 
 .research-skill-goto {
-  width: 7rem;
+  width: 5.8rem;
 }
 
 .research-skill-create-dialog {
   display: grid;
   gap: 1rem;
+}
+
+.research-skill-create-empty {
+  display: grid;
+  gap: 0.5rem;
+  padding: 1rem;
+  border-radius: 0.72rem;
+  background: rgba(15, 23, 42, 0.06);
+}
+
+.research-skill-create-empty p {
+  margin: 0;
+}
+
+.research-skill-create-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
 }
 
 @media (max-width: 1280px) {
@@ -837,6 +862,7 @@ function togglePlayback() {
 
   .research-skill-right {
     grid-column: 1 / -1;
+    position: static;
   }
 }
 
@@ -845,7 +871,6 @@ function togglePlayback() {
     padding: 0.75rem;
   }
 
-  .research-skill-header,
   .research-skill-grid {
     grid-template-columns: 1fr;
   }

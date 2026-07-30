@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import LanguageSwitcher from '../LanguageSwitcher.vue'
+import { buildResearchTaskNavState } from '../../utils/researchWorkflowUi.ts'
 
 const props = defineProps<{
   activeTask: 'frame' | 'phase' | 'skill'
@@ -12,36 +13,32 @@ const props = defineProps<{
 
 const { t } = useI18n()
 
-const sharedQuery = computed(() => (
-  props.currentFrameIndex >= 0
-    ? { frame: String(props.currentFrameIndex) }
-    : {}
-))
+const taskItems = computed(() => buildResearchTaskNavState(props.activeTask, props.currentFrameIndex))
+
+function taskPath(task: 'frame' | 'phase' | 'skill') {
+  if (task === 'frame') return `/research/videos/${props.videoId}/annotate`
+  if (task === 'phase') return `/research/videos/${props.videoId}/phases`
+  return `/research/videos/${props.videoId}/skills`
+}
+
+function taskLabel(task: 'frame' | 'phase' | 'skill') {
+  if (task === 'frame') return t('taskNav.frame')
+  if (task === 'phase') return t('taskNav.phase')
+  return t('taskNav.skill')
+}
 </script>
 
 <template>
   <div class="research-task-nav-shell">
     <nav class="research-task-nav" :aria-label="t('accessibility.researchTasks')">
       <router-link
+        v-for="item in taskItems"
+        :key="item.task"
         class="research-task-nav-link"
-        :class="{ active: activeTask === 'frame' }"
-        :to="{ path: `/research/videos/${videoId}/annotate`, query: sharedQuery }"
+        :class="{ active: item.active }"
+        :to="{ path: taskPath(item.task), query: item.query }"
       >
-        {{ t('taskNav.frame') }}
-      </router-link>
-      <router-link
-        class="research-task-nav-link"
-        :class="{ active: activeTask === 'phase' }"
-        :to="{ path: `/research/videos/${videoId}/phases`, query: sharedQuery }"
-      >
-        {{ t('taskNav.phase') }}
-      </router-link>
-      <router-link
-        class="research-task-nav-link"
-        :class="{ active: activeTask === 'skill' }"
-        :to="{ path: `/research/videos/${videoId}/skills`, query: sharedQuery }"
-      >
-        {{ t('taskNav.skill') }}
+        {{ taskLabel(item.task) }}
       </router-link>
     </nav>
     <LanguageSwitcher compact />
@@ -52,15 +49,16 @@ const sharedQuery = computed(() => (
 .research-task-nav-shell {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
+  justify-content: flex-end;
+  gap: 0.5rem;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .research-task-nav {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 0.35rem;
   min-width: 0;
 }
 
@@ -68,13 +66,13 @@ const sharedQuery = computed(() => (
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.7rem 0.95rem;
-  border-radius: 999px;
+  padding: 0.46rem 0.68rem;
+  border-radius: 0.52rem;
   border: 1px solid rgba(148, 163, 184, 0.24);
   background: rgba(15, 23, 42, 0.68);
   color: rgba(226, 232, 240, 0.9);
   text-decoration: none;
-  font-size: 0.92rem;
+  font-size: 0.86rem;
   font-weight: 600;
   transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
 }
@@ -99,7 +97,11 @@ const sharedQuery = computed(() => (
 @media (max-width: 760px) {
   .research-task-nav-shell {
     align-items: flex-start;
-    flex-direction: column;
+    justify-content: flex-start;
+  }
+
+  .research-task-nav-link {
+    padding: 0.42rem 0.58rem;
   }
 }
 </style>

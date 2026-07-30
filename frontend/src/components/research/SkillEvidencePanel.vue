@@ -125,7 +125,7 @@ function saveEdit(evidence: ResearchSkillEvidence) {
 <style scoped>
 .skill-evidence-panel {
   display: grid;
-  gap: 0.85rem;
+  gap: 0.62rem;
 }
 
 .skill-evidence-panel h3 {
@@ -141,15 +141,15 @@ function saveEdit(evidence: ResearchSkillEvidence) {
 
 .skill-evidence-actions {
   display: flex;
-  gap: 0.5rem;
+  gap: 0.42rem;
   flex-wrap: wrap;
   align-items: center;
 }
 
 .skill-evidence-item,
 .skill-empty-panel {
-  padding: 0.8rem;
-  border-radius: 0.9rem;
+  padding: 0.58rem;
+  border-radius: 0.58rem;
   background: rgba(15, 23, 42, 0.7);
   border: 1px solid rgba(148, 163, 184, 0.16);
 }
