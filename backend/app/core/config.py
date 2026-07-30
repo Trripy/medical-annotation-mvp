@@ -16,6 +16,9 @@ class Settings(BaseSettings):
 
     backend_cors_origins: str = Field(default="*")
     local_storage_root: str = Field(default="./storage")
+    research_video_import_roots: str = Field(default="")
+    research_video_ffmpeg_binary: str = Field(default="")
+    research_video_trim_max_concurrency: int = Field(default=1)
     sam2_repo_root: str = Field(default="../sam2")
     sam2_checkpoint: str = Field(default="../sam2/checkpoints/sam2.1_hiera_large.pt")
     sam2_model_cfg: str = Field(default="configs/sam2.1/sam2.1_hiera_l.yaml")

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Integer, JSON, String, UniqueConstraint, func
+from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, JSON, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -28,6 +28,10 @@ class ResearchVideo(Base):
     frame_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="processing")
+    source_video_id: Mapped[int | None] = mapped_column(ForeignKey("research_videos.id", ondelete="SET NULL"))
+    origin_type: Mapped[str] = mapped_column(String(32), nullable=False, default="uploaded")
+    trim_start_frame: Mapped[int | None] = mapped_column(Integer)
+    trim_end_frame_exclusive: Mapped[int | None] = mapped_column(Integer)
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -42,6 +46,16 @@ class ResearchVideo(Base):
     )
 
     created_by: Mapped[User | None] = relationship("User")
+    source_video: Mapped[ResearchVideo | None] = relationship(
+        "ResearchVideo",
+        remote_side="ResearchVideo.id",
+        back_populates="derived_videos",
+    )
+    derived_videos: Mapped[list[ResearchVideo]] = relationship(
+        "ResearchVideo",
+        back_populates="source_video",
+        passive_deletes=True,
+    )
     frames: Mapped[list[ResearchVideoFrame]] = relationship(
         back_populates="video",
         cascade="all, delete-orphan",
@@ -66,6 +80,10 @@ class ResearchVideo(Base):
         back_populates="video",
         cascade="all, delete-orphan",
     )
+
+
+Index("ix_research_videos_source_video_id", ResearchVideo.source_video_id)
+Index("ix_research_videos_source_trim_processing", ResearchVideo.source_video_id, ResearchVideo.trim_start_frame, ResearchVideo.trim_end_frame_exclusive, ResearchVideo.status)
 
 
 class ResearchVideoFrame(Base):
