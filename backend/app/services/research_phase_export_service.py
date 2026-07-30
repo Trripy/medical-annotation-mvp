@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import csv
 import io
 import json
+import re
 from typing import Any, Iterator
 
 from fastapi import HTTPException, status
@@ -18,12 +19,29 @@ from app.schemas.research_phase import (
     ResearchPhaseValidationResponse,
 )
 from app.services.download_filenames import build_attachment_content_disposition, sanitize_filename
+from app.services.phase_label_mapping import (
+    build_mapping_export_manifest,
+    calculate_mapping_statistics,
+    map_phase_segments,
+    merge_adjacent_mapped_segments,
+    profile_key,
+    resolve_mapping_rules,
+)
 from app.services.research_phase_service import get_phase_annotation_set, validate_phase_annotation_set
 
 CSV_BATCH_SIZE = 1000
 FRAMEWISE_UNLABELED_KEY = "unlabeled"
 FRAMEWISE_UNLABELED_NAME = "Unlabeled"
-PHASE_EXPORT_SCHEMA_VERSION = 1
+PHASE_EXPORT_SCHEMA_VERSION = 2
+PHASE_EXPORT_VIDEO_EXTENSIONS = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm")
+WINDOWS_RESERVED_FILENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 @dataclass(frozen=True)
@@ -41,16 +59,56 @@ class PhaseStreamExportResult:
     validation: ResearchPhaseValidationResponse | None = None
 
 
-def build_phase_json_export(db: Session, annotation_set_id: int) -> PhaseJsonExportResult:
+def build_phase_json_export(
+    db: Session,
+    annotation_set_id: int,
+    *,
+    mapping_profile_id: int | None = None,
+) -> PhaseJsonExportResult:
     context = _load_export_context(db, annotation_set_id, include_validation=True)
     detail = context.annotation_set
     video = context.video
     validation = context.validation
     assert validation is not None
+    mapping_profile = None
+    segments_payload: list[dict[str, Any]]
+    mapping_statistics: dict[str, Any] | None = None
+    if mapping_profile_id is not None:
+        mapping_profile = resolve_mapping_rules(
+            db,
+            mapping_profile_id,
+            protocol_id=detail.protocol_id,
+            require_published=True,
+        )
+        mapped_segments = merge_adjacent_mapped_segments(
+            map_phase_segments(detail.segments, mapping_profile, frame_count=int(video.frame_count or 0))
+        )
+        mapping_statistics = calculate_mapping_statistics(
+            detail.segments,
+            mapped_segments,
+            frame_count=int(video.frame_count or 0),
+        )
+        if not mapping_statistics["frame_conservation_passed"]:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Mapped phase export failed frame conservation.")
+        segments_payload = [
+            _mapped_segment_to_export_json(segment, video.fps)
+            for segment in mapped_segments
+        ]
+    else:
+        segments_payload = [
+            _segment_to_export_json(segment, video.fps)
+            for segment in detail.segments
+        ]
 
     payload = {
         "schema_version": PHASE_EXPORT_SCHEMA_VERSION,
         "exported_at": datetime.now(timezone.utc).isoformat(),
+        "manifest": build_mapping_export_manifest(
+            mapping_profile,
+            video_id=video.id,
+            video_display_name=video.name,
+            annotation_set=detail,
+        ),
         "video": {
             "id": video.id,
             "name": video.name,
@@ -78,18 +136,22 @@ def build_phase_json_export(db: Session, annotation_set_id: int) -> PhaseJsonExp
             "status": detail.protocol.status,
             "labels": [label.model_dump(mode="json") for label in detail.protocol.labels],
         },
-        "segments": [
-            _segment_to_export_json(segment, video.fps)
-            for segment in detail.segments
-        ],
+        "segments": segments_payload,
+        "mapping_statistics": mapping_statistics,
         "validation": validation.model_dump(mode="json"),
     }
+    filename = build_phase_export_filename(
+        video_display_name=video.name,
+        video_id=video.id,
+        mapping_profile_key=profile_key(mapping_profile) if mapping_profile is not None else None,
+        mapping_mode="profile" if mapping_profile is not None else "original",
+    )
     return PhaseJsonExportResult(
-        filename=context.json_filename,
+        filename=filename,
         payload=payload,
         headers=build_phase_export_headers(
-            context.json_filename,
-            ascii_fallback=f"video_{detail.video_id}_phases.json",
+            filename,
+            ascii_fallback=f"research-video-{detail.video_id}.json",
         ),
     )
 
@@ -276,6 +338,7 @@ def build_phase_export_headers(
     extra_headers: dict[str, str] | None = None,
 ) -> dict[str, str]:
     headers = {
+        "Content-Type": "application/json; charset=utf-8" if filename.endswith(".json") else "text/csv; charset=utf-8",
         "Content-Disposition": build_attachment_content_disposition(filename, ascii_fallback),
     }
     if extra_headers:
@@ -309,10 +372,50 @@ def _load_export_context(
         annotation_set=annotation_set,
         video=video,
         validation=validation,
-        json_filename=f"{safe_video_name}_phases.json",
+        json_filename=build_phase_export_filename(
+            video_display_name=video.name,
+            video_id=video.id,
+            mapping_profile_key=None,
+            mapping_mode="original",
+        ),
         segment_csv_filename=f"{safe_video_name}_phase_segments.csv",
         framewise_csv_filename=f"{safe_video_name}_phase_framewise.csv",
     )
+
+
+def build_phase_export_filename(
+    *,
+    video_display_name: str | None,
+    video_id: int,
+    mapping_profile_key: str | None,
+    mapping_mode: str,
+) -> str:
+    stem = _safe_phase_filename_stem(_strip_video_extension((video_display_name or "").strip()))
+    if not stem:
+        stem = f"research-video-{video_id}"
+    if mapping_mode == "profile" and mapping_profile_key:
+        profile_key_stem = _safe_phase_filename_stem(mapping_profile_key, fallback="mapping-profile")
+        stem = f"{stem}__{profile_key_stem}"
+    return f"{stem}.json"
+
+
+def _strip_video_extension(display_name: str) -> str:
+    lower_name = display_name.lower()
+    for extension in PHASE_EXPORT_VIDEO_EXTENSIONS:
+        if lower_name.endswith(extension):
+            return display_name[: -len(extension)]
+    return display_name
+
+
+def _safe_phase_filename_stem(value: str, *, fallback: str = "") -> str:
+    sanitized = re.sub(r"[\x00-\x1f\x7f]", "", value)
+    sanitized = re.sub(r'[\\/:*?"<>|]', "_", sanitized)
+    sanitized = re.sub(r"\s+", " ", sanitized)
+    sanitized = sanitized.strip(" .")
+    if sanitized.upper() in WINDOWS_RESERVED_FILENAMES:
+        sanitized = f"{sanitized}_file"
+    sanitized = sanitized[:180].rstrip(" .")
+    return sanitized or fallback
 
 
 def _segment_to_export_json(
@@ -346,6 +449,44 @@ def _segment_to_export_json(
         "source": segment.source,
         "confidence": segment.confidence,
         "notes": segment.notes,
+    }
+
+
+def _mapped_segment_to_export_json(
+    segment: Any,
+    fps: float | None,
+) -> dict[str, Any]:
+    start_time_ms = frame_to_timestamp_ms(segment.start_frame, fps)
+    end_time_ms = frame_to_timestamp_ms(segment.end_frame_exclusive, fps)
+    duration_frames = segment.end_frame_exclusive - segment.start_frame
+    duration_ms = (
+        round(duration_frames / fps * 1000)
+        if fps is not None and fps > 0
+        else None
+    )
+    return {
+        "target_id": segment.target_id,
+        "target_key": segment.target_key,
+        "target_name": segment.target_name,
+        "target_color": segment.target_color,
+        "start_frame": segment.start_frame,
+        "end_frame_exclusive": segment.end_frame_exclusive,
+        "start_time_ms": start_time_ms,
+        "end_time_ms": end_time_ms,
+        "duration_frames": duration_frames,
+        "duration_ms": duration_ms,
+        "source_segment_ids": segment.source_segment_ids,
+        "source_label_ids": segment.source_label_ids,
+        "source_label_names": segment.source_label_names,
+        "source_segments": segment.source_segments,
+        "notes": [
+            {
+                "source_segment_id": source_segment["segment_id"],
+                "note": source_segment.get("notes"),
+            }
+            for source_segment in segment.source_segments
+            if source_segment.get("notes") is not None
+        ],
     }
 
 

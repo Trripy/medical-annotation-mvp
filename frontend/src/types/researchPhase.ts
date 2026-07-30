@@ -1,4 +1,5 @@
 export type ResearchPhaseProtocolStatus = 'draft' | 'active' | 'archived'
+export type ResearchPhaseLabelMappingProfileStatus = 'draft' | 'published' | 'archived'
 export type ResearchPhaseAnnotationSetStatus = 'draft' | 'submitted' | 'reviewed' | 'locked'
 export type ResearchPhaseSegmentSource = 'manual' | 'model_suggestion' | 'model_corrected' | 'imported'
 export type ResearchPhaseMutationAction =
@@ -50,6 +51,68 @@ export type ResearchPhaseProtocolSummary = {
 
 export type ResearchPhaseProtocolDetail = ResearchPhaseProtocolSummary & {
   labels: ResearchPhaseLabel[]
+}
+
+export type ResearchPhaseLabelMappingSourceLabel = {
+  id: number
+  key: string
+  name: string
+  color: string
+  display_order: number
+}
+
+export type ResearchPhaseLabelMappingTarget = {
+  id: number
+  profile_id: number
+  key: string
+  name: string
+  color: string
+  order_index: number
+  source_labels: ResearchPhaseLabelMappingSourceLabel[]
+}
+
+export type ResearchPhaseLabelMappingProfileSummary = {
+  id: number
+  protocol_id: number
+  name: string
+  description: string | null
+  version: number
+  status: ResearchPhaseLabelMappingProfileStatus
+  created_by_id: number | null
+  created_at: string
+  updated_at: string
+  source_label_count: number
+  target_count: number
+  merged_group_count: number
+  unmapped_label_count: number
+}
+
+export type ResearchPhaseLabelMappingProfileDetail = ResearchPhaseLabelMappingProfileSummary & {
+  targets: ResearchPhaseLabelMappingTarget[]
+}
+
+export type CreateResearchPhaseLabelMappingProfileRequest = {
+  name: string
+  description?: string | null
+  version?: number
+  created_by_id?: number | null
+  initialize_identity_mapping?: boolean
+}
+
+export type MergeResearchPhaseMappingClassesRequest = {
+  source_label_ids: number[]
+  target_key: string
+  target_name: string
+  target_color: string
+}
+
+export type UnmergeResearchPhaseMappingTargetRequest = {
+  target_id: number
+}
+
+export type DuplicateResearchPhaseLabelMappingProfileRequest = {
+  name: string
+  description?: string | null
 }
 
 export type ResearchPhaseSegmentPhaseLabel = {

@@ -19,6 +19,44 @@ export type VisibleFrameRange = {
   endFrameExclusive: number
 }
 
+export type PhaseSegmentPresentation = 'full' | 'label-only' | 'compact' | 'marker-only'
+
+export type PhaseSegmentTooltip = {
+  name: string
+  startFrameOneBased: number
+  endFrameInclusiveOneBased: number
+  durationFrames: number
+  startTimeSeconds: number
+  endTimeSeconds: number
+  durationSeconds: number
+}
+
+export type FocusedVisibleRange = {
+  startFrame: number
+  endFrameExclusive: number
+  framesPerPixel: number
+}
+
+export type PhaseCoverageGap = {
+  startFrame: number
+  endFrameExclusive: number
+  durationFrames: number
+}
+
+export type NewPhaseStartResolution = {
+  startFrame: number | null
+  source: 'pending-next-frame' | 'current-frame'
+  conflict: 'none' | 'out-of-bounds' | 'occupied-start' | 'occupied-inside'
+  occupiedSegmentId: number | null
+  reason: 'ok' | 'no-next-frame' | 'next-frame-already-annotated' | 'next-frame-occupied'
+}
+
+export const MIN_VISIBLE_SEGMENT_PX = 2
+export const SHORT_SEGMENT_HIT_RADIUS_PX = 6
+export const TIMELINE_PRESENTATION_FULL_PX = 120
+export const TIMELINE_PRESENTATION_LABEL_ONLY_PX = 64
+export const TIMELINE_PRESENTATION_COMPACT_PX = 28
+
 export function clampFrame(frame: number, frameCount: number) {
   if (!Number.isFinite(frameCount) || frameCount <= 0) {
     return 0
@@ -72,8 +110,84 @@ export function calculateSegmentGeometry(
   const right = frameToPixel(Math.max(startFrame, endFrame), input)
   return {
     left,
-    width: Math.max(1, right - left),
+    width: Math.max(0, right - left),
     right,
+  }
+}
+
+export function getClippedPhaseSegmentGeometry(
+  segment: Pick<ResearchPhaseSegment, 'start_frame' | 'end_frame_exclusive'>,
+  window: VisibleFrameRange,
+): {
+  leftPercent: number
+  rightPercent: number
+  widthPercent: number
+  clippedStartFrame: number
+  clippedEndFrameExclusive: number
+  visible: boolean
+} {
+  const visibleFrameCount = window.endFrameExclusive - window.startFrame
+  const segmentEnd = segment.end_frame_exclusive ?? window.endFrameExclusive
+  const clippedStartFrame = Math.max(segment.start_frame, window.startFrame)
+  const clippedEndFrameExclusive = Math.min(segmentEnd, window.endFrameExclusive)
+  if (visibleFrameCount <= 0 || clippedEndFrameExclusive <= clippedStartFrame) {
+    return {
+      leftPercent: 0,
+      rightPercent: 0,
+      widthPercent: 0,
+      clippedStartFrame,
+      clippedEndFrameExclusive,
+      visible: false,
+    }
+  }
+  const leftPercent = ((clippedStartFrame - window.startFrame) / visibleFrameCount) * 100
+  const rightPercent = ((clippedEndFrameExclusive - window.startFrame) / visibleFrameCount) * 100
+  return {
+    leftPercent,
+    rightPercent,
+    widthPercent: rightPercent - leftPercent,
+    clippedStartFrame,
+    clippedEndFrameExclusive,
+    visible: true,
+  }
+}
+
+export function getPhaseSegmentPixelWidth(geometry: Pick<TimelineSegmentGeometry, 'width'>): number {
+  return Math.max(0, geometry.width)
+}
+
+export function getPhaseSegmentPresentation(widthPx: number): PhaseSegmentPresentation {
+  if (widthPx >= TIMELINE_PRESENTATION_FULL_PX) {
+    return 'full'
+  }
+  if (widthPx >= TIMELINE_PRESENTATION_LABEL_ONLY_PX) {
+    return 'label-only'
+  }
+  if (widthPx >= TIMELINE_PRESENTATION_COMPACT_PX) {
+    return 'compact'
+  }
+  return 'marker-only'
+}
+
+export function getPhaseSegmentTooltip(
+  segment: Pick<ResearchPhaseSegment, 'start_frame' | 'end_frame_exclusive'> & {
+    phase_label: Pick<ResearchPhaseSegment['phase_label'], 'name'>
+  },
+  frameCount: number,
+  fps: number | null | undefined,
+): PhaseSegmentTooltip {
+  const endFrameExclusive = segment.end_frame_exclusive ?? frameCount
+  const durationFrames = Math.max(0, endFrameExclusive - segment.start_frame)
+  const startTimeSeconds = fps && fps > 0 ? segment.start_frame / fps : 0
+  const endTimeSeconds = fps && fps > 0 ? endFrameExclusive / fps : 0
+  return {
+    name: segment.phase_label.name,
+    startFrameOneBased: segment.start_frame + 1,
+    endFrameInclusiveOneBased: endFrameExclusive,
+    durationFrames,
+    startTimeSeconds,
+    endTimeSeconds,
+    durationSeconds: Math.max(0, endTimeSeconds - startTimeSeconds),
   }
 }
 
@@ -88,6 +202,60 @@ export function findSegmentAtFrame(
     }
   }
   return null
+}
+
+export function hitTestPhaseSegment(
+  pointerX: number,
+  trackWidth: number,
+  visibleStartFrame: number,
+  visibleEndFrameExclusive: number,
+  segments: readonly ResearchPhaseSegment[],
+): ResearchPhaseSegment | null {
+  const visibleFrameCount = visibleEndFrameExclusive - visibleStartFrame
+  if (trackWidth <= 0 || visibleFrameCount <= 0 || !Number.isFinite(pointerX)) {
+    return null
+  }
+  const clampedX = Math.max(0, Math.min(pointerX, trackWidth))
+  const targetFrame = visibleStartFrame + (clampedX / trackWidth) * visibleFrameCount
+  const containing = segments.find((segment) => {
+    const endFrameExclusive = segment.end_frame_exclusive ?? visibleEndFrameExclusive
+    return segment.start_frame <= targetFrame && targetFrame < endFrameExclusive
+  })
+  if (containing) {
+    return containing
+  }
+
+  const candidates = segments
+    .map((segment) => {
+      const endFrameExclusive = segment.end_frame_exclusive ?? visibleEndFrameExclusive
+      const geometry = getClippedPhaseSegmentGeometry(segment, {
+        startFrame: visibleStartFrame,
+        endFrameExclusive: visibleEndFrameExclusive,
+      })
+      if (!geometry.visible) {
+        return null
+      }
+      const leftPx = (geometry.leftPercent / 100) * trackWidth
+      const rightPx = (geometry.rightPercent / 100) * trackWidth
+      const centerPx = (leftPx + rightPx) / 2
+      const distancePx = Math.abs(clampedX - centerPx)
+      if (distancePx > SHORT_SEGMENT_HIT_RADIUS_PX) {
+        return null
+      }
+      return {
+        segment,
+        distancePx,
+        durationFrames: Math.max(0, endFrameExclusive - segment.start_frame),
+      }
+    })
+    .filter((candidate): candidate is { segment: ResearchPhaseSegment; distancePx: number; durationFrames: number } => Boolean(candidate))
+    .sort((left, right) =>
+      left.distancePx - right.distancePx ||
+      left.durationFrames - right.durationFrames ||
+      left.segment.start_frame - right.segment.start_frame ||
+      left.segment.id - right.segment.id,
+    )
+  return candidates[0]?.segment ?? null
 }
 
 export function calculateVisibleFrameRange(
@@ -112,5 +280,156 @@ export function calculateVisibleFrameRange(
   return {
     startFrame,
     endFrameExclusive,
+  }
+}
+
+export function getFocusedVisibleRange(options: {
+  segment: Pick<ResearchPhaseSegment, 'start_frame' | 'end_frame_exclusive'>
+  frameCount: number
+  fps: number | null | undefined
+  viewportWidth: number
+}): FocusedVisibleRange {
+  const frameCount = Math.max(0, Math.trunc(options.frameCount))
+  const viewportWidth = Math.max(1, Math.trunc(options.viewportWidth))
+  if (frameCount <= 0) {
+    return { startFrame: 0, endFrameExclusive: 0, framesPerPixel: DEFAULT_FRAMES_PER_PIXEL }
+  }
+  const segmentEnd = clampFrame(options.segment.end_frame_exclusive ?? frameCount, frameCount)
+  const segmentStart = clampFrame(options.segment.start_frame, frameCount)
+  const segmentLength = Math.max(1, segmentEnd - segmentStart)
+  const fpsMinimum = options.fps && options.fps > 0 ? Math.ceil(options.fps * 5) : 0
+  const minimumWindowFrames = Math.min(frameCount, Math.max(fpsMinimum, 100))
+  const desiredWindowFrames = Math.min(frameCount, Math.max(minimumWindowFrames, segmentLength * 4))
+  const center = segmentStart + (segmentLength / 2)
+  let startFrame = Math.round(center - (desiredWindowFrames / 2))
+  startFrame = Math.max(0, Math.min(startFrame, Math.max(0, frameCount - desiredWindowFrames)))
+  const endFrameExclusive = Math.min(frameCount, startFrame + desiredWindowFrames)
+  return {
+    startFrame,
+    endFrameExclusive,
+    framesPerPixel: normalizeFramesPerPixel((endFrameExclusive - startFrame) / viewportWidth),
+  }
+}
+
+export function getTimelinePlayheadPercent(
+  currentFrame: number,
+  visibleStartFrame: number,
+  visibleEndFrameExclusive: number,
+): number {
+  const visibleFrameCount = visibleEndFrameExclusive - visibleStartFrame
+  if (visibleFrameCount <= 0 || !Number.isFinite(currentFrame)) {
+    return 0
+  }
+  return Math.max(0, Math.min(100, ((currentFrame - visibleStartFrame) / visibleFrameCount) * 100))
+}
+
+export function toUiStartFrame(startFrame: number): number {
+  return startFrame + 1
+}
+
+export function toUiEndFrameInclusive(endFrameExclusive: number | null | undefined, frameCount: number): number {
+  return endFrameExclusive ?? frameCount
+}
+
+export function toApiStartFrame(uiStartFrame: number): number {
+  return Math.max(0, uiStartFrame - 1)
+}
+
+export function toApiEndFrameExclusive(uiEndFrameInclusive: number): number {
+  return Math.max(0, uiEndFrameInclusive)
+}
+
+export function getSegmentFrameCount(segment: Pick<ResearchPhaseSegment, 'start_frame' | 'end_frame_exclusive'>, frameCount: number): number {
+  return Math.max(0, (segment.end_frame_exclusive ?? frameCount) - segment.start_frame)
+}
+
+export function segmentsOverlap(
+  left: Pick<ResearchPhaseSegment, 'start_frame' | 'end_frame_exclusive'>,
+  right: Pick<ResearchPhaseSegment, 'start_frame' | 'end_frame_exclusive'>,
+  frameCount = Number.POSITIVE_INFINITY,
+): boolean {
+  const leftEnd = left.end_frame_exclusive ?? frameCount
+  const rightEnd = right.end_frame_exclusive ?? frameCount
+  return left.start_frame < rightEnd && right.start_frame < leftEnd
+}
+
+export function segmentsAreAdjacent(
+  left: Pick<ResearchPhaseSegment, 'start_frame' | 'end_frame_exclusive'>,
+  right: Pick<ResearchPhaseSegment, 'start_frame' | 'end_frame_exclusive'>,
+): boolean {
+  return left.end_frame_exclusive !== null && left.end_frame_exclusive !== undefined && left.end_frame_exclusive === right.start_frame
+}
+
+export function getVisiblePhaseCoverageGaps(
+  window: VisibleFrameRange,
+  segments: readonly Pick<ResearchPhaseSegment, 'start_frame' | 'end_frame_exclusive'>[],
+): PhaseCoverageGap[] {
+  if (window.endFrameExclusive <= window.startFrame) {
+    return []
+  }
+  const clippedIntervals = segments
+    .map((segment) => ({
+      startFrame: Math.max(window.startFrame, segment.start_frame),
+      endFrameExclusive: Math.min(window.endFrameExclusive, segment.end_frame_exclusive ?? window.endFrameExclusive),
+    }))
+    .filter((interval) => interval.endFrameExclusive > interval.startFrame)
+    .sort((left, right) => left.startFrame - right.startFrame || left.endFrameExclusive - right.endFrameExclusive)
+
+  const gaps: PhaseCoverageGap[] = []
+  let cursor = window.startFrame
+  for (const interval of clippedIntervals) {
+    if (interval.startFrame > cursor) {
+      gaps.push({
+        startFrame: cursor,
+        endFrameExclusive: interval.startFrame,
+        durationFrames: interval.startFrame - cursor,
+      })
+    }
+    cursor = Math.max(cursor, interval.endFrameExclusive)
+  }
+  if (cursor < window.endFrameExclusive) {
+    gaps.push({
+      startFrame: cursor,
+      endFrameExclusive: window.endFrameExclusive,
+      durationFrames: window.endFrameExclusive - cursor,
+    })
+  }
+  return gaps
+}
+
+export function resolveNewPhaseStartFrame(options: {
+  currentFrame: number
+  pendingNextStartFrame: number | null
+  existingSegments: readonly ResearchPhaseSegment[]
+  videoFrameCount: number
+}): NewPhaseStartResolution {
+  const hasPending = options.pendingNextStartFrame !== null && Number.isFinite(options.pendingNextStartFrame)
+  const requestedFrame = hasPending ? Number(options.pendingNextStartFrame) : options.currentFrame
+  const source = hasPending ? 'pending-next-frame' : 'current-frame'
+  if (requestedFrame < 0 || requestedFrame >= options.videoFrameCount) {
+    return {
+      startFrame: null,
+      source,
+      conflict: 'out-of-bounds',
+      occupiedSegmentId: null,
+      reason: 'no-next-frame',
+    }
+  }
+  const occupiedSegment = findSegmentAtFrame(options.existingSegments, requestedFrame)
+  if (occupiedSegment) {
+    return {
+      startFrame: null,
+      source,
+      conflict: occupiedSegment.start_frame === requestedFrame ? 'occupied-start' : 'occupied-inside',
+      occupiedSegmentId: occupiedSegment.id,
+      reason: occupiedSegment.start_frame === requestedFrame ? 'next-frame-already-annotated' : 'next-frame-occupied',
+    }
+  }
+  return {
+    startFrame: requestedFrame,
+    source,
+    conflict: 'none',
+    occupiedSegmentId: null,
+    reason: 'ok',
   }
 }

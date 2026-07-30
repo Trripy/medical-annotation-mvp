@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import { createPinia, setActivePinia } from 'pinia'
@@ -336,6 +337,7 @@ test('frame-wise export keeps revision/status unchanged and revokes object URLs'
     assert.equal(store.currentAnnotationSet?.revision, 6)
     assert.equal(store.currentAnnotationSet?.status, 'draft')
     assert.deepEqual(clickedDownloads, ['中文_phase_framewise.csv'])
+    await new Promise((resolve) => setTimeout(resolve, 0))
     assert.deepEqual(revokedUrls, createdUrls)
   } finally {
     Object.assign(globalThis, {
@@ -344,4 +346,69 @@ test('frame-wise export keeps revision/status unchanged and revokes object URLs'
     URL.createObjectURL = originalCreateObjectUrl
     URL.revokeObjectURL = originalRevokeObjectUrl
   }
+})
+
+test('json export uses caller fallback filename when content disposition is unavailable', async () => {
+  const store = useFreshStore()
+  store.applyAnnotationSet(createAnnotationSet(6, 'submitted'))
+  globalThis.fetch = async () => blobResponse('{}', {})
+
+  const clickedDownloads: string[] = []
+  const originalDocument = globalThis.document
+  const originalCreateObjectUrl = URL.createObjectURL
+  const originalRevokeObjectUrl = URL.revokeObjectURL
+
+  Object.assign(globalThis, {
+    document: {
+      body: {
+        appendChild() {},
+      },
+      createElement() {
+        return {
+          href: '',
+          download: '',
+          click() {
+            clickedDownloads.push(this.download)
+          },
+          remove() {},
+        }
+      },
+    },
+  })
+  URL.createObjectURL = () => 'blob:phase-json'
+  URL.revokeObjectURL = () => {}
+
+  try {
+    const result = await store.downloadJson({
+      fallbackFilename: '前后联合 张燕平 男 76_cleaned_trimmed.json',
+    })
+
+    assert.equal(result.ok, true)
+    assert.deepEqual(clickedDownloads, ['前后联合 张燕平 男 76_cleaned_trimmed.json'])
+    assert.notDeepEqual(clickedDownloads, ['research-video-9.json'])
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  } finally {
+    Object.assign(globalThis, {
+      document: originalDocument,
+    })
+    URL.createObjectURL = originalCreateObjectUrl
+    URL.revokeObjectURL = originalRevokeObjectUrl
+  }
+})
+
+test('phase note editor keeps note edits local and isolates keyboard shortcuts', () => {
+  const inspector = readFileSync(new URL('../src/components/research/PhaseSegmentInspector.vue', import.meta.url), 'utf8')
+  const phasePage = readFileSync(new URL('../src/views/ResearchVideoPhasePage.vue', import.meta.url), 'utf8')
+
+  assert.match(inspector, /notesDirty/)
+  assert.match(inspector, /@keydown\.stop/)
+  assert.match(inspector, /@compositionstart="onNotesCompositionStart"/)
+  assert.match(inspector, /:disabled="readOnly"/)
+  const textareaMatch = inspector.match(/<textarea[\s\S]*?<\/textarea>/)
+  assert.ok(textareaMatch)
+  assert.doesNotMatch(textareaMatch[0], /readOnly \|\| saving/)
+  assert.match(phasePage, /event\.isComposing/)
+  assert.match(phasePage, /event\.keyCode === 229/)
+  assert.match(phasePage, /isEditableEventTarget/)
+  assert.match(phasePage, /validate: !isNotesOnlyPatch/)
 })

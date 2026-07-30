@@ -6,6 +6,9 @@ from app.models.project import Project
 from app.models.research_phase import (
     ResearchPhaseAnnotationSet,
     ResearchPhaseLabel,
+    ResearchPhaseLabelMappingProfile,
+    ResearchPhaseLabelMappingRule,
+    ResearchPhaseLabelMappingTarget,
     ResearchPhaseProtocol,
     ResearchPhaseSegment,
 )
@@ -30,6 +33,9 @@ __all__ = [
     "Project",
     "ResearchPhaseProtocol",
     "ResearchPhaseLabel",
+    "ResearchPhaseLabelMappingProfile",
+    "ResearchPhaseLabelMappingTarget",
+    "ResearchPhaseLabelMappingRule",
     "ResearchPhaseAnnotationSet",
     "ResearchPhaseSegment",
     "ResearchSkillRubric",

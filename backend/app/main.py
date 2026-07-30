@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 
 from app.api.routes import api_router
-from app.api.v1 import datasets, images, jobs, projects, research, sam2, tasks, users
+from app.api.v1 import datasets, images, jobs, projects, research, research_server_video_import, sam2, tasks, users
 from app.core.config import settings
 from app.core.upload_limits import MAX_JOB_UPLOAD_FILES, MAX_MULTIPART_FORM_FIELDS
 from app.services.sam2_service import get_sam2_service
@@ -53,6 +53,7 @@ app.add_middleware(
     allow_credentials="*" not in settings.cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "X-Phase-Validation-Errors", "X-Phase-Validation-Warnings"],
 )
 
 
@@ -77,6 +78,7 @@ app.include_router(images.router, prefix="/api", tags=["images"])
 app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
 app.include_router(research.router, prefix="/api/research", tags=["research"])
+app.include_router(research_server_video_import.router, prefix="/api/research", tags=["research-server-video-import"])
 app.include_router(sam2.router, prefix="/api/sam2", tags=["sam2"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(users.router, prefix="/api/users", tags=["users"])

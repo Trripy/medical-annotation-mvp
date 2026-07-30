@@ -13,7 +13,8 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.main import app as main_app
 from app.models import ResearchPhaseAnnotationSet, ResearchPhaseLabel, ResearchPhaseSegment, ResearchVideo, User
-from app.services.download_filenames import build_attachment_content_disposition, sanitize_filename
+from app.services.download_filenames import build_attachment_content_disposition
+from app.services.research_phase_export_service import build_phase_export_filename
 from tests._asgi_test_utils import asgi_request
 from tests._research_phase_test_utils import create_phase_session_factory, seed_phase_data
 
@@ -620,16 +621,34 @@ def test_export_phase_annotation_set_json_endpoint_returns_utf8_json(phase_api_c
         f"/api/research/phase-annotation-sets/{seeded.set_reader_id}/export/json",
     )
 
-    expected_filename = f"{sanitize_filename('张玉柱 手术', fallback=f'video_{seeded.video_id}')}_phases.json"
+    expected_filename = build_phase_export_filename(
+        video_display_name="张玉柱 手术",
+        video_id=seeded.video_id,
+        mapping_profile_key=None,
+        mapping_mode="original",
+    )
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/json")
     assert response.headers["content-disposition"] == build_attachment_content_disposition(
         expected_filename,
-        f"video_{seeded.video_id}_phases.json",
+        f"research-video-{seeded.video_id}.json",
     )
     assert "file_path" not in response.text
     assert "thumbnail_path" not in response.text
     assert "张玉柱 手术" in response.text
+
+
+def test_cors_exposes_phase_export_filename_headers() -> None:
+    cors_middleware = next(
+        (middleware for middleware in main_app.user_middleware if middleware.cls.__name__ == "CORSMiddleware"),
+        None,
+    )
+
+    assert cors_middleware is not None
+    exposed_headers = {header.lower() for header in cors_middleware.kwargs["expose_headers"]}
+    assert "content-disposition" in exposed_headers
+    assert "x-phase-validation-errors" in exposed_headers
+    assert "x-phase-validation-warnings" in exposed_headers
 
 
 def test_export_phase_annotation_set_segments_csv_endpoint_returns_bom(phase_api_context) -> None:

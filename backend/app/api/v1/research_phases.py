@@ -10,9 +10,14 @@ from app.schemas.research_phase import (
     CreateResearchPhaseAnnotationSetRequest,
     CreateResearchPhaseAnnotationSetResponse,
     CreateResearchPhaseSegmentRequest,
+    CreateResearchPhaseLabelMappingProfileRequest,
+    DuplicateResearchPhaseLabelMappingProfileRequest,
+    MergeResearchPhaseMappingClassesRequest,
     MergeResearchPhaseSegmentsRequest,
     ReopenResearchPhaseAnnotationSetRequest,
     ResearchPhaseAnnotationSetDetail,
+    ResearchPhaseLabelMappingProfileDetail,
+    ResearchPhaseLabelMappingProfileSummary,
     ResearchPhaseAnnotationSetSummary,
     ResearchPhaseMutationResponse,
     ResearchPhaseProtocolDetail,
@@ -22,7 +27,20 @@ from app.schemas.research_phase import (
     SplitResearchPhaseSegmentRequest,
     SubmitResearchPhaseAnnotationSetRequest,
     TransitionResearchPhaseRequest,
+    UnmergeResearchPhaseMappingTargetRequest,
+    UpdateResearchPhaseLabelMappingProfileRequest,
     UpdateResearchPhaseSegmentRequest,
+)
+from app.services.phase_label_mapping import (
+    archive_mapping_profile,
+    create_mapping_profile,
+    duplicate_mapping_profile,
+    get_mapping_profile,
+    list_mapping_profiles,
+    merge_mapping_classes,
+    publish_mapping_profile,
+    unmerge_mapping_target,
+    update_mapping_profile,
 )
 from app.services.research_phase_export_service import (
     build_phase_json_export,
@@ -133,14 +151,120 @@ async def reopen_phase_annotation_set_route(
 @router.get("/phase-annotation-sets/{annotation_set_id}/export/json")
 async def export_phase_annotation_set_json(
     annotation_set_id: int,
+    mapping_profile_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> Response:
-    export_result = build_phase_json_export(db, annotation_set_id)
+    export_result = build_phase_json_export(db, annotation_set_id, mapping_profile_id=mapping_profile_id)
     return Response(
         content=serialize_phase_json_export(export_result.payload),
-        media_type="application/json",
+        media_type="application/json; charset=utf-8",
         headers=export_result.headers,
     )
+
+
+@router.get(
+    "/phase-protocols/{protocol_id}/label-mapping-profiles",
+    response_model=list[ResearchPhaseLabelMappingProfileSummary],
+)
+async def list_phase_label_mapping_profiles(
+    protocol_id: int,
+    include_archived: bool = Query(default=False),
+    db: Session = Depends(get_db),
+) -> list[ResearchPhaseLabelMappingProfileSummary]:
+    return list_mapping_profiles(db, protocol_id, include_archived=include_archived)
+
+
+@router.post(
+    "/phase-protocols/{protocol_id}/label-mapping-profiles",
+    response_model=ResearchPhaseLabelMappingProfileDetail,
+)
+async def create_phase_label_mapping_profile(
+    protocol_id: int,
+    payload: CreateResearchPhaseLabelMappingProfileRequest,
+    db: Session = Depends(get_db),
+) -> ResearchPhaseLabelMappingProfileDetail:
+    return create_mapping_profile(db, protocol_id, payload)
+
+
+@router.get(
+    "/phase-label-mapping-profiles/{profile_id}",
+    response_model=ResearchPhaseLabelMappingProfileDetail,
+)
+async def read_phase_label_mapping_profile(
+    profile_id: int,
+    db: Session = Depends(get_db),
+) -> ResearchPhaseLabelMappingProfileDetail:
+    return get_mapping_profile(db, profile_id)
+
+
+@router.patch(
+    "/phase-label-mapping-profiles/{profile_id}",
+    response_model=ResearchPhaseLabelMappingProfileDetail,
+)
+async def update_phase_label_mapping_profile(
+    profile_id: int,
+    payload: UpdateResearchPhaseLabelMappingProfileRequest,
+    db: Session = Depends(get_db),
+) -> ResearchPhaseLabelMappingProfileDetail:
+    return update_mapping_profile(db, profile_id, payload)
+
+
+@router.post(
+    "/phase-label-mapping-profiles/{profile_id}/merge-classes",
+    response_model=ResearchPhaseLabelMappingProfileDetail,
+)
+async def merge_phase_label_mapping_classes(
+    profile_id: int,
+    payload: MergeResearchPhaseMappingClassesRequest,
+    db: Session = Depends(get_db),
+) -> ResearchPhaseLabelMappingProfileDetail:
+    return merge_mapping_classes(db, profile_id, payload)
+
+
+@router.post(
+    "/phase-label-mapping-profiles/{profile_id}/unmerge-target",
+    response_model=ResearchPhaseLabelMappingProfileDetail,
+)
+async def unmerge_phase_label_mapping_target(
+    profile_id: int,
+    payload: UnmergeResearchPhaseMappingTargetRequest,
+    db: Session = Depends(get_db),
+) -> ResearchPhaseLabelMappingProfileDetail:
+    return unmerge_mapping_target(db, profile_id, payload)
+
+
+@router.post(
+    "/phase-label-mapping-profiles/{profile_id}/publish",
+    response_model=ResearchPhaseLabelMappingProfileDetail,
+)
+async def publish_phase_label_mapping_profile(
+    profile_id: int,
+    db: Session = Depends(get_db),
+) -> ResearchPhaseLabelMappingProfileDetail:
+    return publish_mapping_profile(db, profile_id)
+
+
+@router.post(
+    "/phase-label-mapping-profiles/{profile_id}/duplicate",
+    response_model=ResearchPhaseLabelMappingProfileDetail,
+)
+async def duplicate_phase_label_mapping_profile(
+    profile_id: int,
+    payload: DuplicateResearchPhaseLabelMappingProfileRequest,
+    db: Session = Depends(get_db),
+) -> ResearchPhaseLabelMappingProfileDetail:
+    return duplicate_mapping_profile(db, profile_id, payload)
+
+
+@router.post(
+    "/phase-label-mapping-profiles/{profile_id}/archive",
+    response_model=ResearchPhaseLabelMappingProfileDetail,
+)
+async def archive_phase_label_mapping_profile(
+    profile_id: int,
+    db: Session = Depends(get_db),
+) -> ResearchPhaseLabelMappingProfileDetail:
+    return archive_mapping_profile(db, profile_id)
 
 
 @router.get("/phase-annotation-sets/{annotation_set_id}/export/segments")

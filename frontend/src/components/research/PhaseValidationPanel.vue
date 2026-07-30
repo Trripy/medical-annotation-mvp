@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import type {
@@ -8,6 +8,7 @@ import type {
   ResearchPhaseValidationResponse,
 } from '../../types/researchPhase'
 import { formatPercent, translatePhaseValidationIssue, translateStatus, type SupportedLocale } from '../../utils/locale'
+import { summarizePhaseValidation } from '../../utils/researchWorkflowUi.ts'
 
 const props = defineProps<{
   currentStatus: ResearchPhaseAnnotationSetStatus | null
@@ -16,6 +17,8 @@ const props = defineProps<{
 
 const { locale, t } = useI18n()
 const currentLocale = computed(() => locale.value as SupportedLocale)
+const showDetails = ref(true)
+const summary = computed(() => summarizePhaseValidation(props.validation))
 
 const emit = defineEmits<{
   goToIssue: [issue: ResearchPhaseValidationIssue]
@@ -51,28 +54,35 @@ function formatFrameRange(issue: ResearchPhaseValidationIssue) {
     <template v-if="validation">
       <div class="phase-validation-summary-grid">
         <article>
-          <strong>{{ validation.issue_counts.error }}</strong>
+          <strong>{{ summary.errors }}</strong>
           <span>{{ t('phaseAnnotation.errors') }}</span>
         </article>
         <article>
-          <strong>{{ validation.issue_counts.warning }}</strong>
+          <strong>{{ summary.warnings }}</strong>
           <span>{{ t('phaseAnnotation.warnings') }}</span>
         </article>
         <article>
-          <strong>{{ formatPercent(validation.closed_coverage_percent, currentLocale) }}</strong>
+          <strong>{{ formatPercent(summary.coveragePercent, currentLocale) }}</strong>
           <span>{{ t('phaseAnnotation.coverage') }}</span>
         </article>
         <article>
-          <strong>{{ validation.closed_segment_count }}</strong>
+          <strong>{{ summary.closedSegments }}</strong>
           <span>{{ t('phaseAnnotation.closed') }}</span>
         </article>
         <article>
-          <strong>{{ validation.open_segment_count }}</strong>
+          <strong>{{ summary.openSegments }}</strong>
           <span>{{ t('phaseAnnotation.open') }}</span>
         </article>
       </div>
 
-      <ul class="phase-validation-issues">
+      <div class="phase-validation-detail-toggle">
+        <button type="button" :disabled="validation.issues.length === 0" @click="showDetails = !showDetails">
+          {{ showDetails ? t('frameAnnotation.collapse') : t('frameAnnotation.expand') }}
+          {{ validation.issues.length }}
+        </button>
+      </div>
+
+      <ul v-if="showDetails" class="phase-validation-issues">
         <li v-for="issue in validation.issues" :key="`${issue.issue_type}-${issue.segment_id}-${issue.related_segment_id}-${issue.frame_start}`">
           <div class="phase-validation-issue-main">
             <span class="phase-validation-severity" :class="`is-${issue.severity}`">{{ translateStatus(issue.severity, t) }}</span>
@@ -179,11 +189,11 @@ function formatFrameRange(issue: ResearchPhaseValidationIssue) {
 .phase-validation-issues {
   display: flex;
   flex-direction: column;
-  gap: 0.7rem;
+  gap: 0.45rem;
   margin: 0;
   padding: 0;
   list-style: none;
-  max-height: 420px;
+  max-height: 260px;
   overflow: auto;
 }
 
@@ -191,8 +201,8 @@ function formatFrameRange(issue: ResearchPhaseValidationIssue) {
   display: flex;
   justify-content: space-between;
   gap: 0.75rem;
-  padding: 0.85rem;
-  border-radius: 0.85rem;
+  padding: 0.62rem;
+  border-radius: 0.65rem;
   background: rgba(15, 23, 42, 0.56);
 }
 
@@ -238,10 +248,23 @@ function formatFrameRange(issue: ResearchPhaseValidationIssue) {
 }
 
 .phase-validation-issue-actions button {
-  padding: 0.55rem 0.8rem;
-  border-radius: 0.75rem;
+  padding: 0.42rem 0.62rem;
+  border-radius: 0.55rem;
   border: 1px solid rgba(148, 163, 184, 0.22);
   background: rgba(30, 41, 59, 0.82);
+  color: #e2e8f0;
+}
+
+.phase-validation-detail-toggle {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.phase-validation-detail-toggle button {
+  padding: 0.42rem 0.68rem;
+  border-radius: 0.55rem;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(30, 41, 59, 0.78);
   color: #e2e8f0;
 }
 

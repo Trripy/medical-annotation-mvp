@@ -4,13 +4,18 @@ import { apiUrl } from '../utils/api.ts'
 import { downloadBlobWithFilename, parseContentDispositionFilename } from '../utils/download.ts'
 import type {
   CloseActivePhaseSegmentRequest,
+  CreateResearchPhaseLabelMappingProfileRequest,
   CreateResearchPhaseAnnotationSetRequest,
   CreateResearchPhaseAnnotationSetResponse,
   CreateResearchPhaseSegmentRequest,
+  DuplicateResearchPhaseLabelMappingProfileRequest,
+  MergeResearchPhaseMappingClassesRequest,
   MergePhaseSegmentsRequest,
   ReopenPhaseAnnotationSetRequest,
   ResearchPhaseAnnotationSetDetail,
   ResearchPhaseAnnotationSetStatus,
+  ResearchPhaseLabelMappingProfileDetail,
+  ResearchPhaseLabelMappingProfileSummary,
   ResearchPhaseAnnotationSetSummary,
   ResearchPhaseConflictDetail,
   ResearchPhaseMutationResponse,
@@ -22,6 +27,7 @@ import type {
   SplitPhaseSegmentRequest,
   SubmitPhaseAnnotationSetRequest,
   TransitionResearchPhaseRequest,
+  UnmergeResearchPhaseMappingTargetRequest,
   UpdateResearchPhaseSegmentRequest,
 } from '../types/researchPhase.ts'
 
@@ -214,6 +220,9 @@ export const useResearchPhasesStore = defineStore('researchPhases', {
     selectedProtocolId: null as number | null,
     annotationSets: [] as ResearchPhaseAnnotationSetSummary[],
     currentAnnotationSet: null as ResearchPhaseAnnotationSetDetail | null,
+    mappingProfiles: [] as ResearchPhaseLabelMappingProfileSummary[],
+    mappingProfileDetails: {} as Record<number, ResearchPhaseLabelMappingProfileDetail>,
+    loadingMappingProfiles: false,
     segments: [] as ResearchPhaseAnnotationSetDetail['segments'],
     validation: null as ResearchPhaseValidationResponse | null,
     loadingProtocols: false,
@@ -240,6 +249,9 @@ export const useResearchPhasesStore = defineStore('researchPhases', {
       this.sessionToken += 1
       this.annotationSets = []
       this.currentAnnotationSet = null
+      this.mappingProfiles = []
+      this.mappingProfileDetails = {}
+      this.loadingMappingProfiles = false
       this.segments = []
       this.validation = null
       this.selectedProtocolId = null
@@ -252,6 +264,9 @@ export const useResearchPhasesStore = defineStore('researchPhases', {
       this.sessionToken += 1
       this.annotationSets = []
       this.currentAnnotationSet = null
+      this.mappingProfiles = []
+      this.mappingProfileDetails = {}
+      this.loadingMappingProfiles = false
       this.segments = []
       this.validation = null
       this.selectedProtocolId = null
@@ -664,13 +679,127 @@ export const useResearchPhasesStore = defineStore('researchPhases', {
       this.setSaveState('saved')
       return result
     },
-    async downloadExport(kind: PhaseExportKind) {
+    async fetchMappingProfiles(protocolId: number, includeArchived = false) {
+      this.loadingMappingProfiles = true
+      const query = includeArchived ? '?include_archived=true' : ''
+      const result = await requestJson<ResearchPhaseLabelMappingProfileSummary[]>(
+        `/api/research/phase-protocols/${protocolId}/label-mapping-profiles${query}`,
+      )
+      this.loadingMappingProfiles = false
+      if (!result.ok) {
+        return this.handleActionError(result.error, { markSaving: false })
+      }
+      this.mappingProfiles = result.data
+      return result
+    },
+    async fetchMappingProfile(profileId: number) {
+      const result = await requestJson<ResearchPhaseLabelMappingProfileDetail>(
+        `/api/research/phase-label-mapping-profiles/${profileId}`,
+      )
+      if (!result.ok) {
+        return this.handleActionError(result.error, { markSaving: false })
+      }
+      this.mappingProfileDetails[profileId] = result.data
+      return result
+    },
+    async createMappingProfile(protocolId: number, payload: CreateResearchPhaseLabelMappingProfileRequest) {
+      const result = await requestJson<ResearchPhaseLabelMappingProfileDetail>(
+        `/api/research/phase-protocols/${protocolId}/label-mapping-profiles`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+      )
+      if (!result.ok) {
+        return this.handleActionError(result.error, { markSaving: false })
+      }
+      this.mappingProfileDetails[result.data.id] = result.data
+      await this.fetchMappingProfiles(protocolId, true)
+      return result
+    },
+    async mergeMappingClasses(profileId: number, payload: MergeResearchPhaseMappingClassesRequest) {
+      const result = await requestJson<ResearchPhaseLabelMappingProfileDetail>(
+        `/api/research/phase-label-mapping-profiles/${profileId}/merge-classes`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+      )
+      if (!result.ok) {
+        return this.handleActionError(result.error, { markSaving: false })
+      }
+      this.mappingProfileDetails[profileId] = result.data
+      await this.fetchMappingProfiles(result.data.protocol_id, true)
+      return result
+    },
+    async unmergeMappingTarget(profileId: number, payload: UnmergeResearchPhaseMappingTargetRequest) {
+      const result = await requestJson<ResearchPhaseLabelMappingProfileDetail>(
+        `/api/research/phase-label-mapping-profiles/${profileId}/unmerge-target`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+      )
+      if (!result.ok) {
+        return this.handleActionError(result.error, { markSaving: false })
+      }
+      this.mappingProfileDetails[profileId] = result.data
+      await this.fetchMappingProfiles(result.data.protocol_id, true)
+      return result
+    },
+    async publishMappingProfile(profileId: number) {
+      const result = await requestJson<ResearchPhaseLabelMappingProfileDetail>(
+        `/api/research/phase-label-mapping-profiles/${profileId}/publish`,
+        { method: 'POST' },
+      )
+      if (!result.ok) {
+        return this.handleActionError(result.error, { markSaving: false })
+      }
+      this.mappingProfileDetails[profileId] = result.data
+      await this.fetchMappingProfiles(result.data.protocol_id, true)
+      return result
+    },
+    async duplicateMappingProfile(profileId: number, payload: DuplicateResearchPhaseLabelMappingProfileRequest) {
+      const result = await requestJson<ResearchPhaseLabelMappingProfileDetail>(
+        `/api/research/phase-label-mapping-profiles/${profileId}/duplicate`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+      )
+      if (!result.ok) {
+        return this.handleActionError(result.error, { markSaving: false })
+      }
+      this.mappingProfileDetails[result.data.id] = result.data
+      await this.fetchMappingProfiles(result.data.protocol_id, true)
+      return result
+    },
+    async archiveMappingProfile(profileId: number) {
+      const result = await requestJson<ResearchPhaseLabelMappingProfileDetail>(
+        `/api/research/phase-label-mapping-profiles/${profileId}/archive`,
+        { method: 'POST' },
+      )
+      if (!result.ok) {
+        return this.handleActionError(result.error, { markSaving: false })
+      }
+      this.mappingProfileDetails[profileId] = result.data
+      await this.fetchMappingProfiles(result.data.protocol_id, true)
+      return result
+    },
+    async downloadExport(kind: PhaseExportKind, options: { mappingProfileId?: number | null, fallbackFilename?: string | null } = {}) {
       const current = this.requireCurrentAnnotationSet()
       if (!current.ok) {
         return this.handleActionError(current.error, { markSaving: false })
       }
+      const mappingQuery = kind === 'json' && options.mappingProfileId
+        ? `?mapping_profile_id=${encodeURIComponent(String(options.mappingProfileId))}`
+        : ''
       const pathByKind: Record<PhaseExportKind, string> = {
-        json: `/api/research/phase-annotation-sets/${current.data.id}/export/json`,
+        json: `/api/research/phase-annotation-sets/${current.data.id}/export/json${mappingQuery}`,
         segments: `/api/research/phase-annotation-sets/${current.data.id}/export/segments`,
         framewise: `/api/research/phase-annotation-sets/${current.data.id}/export/framewise`,
       }
@@ -683,7 +812,8 @@ export const useResearchPhasesStore = defineStore('researchPhases', {
         return this.handleActionError(result.error, { markSaving: false })
       }
       const filename = parseContentDispositionFilename(result.data.headers.get('Content-Disposition'))
-        ?? `phase-export-${current.data.id}.${kind === 'json' ? 'json' : 'csv'}`
+        ?? options.fallbackFilename
+        ?? `research-video-${current.data.video_id}.${kind === 'json' ? 'json' : 'csv'}`
       downloadBlobWithFilename({
         blob: result.data.blob,
         filename,
@@ -697,8 +827,8 @@ export const useResearchPhasesStore = defineStore('researchPhases', {
         },
       } as const
     },
-    async downloadJson() {
-      return this.downloadExport('json')
+    async downloadJson(options: { mappingProfileId?: number | null, fallbackFilename?: string | null } = {}) {
+      return this.downloadExport('json', options)
     },
     async downloadSegmentCsv() {
       return this.downloadExport('segments')

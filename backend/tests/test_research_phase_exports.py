@@ -9,6 +9,7 @@ from sqlalchemy import select
 from app.models import ResearchPhaseAnnotationSet, ResearchPhaseSegment, ResearchVideo, User
 from app.services.download_filenames import build_attachment_content_disposition, sanitize_filename
 from app.services.research_phase_export_service import (
+    build_phase_export_filename,
     build_phase_json_export,
     iter_phase_framewise_csv,
     iter_phase_segment_csv,
@@ -125,7 +126,9 @@ def test_build_phase_json_export_returns_expected_structure_without_paths(phase_
 
     payload = export_result.payload
     json_text = serialize_phase_json_export(payload).decode("utf-8")
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
+    assert payload["manifest"]["mapping_mode"] == "original"
+    assert payload["manifest"]["video_display_name"] == "张玉柱 手术"
     assert payload["video"]["id"] == seeded.video_id
     assert payload["annotation_set"]["id"] == seeded.set_reader_id
     assert payload["protocol"]["labels"][0]["key"] == "idle"
@@ -138,11 +141,16 @@ def test_build_phase_json_export_returns_expected_structure_without_paths(phase_
     assert "\\u5f20" not in json_text
     assert "file_path" not in json_text
     assert "thumbnail_path" not in json_text
-    expected_filename = f"{sanitize_filename('张玉柱 手术', fallback=f'video_{seeded.video_id}')}_phases.json"
+    expected_filename = build_phase_export_filename(
+        video_display_name="张玉柱 手术",
+        video_id=seeded.video_id,
+        mapping_profile_key=None,
+        mapping_mode="original",
+    )
     assert export_result.filename == expected_filename
     assert export_result.headers["Content-Disposition"] == build_attachment_content_disposition(
         expected_filename,
-        f"video_{seeded.video_id}_phases.json",
+        f"research-video-{seeded.video_id}.json",
     )
 
 
@@ -201,6 +209,26 @@ def test_segment_csv_export_uses_expected_columns_and_escapes_notes(phase_export
     assert rows[1][23] == 'line1,"quoted"\nline2,comma'
     assert rows[2][13:17] == ["viscoelastic", "Viscoelastic Injection", "10", ""]
     assert rows[2][18:21] == ["", "", ""]
+
+
+def test_phase_json_export_includes_segment_notes(phase_export_context) -> None:
+    session_factory, seeded = phase_export_context
+    annotation_set_id = create_annotation_set(session_factory, seeded, username="json_notes")
+    add_segment(
+        session_factory,
+        annotation_set_id=annotation_set_id,
+        phase_label_id=seeded.active_default_label_ids["incision"],
+        start_frame=0,
+        end_frame_exclusive=10,
+        notes="中文备注\n第二行",
+    )
+
+    with session_factory() as db:
+        export_result = build_phase_json_export(db, annotation_set_id)
+
+    assert export_result.payload["segments"][0]["notes"] == "中文备注\n第二行"
+    json_text = serialize_phase_json_export(export_result.payload).decode("utf-8")
+    assert "中文备注" in json_text
 
 
 def test_framewise_csv_export_respects_boundaries_gaps_open_segments_and_validation_headers(
@@ -332,11 +360,16 @@ def test_export_headers_use_sanitized_utf8_filenames(phase_export_context) -> No
         csv_export = iter_phase_segment_csv(db, seeded.set_reader_id)
 
     safe_name = sanitize_filename("张玉柱\r\n 手术/Case", fallback=f"video_{seeded.video_id}")
-    expected_json_filename = f"{safe_name}_phases.json"
+    expected_json_filename = build_phase_export_filename(
+        video_display_name="张玉柱\r\n 手术/Case",
+        video_id=seeded.video_id,
+        mapping_profile_key=None,
+        mapping_mode="original",
+    )
     expected_csv_filename = f"{safe_name}_phase_segments.csv"
     assert json_export.headers["Content-Disposition"] == build_attachment_content_disposition(
         expected_json_filename,
-        f"video_{seeded.video_id}_phases.json",
+        f"research-video-{seeded.video_id}.json",
     )
     assert csv_export.headers["Content-Disposition"] == build_attachment_content_disposition(
         expected_csv_filename,

@@ -63,6 +63,10 @@ class ResearchPhaseProtocol(Base):
     annotation_sets: Mapped[list[ResearchPhaseAnnotationSet]] = relationship(
         back_populates="protocol",
     )
+    label_mapping_profiles: Mapped[list[ResearchPhaseLabelMappingProfile]] = relationship(
+        back_populates="protocol",
+        order_by="ResearchPhaseLabelMappingProfile.created_at",
+    )
 
 
 class ResearchPhaseLabel(Base):
@@ -105,6 +109,7 @@ class ResearchPhaseLabel(Base):
 
     protocol: Mapped[ResearchPhaseProtocol] = relationship(back_populates="labels")
     segments: Mapped[list[ResearchPhaseSegment]] = relationship(back_populates="phase_label")
+    mapping_rules: Mapped[list[ResearchPhaseLabelMappingRule]] = relationship(back_populates="source_label")
 
 
 class ResearchPhaseAnnotationSet(Base):
@@ -210,3 +215,124 @@ class ResearchPhaseSegment(Base):
 
     annotation_set: Mapped[ResearchPhaseAnnotationSet] = relationship(back_populates="segments")
     phase_label: Mapped[ResearchPhaseLabel] = relationship(back_populates="segments")
+
+
+class ResearchPhaseLabelMappingProfile(Base):
+    __tablename__ = "research_phase_label_mapping_profiles"
+    __table_args__ = (
+        UniqueConstraint(
+            "protocol_id",
+            "name",
+            "version",
+            name="uq_research_phase_label_mapping_profiles_protocol_name_version",
+        ),
+        CheckConstraint(
+            "status IN ('draft', 'published', 'archived')",
+            name="ck_research_phase_label_mapping_profiles_status",
+        ),
+        CheckConstraint("version >= 1", name="ck_research_phase_label_mapping_profiles_version_positive"),
+        Index("ix_research_phase_label_mapping_profiles_protocol_status", "protocol_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    protocol_id: Mapped[int] = mapped_column(
+        ForeignKey("research_phase_protocols.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    protocol: Mapped[ResearchPhaseProtocol] = relationship(back_populates="label_mapping_profiles")
+    created_by: Mapped[User | None] = relationship("User")
+    targets: Mapped[list[ResearchPhaseLabelMappingTarget]] = relationship(
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        order_by="ResearchPhaseLabelMappingTarget.order_index",
+    )
+    rules: Mapped[list[ResearchPhaseLabelMappingRule]] = relationship(
+        back_populates="profile",
+        cascade="all, delete-orphan",
+    )
+
+
+class ResearchPhaseLabelMappingTarget(Base):
+    __tablename__ = "research_phase_label_mapping_targets"
+    __table_args__ = (
+        UniqueConstraint("profile_id", "key", name="uq_research_phase_label_mapping_targets_profile_key"),
+        CheckConstraint("length(trim(name)) > 0", name="ck_research_phase_label_mapping_targets_name_not_blank"),
+        CheckConstraint("order_index >= 0", name="ck_research_phase_label_mapping_targets_order_non_negative"),
+        Index("ix_research_phase_label_mapping_targets_profile_order", "profile_id", "order_index"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("research_phase_label_mapping_profiles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    key: Mapped[str] = mapped_column(String(120), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    color: Mapped[str] = mapped_column(String(16), nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    profile: Mapped[ResearchPhaseLabelMappingProfile] = relationship(back_populates="targets")
+    rules: Mapped[list[ResearchPhaseLabelMappingRule]] = relationship(back_populates="target")
+
+
+class ResearchPhaseLabelMappingRule(Base):
+    __tablename__ = "research_phase_label_mapping_rules"
+    __table_args__ = (
+        UniqueConstraint(
+            "profile_id",
+            "source_label_id",
+            name="uq_research_phase_label_mapping_rules_profile_source_label",
+        ),
+        Index("ix_research_phase_label_mapping_rules_target", "target_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("research_phase_label_mapping_profiles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_label_id: Mapped[int] = mapped_column(
+        ForeignKey("research_phase_labels.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("research_phase_label_mapping_targets.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    profile: Mapped[ResearchPhaseLabelMappingProfile] = relationship(back_populates="rules")
+    source_label: Mapped[ResearchPhaseLabel] = relationship(back_populates="mapping_rules")
+    target: Mapped[ResearchPhaseLabelMappingTarget] = relationship(back_populates="rules")

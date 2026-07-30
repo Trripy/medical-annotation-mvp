@@ -52,8 +52,14 @@ const emit = defineEmits<{
 const startFrameInput = ref('')
 const endFrameInput = ref('')
 const notesInput = ref('')
+const notesDirty = ref(false)
+const notesSaving = ref(false)
+const notesSaveError = ref('')
+const lastSavedNotes = ref('')
+const isComposingNotes = ref(false)
 const confidenceInput = ref('')
 const sourceInput = ref<ResearchPhaseSegmentSource>('manual')
+let activeNotesSegmentId: number | null = null
 let notesTimer = 0
 
 const startTimeText = computed(() => {
@@ -65,14 +71,14 @@ const startTimeText = computed(() => {
 
 const endTimeText = computed(() => {
   if (!props.segment || props.segment.end_frame_exclusive === null) {
-    return 'Open'
+    return t('phaseAnnotation.open')
   }
   return formatDurationMs(frameToTimestampMs(props.segment.end_frame_exclusive, props.fps))
 })
 
 const durationText = computed(() => {
   if (!props.segment || props.segment.end_frame_exclusive === null) {
-    return 'Open'
+    return t('phaseAnnotation.open')
   }
   const startTime = frameToTimestampMs(props.segment.start_frame, props.fps)
   const endTime = frameToTimestampMs(props.segment.end_frame_exclusive, props.fps)
@@ -95,9 +101,16 @@ watch(
   (segment) => {
     startFrameInput.value = segment ? toUiFrameNumber(segment.start_frame) : ''
     endFrameInput.value = segment ? toUiInclusiveEndFrame(segment.end_frame_exclusive) : ''
-    notesInput.value = segment?.notes ?? ''
     confidenceInput.value = segment?.confidence === null || segment?.confidence === undefined ? '' : String(segment.confidence)
     sourceInput.value = segment?.source ?? 'manual'
+    const nextSegmentId = segment?.id ?? null
+    if (nextSegmentId !== activeNotesSegmentId || (!notesDirty.value && !notesSaving.value)) {
+      notesInput.value = segment?.notes ?? ''
+      lastSavedNotes.value = segment?.notes ?? ''
+      notesDirty.value = false
+      notesSaveError.value = ''
+    }
+    activeNotesSegmentId = nextSegmentId
   },
   { immediate: true },
 )
@@ -143,6 +156,11 @@ function saveEndFrame() {
 }
 
 function scheduleNotesSave() {
+  if (props.readOnly || isComposingNotes.value) {
+    return
+  }
+  notesDirty.value = notesInput.value.trim() !== lastSavedNotes.value
+  notesSaveError.value = ''
   if (notesTimer) {
     window.clearTimeout(notesTimer)
   }
@@ -152,25 +170,49 @@ function scheduleNotesSave() {
 }
 
 function flushNotesSave() {
-  if (!props.segment) {
+  if (!props.segment || props.readOnly || isComposingNotes.value) {
     return
   }
   const normalized = notesInput.value.trim()
-  if (!normalized && !props.segment.notes) {
+  if (normalized === lastSavedNotes.value) {
+    notesDirty.value = false
+    return
+  }
+  notesSaving.value = true
+  notesSaveError.value = ''
+  if (!normalized && !lastSavedNotes.value) {
+    notesSaving.value = false
+    notesDirty.value = false
     return
   }
   if (!normalized) {
     emitUpdate({ clear_notes: true })
-    return
-  }
-  if (normalized !== (props.segment.notes ?? '')) {
+  } else {
     emitUpdate({ notes: normalized })
+  }
+  lastSavedNotes.value = normalized
+  notesDirty.value = false
+  notesSaving.value = false
+}
+
+function onNotesCompositionStart() {
+  isComposingNotes.value = true
+  if (notesTimer) {
+    window.clearTimeout(notesTimer)
   }
 }
 
+function onNotesCompositionEnd() {
+  isComposingNotes.value = false
+  scheduleNotesSave()
+}
+
 function clearNotes() {
+  if (props.readOnly) {
+    return
+  }
   notesInput.value = ''
-  emitUpdate({ clear_notes: true })
+  flushNotesSave()
 }
 
 function saveConfidence() {
@@ -290,12 +332,25 @@ function closeAtVideoEnd() {
           {{ t('phaseAnnotation.notes') }}
           <textarea
             v-model="notesInput"
-            :disabled="readOnly || saving"
+            :disabled="readOnly"
             rows="4"
             @blur="flushNotesSave"
             @input="scheduleNotesSave"
+            @compositionstart="onNotesCompositionStart"
+            @compositionend="onNotesCompositionEnd"
+            @keydown.stop
+            @keydown.ctrl.enter.prevent.stop="flushNotesSave"
+            @keydown.meta.enter.prevent.stop="flushNotesSave"
           ></textarea>
-          <button class="phase-inspector-secondary" type="button" :disabled="readOnly || saving" @click="clearNotes">{{ t('phaseAnnotation.clearNotes') }}</button>
+          <div class="phase-inspector-note-actions">
+            <button class="phase-inspector-secondary" type="button" :disabled="readOnly || notesSaving || !notesDirty" @click="flushNotesSave">{{ t('phaseNote.save') }}</button>
+            <button class="phase-inspector-secondary" type="button" :disabled="readOnly || notesSaving" @click="clearNotes">{{ t('phaseAnnotation.clearNotes') }}</button>
+            <span v-if="readOnly" class="phase-inspector-note-status">{{ t('phaseNote.readOnly') }}</span>
+            <span v-else-if="notesSaving" class="phase-inspector-note-status">{{ t('phaseNote.saving') }}</span>
+            <span v-else-if="notesSaveError" class="phase-inspector-note-status is-error">{{ notesSaveError }}</span>
+            <span v-else-if="notesDirty" class="phase-inspector-note-status">{{ t('phaseNote.unsaved') }}</span>
+            <span v-else class="phase-inspector-note-status">{{ t('phaseNote.saved') }}</span>
+          </div>
         </label>
       </div>
 
@@ -307,48 +362,53 @@ function closeAtVideoEnd() {
       </dl>
 
       <div class="phase-inspector-actions">
-        <button type="button" :disabled="readOnly || saving || !canSplitAtPlayhead" @click="emit('splitSegment', segment.id)">
-          {{ t('phaseAnnotation.splitAtPlayhead') }}
-        </button>
-        <button type="button" :disabled="readOnly || saving || !canMergePrevious" @click="emit('mergePrevious', segment.id)">
-          {{ t('phaseAnnotation.mergePrevious') }}
-        </button>
-        <button type="button" :disabled="readOnly || saving || !canMergeNext" @click="emit('mergeNext', segment.id)">
-          {{ t('phaseAnnotation.mergeNext') }}
-        </button>
-        <button
-          v-if="segment.end_frame_exclusive !== null"
-          type="button"
-          :disabled="readOnly || saving"
-          @click="markAsOpen"
-        >
-          {{ t('status.open') }}
-        </button>
-        <button
-          v-else
-          type="button"
-          :disabled="readOnly || saving"
-          @click="closeAtCurrentFrame"
-        >
-          {{ t('phaseAnnotation.closeAtCurrentFrame') }}
-        </button>
-        <button
-          v-if="segment.end_frame_exclusive === null"
-          type="button"
-          :disabled="readOnly || saving"
-          @click="closeAtVideoEnd"
-        >
-          {{ t('phaseAnnotation.closeAtVideoEnd') }}
-        </button>
-        <button class="is-danger" type="button" :disabled="readOnly || saving" @click="emit('deleteSegment', segment.id)">
-          {{ t('phaseAnnotation.deleteSegment') }}
-        </button>
+        <div class="phase-inspector-action-group">
+          <button type="button" :disabled="readOnly || saving || !canSplitAtPlayhead" @click="emit('splitSegment', segment.id)">
+            {{ t('phaseAnnotation.splitAtPlayhead') }}
+          </button>
+          <button type="button" :disabled="readOnly || saving || !canMergePrevious" @click="emit('mergePrevious', segment.id)">
+            {{ t('phaseAnnotation.mergePrevious') }}
+          </button>
+          <button type="button" :disabled="readOnly || saving || !canMergeNext" @click="emit('mergeNext', segment.id)">
+            {{ t('phaseAnnotation.mergeNext') }}
+          </button>
+          <button
+            v-if="segment.end_frame_exclusive !== null"
+            type="button"
+            :disabled="readOnly || saving"
+            @click="markAsOpen"
+          >
+            {{ t('status.open') }}
+          </button>
+          <button
+            v-else
+            type="button"
+            :disabled="readOnly || saving"
+            @click="closeAtCurrentFrame"
+          >
+            {{ t('phaseAnnotation.closeAtCurrentFrame') }}
+          </button>
+          <button
+            v-if="segment.end_frame_exclusive === null"
+            type="button"
+            :disabled="readOnly || saving"
+            @click="closeAtVideoEnd"
+          >
+            {{ t('phaseAnnotation.closeAtVideoEnd') }}
+          </button>
+        </div>
+        <div class="phase-inspector-action-group is-danger-group">
+          <button class="is-danger" type="button" :disabled="readOnly || saving" @click="emit('deleteSegment', segment.id)">
+            {{ t('phaseAnnotation.deleteSegment') }}
+          </button>
+        </div>
       </div>
     </template>
 
-    <p v-else class="phase-inspector-placeholder">
-      {{ t('phaseAnnotation.noSegmentSelected') }}
-    </p>
+    <div v-else class="phase-inspector-placeholder">
+      <strong>{{ t('phaseAnnotation.noSegmentSelected') }}</strong>
+      <span>{{ t('phaseAnnotation.timeline') }}</span>
+    </div>
   </section>
 </template>
 
@@ -356,9 +416,9 @@ function closeAtVideoEnd() {
 .phase-inspector {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
-  padding: 1rem;
-  border-radius: 1rem;
+  gap: 0.75rem;
+  padding: 0.82rem;
+  border-radius: 0.72rem;
   border: 1px solid rgba(148, 163, 184, 0.18);
   background: rgba(15, 23, 42, 0.84);
 }
@@ -393,7 +453,7 @@ function closeAtVideoEnd() {
 .phase-inspector-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.9rem;
+  gap: 0.65rem;
 }
 
 .phase-inspector-grid label,
@@ -414,8 +474,8 @@ function closeAtVideoEnd() {
 .phase-inspector-grid input,
 .phase-inspector-grid select,
 .phase-inspector-grid textarea {
-  padding: 0.65rem 0.75rem;
-  border-radius: 0.75rem;
+  padding: 0.5rem 0.62rem;
+  border-radius: 0.55rem;
   border: 1px solid rgba(148, 163, 184, 0.2);
   background: rgba(30, 41, 59, 0.82);
   color: #f8fafc;
@@ -428,6 +488,22 @@ function closeAtVideoEnd() {
 
 .phase-inspector-span-two {
   grid-column: 1 / -1;
+}
+
+.phase-inspector-note-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.phase-inspector-note-status {
+  color: rgba(203, 213, 225, 0.78);
+  font-size: 0.78rem;
+}
+
+.phase-inspector-note-status.is-error {
+  color: #fca5a5;
 }
 
 .phase-inspector-secondary,
@@ -443,13 +519,13 @@ function closeAtVideoEnd() {
 .phase-inspector-metadata {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.75rem;
+  gap: 0.52rem;
   margin: 0;
 }
 
 .phase-inspector-metadata div {
-  padding: 0.75rem;
-  border-radius: 0.85rem;
+  padding: 0.58rem;
+  border-radius: 0.58rem;
   background: rgba(15, 23, 42, 0.55);
 }
 
@@ -465,9 +541,14 @@ function closeAtVideoEnd() {
 }
 
 .phase-inspector-actions {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.phase-inspector-action-group {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.55rem;
+  gap: 0.45rem;
 }
 
 .phase-inspector-actions .is-danger {
@@ -476,8 +557,17 @@ function closeAtVideoEnd() {
 }
 
 .phase-inspector-placeholder {
+  display: grid;
+  gap: 0.2rem;
   margin: 0;
+  padding: 0.75rem;
+  border-radius: 0.62rem;
+  background: rgba(15, 23, 42, 0.54);
   color: rgba(148, 163, 184, 0.92);
+}
+
+.phase-inspector-placeholder strong {
+  color: #e2e8f0;
 }
 
 @media (max-width: 900px) {

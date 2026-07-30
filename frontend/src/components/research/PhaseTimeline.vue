@@ -9,6 +9,12 @@ import {
   calculateVisibleFrameRange,
   clampFrame,
   frameToPixel,
+  getFocusedVisibleRange,
+  getPhaseSegmentPixelWidth,
+  getPhaseSegmentPresentation,
+  getPhaseSegmentTooltip,
+  getVisiblePhaseCoverageGaps,
+  hitTestPhaseSegment,
   normalizeFramesPerPixel,
   pixelToFrame,
 } from '../../utils/researchPhaseTimeline'
@@ -21,6 +27,7 @@ type SegmentPatch = {
 
 const props = defineProps<{
   currentFrameIndex: number
+  fps?: number | null
   frameCount: number
   readonly?: boolean
   segments: ResearchPhaseSegment[]
@@ -32,6 +39,7 @@ const { t } = useI18n()
 const emit = defineEmits<{
   seek: [frameIndex: number]
   selectSegment: [segmentId: number]
+  clearSelection: []
   updateSegmentBoundary: [payload: { segmentId: number; patch: SegmentPatch }]
 }>()
 
@@ -80,16 +88,45 @@ const renderedSegments = computed(() => sortedSegments.value.map((segment) => {
       : segment,
     timelineInput.value,
   )
+  const widthPx = getPhaseSegmentPixelWidth(geometry)
+  const presentation = getPhaseSegmentPresentation(widthPx)
+  const tooltip = getPhaseSegmentTooltip(segment, props.frameCount, props.fps)
   return {
     segment,
     preview,
     geometry,
+    widthPx,
+    presentation,
+    tooltip,
     isOpen: (preview?.end_frame_exclusive ?? segment.end_frame_exclusive) === null,
     isSelected: props.selectedSegmentId === segment.id,
   }
 }))
 
+const renderedCoverageGaps = computed(() => getVisiblePhaseCoverageGaps(
+  { startFrame: 0, endFrameExclusive: props.frameCount },
+  sortedSegments.value,
+).map((gap) => ({
+  gap,
+  geometry: calculateSegmentGeometry(
+    { start_frame: gap.startFrame, end_frame_exclusive: gap.endFrameExclusive },
+    timelineInput.value,
+  ),
+})))
+
 const playheadLeft = computed(() => frameToPixel(props.currentFrameIndex, timelineInput.value))
+const selectedFloatingLabel = computed(() => {
+  const entry = renderedSegments.value.find((segmentEntry) => segmentEntry.isSelected)
+  if (!entry || (entry.presentation !== 'marker-only' && entry.presentation !== 'compact')) {
+    return null
+  }
+  const center = entry.geometry.left + (entry.geometry.width / 2)
+  const clampedCenter = Math.max(24, Math.min(timelineWidth.value - 24, center))
+  return {
+    left: clampedCenter,
+    text: `${entry.segment.phase_label.name} · ${entry.segment.start_frame + 1}-${entry.segment.end_frame_exclusive ?? props.frameCount}`,
+  }
+})
 
 onMounted(async () => {
   await nextTick()
@@ -155,13 +192,32 @@ function scrollToFrame(frameIndex: number, behavior: ScrollBehavior = 'smooth') 
   })
 }
 
-function scrollToSelectedSegment() {
+function focusSelectedSegment() {
   const segment = props.selectedSegmentId === null ? null : segmentById.value.get(props.selectedSegmentId) ?? null
   if (!segment) {
     scrollToFrame(props.currentFrameIndex)
     return
   }
-  scrollToFrame(segment.start_frame)
+  if (!viewportRef.value) {
+    return
+  }
+  const focused = getFocusedVisibleRange({
+    segment,
+    frameCount: props.frameCount,
+    fps: props.fps,
+    viewportWidth: Math.max(1, viewportRef.value.clientWidth - 24),
+  })
+  framesPerPixel.value = focused.framesPerPixel
+  void nextTick(() => {
+    viewportRef.value?.scrollTo({
+      left: frameToPixel(focused.startFrame, timelineInput.value),
+      behavior: 'smooth',
+    })
+  })
+}
+
+function scrollToSelectedSegment() {
+  focusSelectedSegment()
 }
 
 function handleCanvasClick(event: MouseEvent) {
@@ -169,11 +225,53 @@ function handleCanvasClick(event: MouseEvent) {
     return
   }
   const rect = viewportRef.value.getBoundingClientRect()
-  const frameIndex = pixelToFrame(
-    viewportRef.value.scrollLeft + event.clientX - rect.left,
-    timelineInput.value,
+  const timelineX = viewportRef.value.scrollLeft + event.clientX - rect.left
+  const hitSegment = hitTestPhaseSegment(
+    timelineX,
+    timelineWidth.value,
+    0,
+    props.frameCount,
+    sortedSegments.value,
   )
+  if (hitSegment) {
+    emit('selectSegment', hitSegment.id)
+    return
+  }
+  const frameIndex = pixelToFrame(timelineX, timelineInput.value)
   emit('seek', Math.min(frameIndex, Math.max(props.frameCount - 1, 0)))
+}
+
+function handleSegmentDblClick(segment: ResearchPhaseSegment) {
+  emit('selectSegment', segment.id)
+  void nextTick(() => {
+    focusSelectedSegment()
+  })
+}
+
+function handleSegmentKeydown(segment: ResearchPhaseSegment, event: KeyboardEvent) {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault()
+    emit('selectSegment', segment.id)
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    emit('clearSelection')
+  }
+}
+
+function formatTooltipTime(seconds: number) {
+  const safeSeconds = Math.max(0, Number.isFinite(seconds) ? seconds : 0)
+  const minutes = Math.floor(safeSeconds / 60)
+  const wholeSeconds = Math.floor(safeSeconds % 60)
+  const millis = Math.round((safeSeconds - Math.floor(safeSeconds)) * 1000)
+  return `${String(minutes).padStart(2, '0')}:${String(wholeSeconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`
+}
+
+function segmentAriaLabel(entry: typeof renderedSegments.value[number]) {
+  return `${t('phaseTimeline.selectedSegment')}: ${entry.segment.phase_label.name}, ${t('phaseTimeline.startFrame')} ${entry.tooltip.startFrameOneBased}, ${t('phaseTimeline.endFrame')} ${entry.tooltip.endFrameInclusiveOneBased}, ${t('phaseTimeline.durationFrames')} ${entry.tooltip.durationFrames}`
+}
+
+function gapTooltip(gap: { startFrame: number; endFrameExclusive: number; durationFrames: number }) {
+  return `${t('phaseTimeline.unannotatedRange')}: ${gap.startFrame + 1}-${gap.endFrameExclusive} · ${t('phaseTimeline.durationFrames')} ${gap.durationFrames}`
 }
 
 function getNeighborSegments(segmentId: number) {
@@ -306,6 +404,7 @@ defineExpose({
   fitTimeline,
   scrollToFrame,
   scrollToSelectedSegment,
+  focusSelectedSegment,
 })
 </script>
 
@@ -324,7 +423,7 @@ defineExpose({
         <button type="button" @click="zoomOut">{{ t('phaseAnnotation.zoomOut') }}</button>
         <button type="button" @click="fitTimeline">{{ t('phaseAnnotation.fitVideo') }}</button>
         <button type="button" @click="scrollToFrame(currentFrameIndex)">{{ t('phaseAnnotation.scrollToPlayhead') }}</button>
-        <button type="button" @click="scrollToSelectedSegment">{{ t('phaseAnnotation.scrollToSelection') }}</button>
+        <button type="button" @click="focusSelectedSegment">{{ t('phaseTimeline.focusSelected') }}</button>
       </div>
     </header>
 
@@ -332,40 +431,109 @@ defineExpose({
       <div class="phase-timeline-canvas" :style="{ width: `${timelineWidth}px` }">
         <div class="phase-timeline-grid"></div>
 
-        <button
+        <div class="phase-timeline-coverage-layer" aria-hidden="true">
+          <div
+            v-for="entry in renderedSegments"
+            :key="`coverage-${entry.segment.id}`"
+            class="phase-timeline-coverage-segment"
+            :class="{ 'is-open': entry.isOpen }"
+            :style="{
+              left: `${entry.geometry.left}px`,
+              width: `${entry.geometry.width}px`,
+              '--phase-segment-color': entry.segment.phase_label.color,
+            }"
+          ></div>
+        </div>
+
+        <el-tooltip
+          v-for="entry in renderedCoverageGaps"
+          :key="`gap-${entry.gap.startFrame}-${entry.gap.endFrameExclusive}`"
+          placement="top"
+          teleported
+        >
+          <template #content>
+            <div class="phase-timeline-tooltip">
+              <strong>{{ t('phaseTimeline.unannotatedRange') }}</strong>
+              <span>{{ t('phaseTimeline.startFrame') }}: {{ entry.gap.startFrame + 1 }}</span>
+              <span>{{ t('phaseTimeline.endFrame') }}: {{ entry.gap.endFrameExclusive }}</span>
+              <span>{{ t('phaseTimeline.durationFrames') }}: {{ entry.gap.durationFrames }}</span>
+            </div>
+          </template>
+          <div
+            class="phase-timeline-gap"
+            :class="{ 'is-compact': entry.geometry.width < 48 }"
+            :style="{
+              left: `${entry.geometry.left}px`,
+              width: `${entry.geometry.width}px`,
+            }"
+            :aria-label="gapTooltip(entry.gap)"
+          >
+            <span v-if="entry.geometry.width >= 64">{{ t('phaseTimeline.unannotated') }}</span>
+          </div>
+        </el-tooltip>
+
+        <div
+          v-if="selectedFloatingLabel"
+          class="phase-timeline-selected-float"
+          :style="{ left: `${selectedFloatingLabel.left}px` }"
+        >
+          {{ selectedFloatingLabel.text }}
+        </div>
+
+        <el-tooltip
           v-for="entry in renderedSegments"
           :key="entry.segment.id"
-          class="phase-timeline-segment"
-          :class="{
-            'is-selected': entry.isSelected,
-            'is-open': entry.isOpen,
-          }"
-          :style="{
-            left: `${entry.geometry.left}px`,
-            width: `${entry.geometry.width}px`,
-            '--phase-segment-color': entry.segment.phase_label.color,
-          }"
-          type="button"
-          @click.stop="emit('selectSegment', entry.segment.id)"
-          @dblclick.stop="emit('seek', entry.segment.start_frame)"
+          placement="top"
+          teleported
         >
-          <span class="phase-timeline-segment-label">
-            {{ entry.segment.phase_label.name }}
-          </span>
-          <span class="phase-timeline-segment-range">
-            {{ entry.segment.start_frame + 1 }}-{{ entry.segment.end_frame_exclusive ?? frameCount }}
-          </span>
-          <span
-            v-if="!readonly"
-            class="phase-timeline-handle is-left"
-            @pointerdown.stop="startBoundaryDrag(entry.segment, 'left', $event)"
-          ></span>
-          <span
-            v-if="!readonly && entry.segment.end_frame_exclusive !== null"
-            class="phase-timeline-handle is-right"
-            @pointerdown.stop="startBoundaryDrag(entry.segment, 'right', $event)"
-          ></span>
-        </button>
+          <template #content>
+            <div class="phase-timeline-tooltip">
+              <strong>{{ entry.tooltip.name }}</strong>
+              <span>{{ t('phaseTimeline.startFrame') }}: {{ entry.tooltip.startFrameOneBased }}</span>
+              <span>{{ t('phaseTimeline.endFrame') }}: {{ entry.tooltip.endFrameInclusiveOneBased }}</span>
+              <span>{{ t('phaseTimeline.durationFrames') }}: {{ entry.tooltip.durationFrames }}</span>
+              <span>{{ t('phaseTimeline.startTime') }}: {{ formatTooltipTime(entry.tooltip.startTimeSeconds) }}</span>
+              <span>{{ t('phaseTimeline.endTime') }}: {{ formatTooltipTime(entry.tooltip.endTimeSeconds) }}</span>
+              <span>{{ t('phaseTimeline.duration') }}: {{ formatTooltipTime(entry.tooltip.durationSeconds) }}</span>
+            </div>
+          </template>
+          <button
+            class="phase-timeline-segment"
+            :class="{
+              'is-selected': entry.isSelected,
+              'is-open': entry.isOpen,
+              [`is-${entry.presentation}`]: true,
+            }"
+            :style="{
+              left: `${entry.geometry.left}px`,
+              width: `${entry.geometry.width}px`,
+            }"
+            type="button"
+            role="option"
+            :aria-selected="entry.isSelected"
+            :aria-label="segmentAriaLabel(entry)"
+            @click.stop="emit('selectSegment', entry.segment.id)"
+            @dblclick.stop.prevent="handleSegmentDblClick(entry.segment)"
+            @keydown="handleSegmentKeydown(entry.segment, $event)"
+          >
+            <span v-if="entry.presentation !== 'marker-only'" class="phase-timeline-segment-label">
+              {{ entry.segment.phase_label.name }}
+            </span>
+            <span v-if="entry.presentation === 'full'" class="phase-timeline-segment-range">
+              {{ entry.segment.start_frame + 1 }}-{{ entry.segment.end_frame_exclusive ?? frameCount }}
+            </span>
+            <span
+              v-if="!readonly"
+              class="phase-timeline-handle is-left"
+              @pointerdown.stop="startBoundaryDrag(entry.segment, 'left', $event)"
+            ></span>
+            <span
+              v-if="!readonly && entry.segment.end_frame_exclusive !== null"
+              class="phase-timeline-handle is-right"
+              @pointerdown.stop="startBoundaryDrag(entry.segment, 'right', $event)"
+            ></span>
+          </button>
+        </el-tooltip>
 
         <div class="phase-timeline-playhead" :style="{ left: `${playheadLeft}px` }"></div>
       </div>
@@ -377,9 +545,9 @@ defineExpose({
 .phase-timeline {
   display: flex;
   flex-direction: column;
-  gap: 0.9rem;
-  padding: 1rem 1.1rem;
-  border-radius: 1rem;
+  gap: 0.62rem;
+  padding: 0.78rem 0.86rem;
+  border-radius: 0.72rem;
   background: rgba(15, 23, 42, 0.82);
   border: 1px solid rgba(148, 163, 184, 0.18);
 }
@@ -422,8 +590,8 @@ defineExpose({
 }
 
 .phase-timeline-actions button {
-  padding: 0.55rem 0.8rem;
-  border-radius: 0.85rem;
+  padding: 0.42rem 0.62rem;
+  border-radius: 0.55rem;
   border: 1px solid rgba(148, 163, 184, 0.22);
   background: rgba(30, 41, 59, 0.78);
   color: #e2e8f0;
@@ -437,8 +605,8 @@ defineExpose({
 
 .phase-timeline-canvas {
   position: relative;
-  min-height: 128px;
-  border-radius: 0.85rem;
+  min-height: 96px;
+  border-radius: 0.62rem;
   background:
     linear-gradient(180deg, rgba(15, 23, 42, 0.48), rgba(15, 23, 42, 0.88)),
     repeating-linear-gradient(
@@ -449,6 +617,7 @@ defineExpose({
       transparent 24px
     );
   border: 1px solid rgba(148, 163, 184, 0.16);
+  overflow: hidden;
 }
 
 .phase-timeline-grid {
@@ -460,34 +629,138 @@ defineExpose({
   pointer-events: none;
 }
 
+.phase-timeline-coverage-layer {
+  position: absolute;
+  top: 28px;
+  left: 0;
+  right: 0;
+  height: 44px;
+  overflow: hidden;
+  border-radius: 0.52rem;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.phase-timeline-coverage-segment {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  margin: 0;
+  border-radius: 0;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--phase-segment-color) 70%, #0f172a), color-mix(in srgb, var(--phase-segment-color) 42%, #0f172a));
+  box-shadow: inset -1px 0 0 rgba(15, 23, 42, 0.32);
+}
+
+.phase-timeline-coverage-segment.is-open {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--phase-segment-color) 66%, #0f172a) 0,
+      color-mix(in srgb, var(--phase-segment-color) 66%, #0f172a) 7px,
+      color-mix(in srgb, var(--phase-segment-color) 42%, #0f172a) 7px,
+      color-mix(in srgb, var(--phase-segment-color) 42%, #0f172a) 14px
+    );
+}
+
+.phase-timeline-gap {
+  position: absolute;
+  top: 28px;
+  height: 44px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  margin: 0;
+  border-radius: 0;
+  color: rgba(226, 232, 240, 0.82);
+  font-size: 0.78rem;
+  font-weight: 700;
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(148, 163, 184, 0.30) 0,
+      rgba(148, 163, 184, 0.30) 5px,
+      rgba(30, 41, 59, 0.74) 5px,
+      rgba(30, 41, 59, 0.74) 10px
+    );
+  z-index: 2;
+}
+
+.phase-timeline-gap.is-compact {
+  color: transparent;
+}
+
 .phase-timeline-segment {
   position: absolute;
-  top: 36px;
-  height: 54px;
-  border-radius: 0.8rem;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--phase-segment-color) 62%, #0f172a), rgba(15, 23, 42, 0.94));
+  top: 28px;
+  height: 44px;
+  box-sizing: border-box;
+  margin: 0;
+  border-radius: 0;
+  border: 0;
+  background: transparent;
   color: #f8fafc;
   display: flex;
   flex-direction: column;
   justify-content: center;
   gap: 0.2rem;
-  padding: 0.55rem 0.8rem;
+  padding: 0.42rem 0.62rem;
   text-align: left;
   overflow: hidden;
+  z-index: 3;
 }
 
 .phase-timeline-segment.is-selected {
-  box-shadow: 0 0 0 2px rgba(125, 211, 252, 0.58);
+  outline: 2px solid rgba(255, 255, 255, 0.84);
+  outline-offset: -2px;
+  box-shadow: inset 0 0 0 2px rgba(125, 211, 252, 0.74), 0 0 16px rgba(34, 211, 238, 0.22);
+  z-index: 4;
 }
 
 .phase-timeline-segment.is-open {
-  border-style: dashed;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.32);
+}
+
+.phase-timeline-segment.is-label-only {
+  padding: 0.36rem 0.48rem;
+}
+
+.phase-timeline-segment.is-compact {
+  padding: 0.28rem 0.28rem;
+  gap: 0;
+}
+
+.phase-timeline-segment.is-marker-only {
+  padding: 0;
+  overflow: visible;
+}
+
+.phase-timeline-segment.is-marker-only::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 50%;
+  width: 2px;
+  min-width: 2px;
+  transform: translateX(-50%);
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.58);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--phase-segment-color) 72%, transparent);
+}
+
+.phase-timeline-segment.is-marker-only.is-selected::before {
+  width: 3px;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.78), 0 0 14px color-mix(in srgb, var(--phase-segment-color) 76%, transparent);
 }
 
 .phase-timeline-segment-label,
 .phase-timeline-segment-range {
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -526,6 +799,36 @@ defineExpose({
   background: linear-gradient(180deg, #fb7185, #f97316);
   box-shadow: 0 0 12px rgba(249, 115, 22, 0.48);
   pointer-events: none;
+  z-index: 6;
+}
+
+.phase-timeline-selected-float {
+  position: absolute;
+  top: 2px;
+  max-width: 260px;
+  transform: translateX(-50%);
+  padding: 0.18rem 0.42rem;
+  border-radius: 0.42rem;
+  background: rgba(15, 23, 42, 0.94);
+  color: #f8fafc;
+  border: 1px solid rgba(125, 211, 252, 0.48);
+  box-shadow: 0 10px 24px rgba(2, 6, 23, 0.24);
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  z-index: 7;
+}
+
+.phase-timeline-tooltip {
+  display: grid;
+  gap: 0.18rem;
+  max-width: 280px;
+}
+
+.phase-timeline-tooltip span,
+.phase-timeline-tooltip strong {
+  display: block;
 }
 
 @media (max-width: 900px) {

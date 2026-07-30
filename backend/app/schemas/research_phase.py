@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 
 ResearchPhaseProtocolStatus = Literal["draft", "active", "archived"]
+ResearchPhaseLabelMappingProfileStatus = Literal["draft", "published", "archived"]
 ResearchPhaseAnnotationSetStatus = Literal["draft", "submitted", "reviewed", "locked"]
 ResearchPhaseSegmentSource = Literal["manual", "model_suggestion", "model_corrected", "imported"]
 ResearchPhaseMutationAction = Literal[
@@ -65,6 +66,79 @@ class ResearchPhaseProtocolSummary(BaseModel):
 
 class ResearchPhaseProtocolDetail(ResearchPhaseProtocolSummary):
     labels: list[ResearchPhaseLabelResponse] = Field(default_factory=list)
+
+
+class ResearchPhaseLabelMappingSourceLabelResponse(BaseModel):
+    id: int
+    key: str
+    name: str
+    color: str
+    display_order: int
+
+    model_config = {"from_attributes": True}
+
+
+class ResearchPhaseLabelMappingTargetResponse(BaseModel):
+    id: int
+    profile_id: int
+    key: str
+    name: str
+    color: str
+    order_index: int
+    source_labels: list[ResearchPhaseLabelMappingSourceLabelResponse] = Field(default_factory=list)
+
+    model_config = {"from_attributes": True}
+
+
+class ResearchPhaseLabelMappingProfileSummary(BaseModel):
+    id: int
+    protocol_id: int
+    name: str
+    description: str | None = None
+    version: int
+    status: ResearchPhaseLabelMappingProfileStatus
+    created_by_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+    source_label_count: int = 0
+    target_count: int = 0
+    merged_group_count: int = 0
+    unmapped_label_count: int = 0
+
+    model_config = {"from_attributes": True}
+
+
+class ResearchPhaseLabelMappingProfileDetail(ResearchPhaseLabelMappingProfileSummary):
+    targets: list[ResearchPhaseLabelMappingTargetResponse] = Field(default_factory=list)
+
+
+class CreateResearchPhaseLabelMappingProfileRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=4000)
+    version: int = Field(default=1, ge=1)
+    created_by_id: int | None = None
+    initialize_identity_mapping: bool = True
+
+
+class UpdateResearchPhaseLabelMappingProfileRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=4000)
+
+
+class MergeResearchPhaseMappingClassesRequest(BaseModel):
+    source_label_ids: list[int] = Field(min_length=2)
+    target_key: str = Field(min_length=1, max_length=120)
+    target_name: str = Field(min_length=1, max_length=255)
+    target_color: str = Field(min_length=1, max_length=16)
+
+
+class UnmergeResearchPhaseMappingTargetRequest(BaseModel):
+    target_id: int
+
+
+class DuplicateResearchPhaseLabelMappingProfileRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=4000)
 
 
 class ResearchPhaseSegmentPhaseLabelResponse(BaseModel):
