@@ -16,6 +16,10 @@ export type ResearchVideoListItem = {
   frame_count: number
   duration_ms: number | null
   status: ResearchVideoStatus
+  source_video_id: number | null
+  origin_type: string
+  trim_start_frame: number | null
+  trim_end_frame_exclusive: number | null
   thumbnail_url: string | null
   created_at: string
   updated_at: string
@@ -71,12 +75,80 @@ export type ResearchVideoAnnotationPayload = {
   points: number[][]
   attributes?: Record<string, unknown> | null
   visible?: boolean
+  z_order?: number
 }
 
 export type ResearchVideoLabelPayload = {
   name: string
   color: string
   shape_type: ShapeType
+}
+
+export type ServerVideoImportRoot = {
+  id: string
+  name: string
+}
+
+export type ServerVideoFileEntry = {
+  name: string
+  relative_path: string
+  size_bytes: number
+  modified_at: string | null
+  extension: string
+}
+
+export type ServerVideoDirectoryEntry = {
+  name: string
+  relative_path: string
+}
+
+export type ServerVideoBrowseResult = {
+  root_id: string
+  relative_path: string
+  parent_relative_path: string | null
+  directories: ServerVideoDirectoryEntry[]
+  videos: ServerVideoFileEntry[]
+  truncated: boolean
+}
+
+export type ServerVideoScanResult = {
+  root_id: string
+  relative_path: string
+  recursive: boolean
+  video_count: number
+  total_size_bytes: number
+  videos: ServerVideoFileEntry[]
+  unsupported_count: number
+  unreadable_count: number
+  truncated: boolean
+}
+
+export type ResearchVideoTrimLinkedData = {
+  frame_annotation_count: number
+  phase_annotation_set_count: number
+  phase_segment_count: number
+  skill_assessment_count: number
+  skill_evidence_count: number
+}
+
+export type ResearchVideoTrimInfo = {
+  video: ResearchVideoWorkspaceDetail
+  linked_data: ResearchVideoTrimLinkedData
+  minimum_keep_frames: number
+}
+
+export type ResearchVideoTrimPayload = {
+  start_frame: number
+  end_frame_exclusive: number
+  display_name: string | null
+  acknowledge_annotations_not_copied: boolean
+}
+
+export type ResearchVideoTrimResponse = {
+  source_video_id: number
+  trimmed_video_id: number
+  status: ResearchVideoStatus
+  warnings: string[]
 }
 
 function resolveStorageUrl(path: string): string {
@@ -181,6 +253,48 @@ export const useResearchVideosStore = defineStore('researchVideos', {
         this.loading = false
       }
     },
+    async fetchVideoTrimInfo(videoId: number): Promise<ResearchVideoTrimInfo | null> {
+      this.loading = true
+      this.error = ''
+      try {
+        const response = await fetch(apiUrl(`/api/research/videos/${videoId}/trim-info`), { cache: 'no-store' })
+        if (!response.ok) {
+          const errorPayload = await response.json().catch(() => null)
+          throw new Error(typeof errorPayload?.detail === 'string' ? errorPayload.detail : `Trim info request failed: ${response.status}`)
+        }
+        const payload = await response.json()
+        return {
+          ...payload,
+          video: normalizeVideoWorkspace(payload.video),
+        }
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      } finally {
+        this.loading = false
+      }
+    },
+    async trimVideo(videoId: number, payload: ResearchVideoTrimPayload): Promise<ResearchVideoTrimResponse | null> {
+      this.saving = true
+      this.error = ''
+      try {
+        const response = await fetch(apiUrl(`/api/research/videos/${videoId}/trim`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+        if (!response.ok) {
+          const errorPayload = await response.json().catch(() => null)
+          throw new Error(typeof errorPayload?.detail === 'string' ? errorPayload.detail : `Trim failed: ${response.status}`)
+        }
+        return await response.json()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      } finally {
+        this.saving = false
+      }
+    },
     async fetchVideoFramesPage(
       videoId: number,
       options: {
@@ -223,6 +337,81 @@ export const useResearchVideosStore = defineStore('researchVideos', {
         if (!response.ok) {
           const errorPayload = await response.json().catch(() => null)
           throw new Error(typeof errorPayload?.detail === 'string' ? errorPayload.detail : `Upload failed: ${response.status}`)
+        }
+        const created = normalizeVideo(await response.json())
+        this.videos = [created, ...this.videos.filter((video) => video.id !== created.id)]
+        return created
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      } finally {
+        this.saving = false
+      }
+    },
+    async fetchServerImportRoots(): Promise<{ enabled: boolean; roots: ServerVideoImportRoot[] } | null> {
+      this.error = ''
+      try {
+        const response = await fetch(apiUrl('/api/research/server-video-import/roots'), { cache: 'no-store' })
+        if (!response.ok) {
+          throw new Error(`Server import roots request failed: ${response.status}`)
+        }
+        return await response.json()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      }
+    },
+    async browseServerImportDirectory(rootId: string, relativePath = ''): Promise<ServerVideoBrowseResult | null> {
+      this.error = ''
+      try {
+        const searchParams = new URLSearchParams({ root_id: rootId, relative_path: relativePath })
+        const response = await fetch(apiUrl(`/api/research/server-video-import/browse?${searchParams.toString()}`), {
+          cache: 'no-store',
+        })
+        if (!response.ok) {
+          const errorPayload = await response.json().catch(() => null)
+          throw new Error(typeof errorPayload?.detail === 'string' ? errorPayload.detail : `Server directory request failed: ${response.status}`)
+        }
+        return await response.json()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      }
+    },
+    async scanServerImportFolder(rootId: string, relativePath: string, recursive: boolean): Promise<ServerVideoScanResult | null> {
+      this.error = ''
+      try {
+        const response = await fetch(apiUrl('/api/research/server-video-import/scan-folder'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ root_id: rootId, relative_path: relativePath, recursive }),
+        })
+        if (!response.ok) {
+          const errorPayload = await response.json().catch(() => null)
+          throw new Error(typeof errorPayload?.detail === 'string' ? errorPayload.detail : `Server folder scan failed: ${response.status}`)
+        }
+        return await response.json()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      }
+    },
+    async importServerVideo(rootId: string, relativePath: string, displayName?: string | null) {
+      this.saving = true
+      this.error = ''
+      try {
+        const response = await fetch(apiUrl('/api/research/server-video-import/file'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            root_id: rootId,
+            relative_path: relativePath,
+            display_name: displayName?.trim() || null,
+          }),
+        })
+        if (!response.ok) {
+          const errorPayload = await response.json().catch(() => null)
+          throw new Error(typeof errorPayload?.detail === 'string' ? errorPayload.detail : `Server video import failed: ${response.status}`)
         }
         const created = normalizeVideo(await response.json())
         this.videos = [created, ...this.videos.filter((video) => video.id !== created.id)]

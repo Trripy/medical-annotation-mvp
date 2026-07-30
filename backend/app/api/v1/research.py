@@ -3,7 +3,7 @@ from __future__ import annotations
 import mimetypes
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
@@ -20,6 +20,10 @@ from app.models.research import (
 from app.schemas.research import (
     ResearchVideoAnnotationRead,
     ResearchVideoAnnotationSaveRequest,
+    ResearchVideoBatchExportPreviewRead,
+    ResearchVideoBatchExportRequest,
+    ResearchVideoChecklistPageRead,
+    ResearchVideoChecklistDefaultPhaseSelectionRead,
     ResearchVideoDetailRead,
     ResearchVideoFrameAnnotationsRead,
     ResearchVideoFrameRead,
@@ -27,12 +31,30 @@ from app.schemas.research import (
     ResearchVideoLabelPayload,
     ResearchVideoLabelRead,
     ResearchVideoRead,
+    ResearchVideoTrimInfoRead,
+    ResearchVideoTrimLinkedDataRead,
+    ResearchVideoTrimRequest,
+    ResearchVideoTrimResponse,
     ResearchVideoUploadResponse,
     ResearchVideoWorkspaceRead,
 )
 from app.api.v1 import research_phases, research_skills
 from app.services.range_file_response import create_range_file_response
-from app.services.video_import import InvalidVideoError, extract_video_frames, save_uploaded_video
+from app.services.research_video_trim import (
+    ResearchVideoTrimConflictError,
+    ResearchVideoTrimError,
+    get_linked_video_data,
+    minimum_keep_frames,
+    trim_research_video,
+)
+from app.services.research_video_checklist import (
+    build_video_batch_export,
+    list_default_phase_export_selections,
+    list_video_operation_checklist,
+    preview_video_batch_export,
+    remove_batch_export_file,
+)
+from app.services.video_import import InvalidVideoError, import_managed_research_video, save_uploaded_video
 
 router = APIRouter()
 router.include_router(research_phases.router)
@@ -48,6 +70,80 @@ def list_research_videos(db: Session = Depends(get_db)) -> list[ResearchVideoRea
     return [_research_video_to_read(video) for video in videos]
 
 
+@router.get("/video-operation-checklist", response_model=ResearchVideoChecklistPageRead)
+def get_research_video_operation_checklist(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    search: str | None = Query(default=None),
+    video_status: str | None = Query(default=None),
+    trim_status: str = Query(default="all"),
+    phase_status: str = Query(default="all"),
+    protocol_id: int | None = Query(default=None),
+    sort_by: str = Query(default="created_at"),
+    sort_order: str = Query(default="desc"),
+    db: Session = Depends(get_db),
+) -> ResearchVideoChecklistPageRead:
+    return list_video_operation_checklist(
+        db,
+        page=page,
+        page_size=page_size,
+        search=search,
+        video_status=video_status,
+        trim_status=trim_status,
+        phase_status=phase_status,
+        protocol_id=protocol_id,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+
+
+@router.get(
+    "/video-operation-checklist/default-phase-selections",
+    response_model=list[ResearchVideoChecklistDefaultPhaseSelectionRead],
+)
+def get_research_video_operation_checklist_default_phase_selections(
+    search: str | None = Query(default=None),
+    video_status: str | None = Query(default=None),
+    trim_status: str = Query(default="all"),
+    phase_status: str = Query(default="all"),
+    protocol_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> list[ResearchVideoChecklistDefaultPhaseSelectionRead]:
+    return list_default_phase_export_selections(
+        db,
+        search=search,
+        video_status=video_status,
+        trim_status=trim_status,
+        phase_status=phase_status,
+        protocol_id=protocol_id,
+    )
+
+
+@router.post("/video-batch-export/preview", response_model=ResearchVideoBatchExportPreviewRead)
+def preview_research_video_batch_export(
+    payload: ResearchVideoBatchExportRequest,
+    db: Session = Depends(get_db),
+) -> ResearchVideoBatchExportPreviewRead:
+    return preview_video_batch_export(db, payload)
+
+
+@router.post("/video-batch-export")
+def export_research_video_batch(
+    payload: ResearchVideoBatchExportRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    export_file = build_video_batch_export(db, payload)
+    background_tasks.add_task(remove_batch_export_file, export_file.path)
+    return FileResponse(
+        export_file.path,
+        media_type=export_file.media_type,
+        filename=export_file.filename,
+        headers=export_file.headers,
+        background=background_tasks,
+    )
+
+
 @router.post("/videos", response_model=ResearchVideoUploadResponse, status_code=status.HTTP_201_CREATED)
 def upload_research_video(
     file: UploadFile = File(...),
@@ -57,7 +153,6 @@ def upload_research_video(
 ) -> ResearchVideoUploadResponse:
     storage_root = Path(settings.local_storage_root) / "research" / "videos"
     raw_root = storage_root / "raw"
-    thumbnails_root = storage_root / "thumbnails"
 
     created_by_id: int | None = None
     if username:
@@ -66,58 +161,21 @@ def upload_research_video(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
         created_by_id = user.id
 
-    video_path, original_filename = save_uploaded_video(file, videos_root=raw_root)
-    video = ResearchVideo(
-        name=(name or original_filename).strip() or original_filename,
-        original_filename=original_filename,
-        file_path=video_path,
-        status="processing",
-        created_by_id=created_by_id,
-    )
-    db.add(video)
-    db.flush()
-
-    video_frames_root = storage_root / str(video.id) / "frames"
-    thumbnail_path = thumbnails_root / f"{video.id}.jpg"
-
     try:
-        metadata = extract_video_frames(video_path, video_frames_root, thumbnail_path=thumbnail_path)
+        video_path, original_filename = save_uploaded_video(file, videos_root=raw_root)
+        video, warnings = import_managed_research_video(
+            db=db,
+            video_path=video_path,
+            original_filename=original_filename,
+            display_name=name,
+            created_by_id=created_by_id,
+            storage_root=storage_root,
+        )
     except InvalidVideoError as exc:
-        db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    video.thumbnail_path = str(thumbnail_path)
-    video.width = metadata["width"]
-    video.height = metadata["height"]
-    video.fps = metadata["fps"]
-    video.frame_count = metadata["frame_count"]
-    video.duration_ms = metadata["duration_ms"]
-    video.status = "ready"
-    video.frames = [
-        ResearchVideoFrame(
-            frame_index=frame["frame_index"],
-            timestamp_ms=frame["timestamp_ms"],
-            filename=frame["filename"],
-            file_path=frame["file_path"],
-            width=frame["width"],
-            height=frame["height"],
-        )
-        for frame in metadata["frames"]
-    ]
-    video.labels = [
-        ResearchVideoLabel(
-            name="default",
-            color="#22c55e",
-            shape_type="polygon",
-            sort_order=0,
-        )
-    ]
-
-    db.commit()
-    db.refresh(video)
     return ResearchVideoUploadResponse(
         **_research_video_to_read(video).model_dump(),
-        warnings=metadata["warnings"],
+        warnings=warnings,
     )
 
 
@@ -131,6 +189,57 @@ def get_research_video(video_id: int, db: Session = Depends(get_db)) -> Research
 def get_research_video_workspace(video_id: int, db: Session = Depends(get_db)) -> ResearchVideoWorkspaceRead:
     video = _get_research_video_workspace_or_404(video_id, db)
     return _research_video_to_workspace(video)
+
+
+@router.get("/videos/{video_id}/trim-info", response_model=ResearchVideoTrimInfoRead)
+def get_research_video_trim_info(video_id: int, db: Session = Depends(get_db)) -> ResearchVideoTrimInfoRead:
+    video = _get_research_video_workspace_or_404(video_id, db)
+    if video.status != "ready":
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Only ready research videos can be trimmed.")
+    linked_data = get_linked_video_data(db, video.id)
+    return ResearchVideoTrimInfoRead(
+        video=_research_video_to_workspace(video),
+        linked_data=ResearchVideoTrimLinkedDataRead(
+            frame_annotation_count=linked_data.frame_annotation_count,
+            phase_annotation_set_count=linked_data.phase_annotation_set_count,
+            phase_segment_count=linked_data.phase_segment_count,
+            skill_assessment_count=linked_data.skill_assessment_count,
+            skill_evidence_count=linked_data.skill_evidence_count,
+        ),
+        minimum_keep_frames=minimum_keep_frames(video),
+    )
+
+
+@router.post("/videos/{video_id}/trim", response_model=ResearchVideoTrimResponse, status_code=status.HTTP_201_CREATED)
+def trim_research_video_endpoint(
+    video_id: int,
+    payload: ResearchVideoTrimRequest,
+    db: Session = Depends(get_db),
+) -> ResearchVideoTrimResponse:
+    source_video = _get_research_video_workspace_or_404(video_id, db)
+    storage_root = Path(settings.local_storage_root) / "research" / "videos"
+    try:
+        trimmed_video, warnings = trim_research_video(
+            db=db,
+            source_video=source_video,
+            start_frame=payload.start_frame,
+            end_frame_exclusive=payload.end_frame_exclusive,
+            display_name=payload.display_name,
+            acknowledge_annotations_not_copied=payload.acknowledge_annotations_not_copied,
+            storage_root=storage_root,
+        )
+    except ResearchVideoTrimConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ResearchVideoTrimError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except InvalidVideoError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return ResearchVideoTrimResponse(
+        source_video_id=source_video.id,
+        trimmed_video_id=trimmed_video.id,
+        status=trimmed_video.status,
+        warnings=warnings,
+    )
 
 
 @router.get("/videos/{video_id}/frames", response_model=ResearchVideoFramesPageRead)
@@ -256,7 +365,15 @@ def save_research_video_frame_annotations(
     )
 
     saved_annotations: list[ResearchVideoAnnotation] = []
-    for index, annotation in enumerate(payload.annotations):
+    normalized_annotations = [
+        annotation
+        for _index, annotation in sorted(
+            enumerate(payload.annotations),
+            key=lambda item: (item[1].z_order, item[0]),
+        )
+    ]
+
+    for index, annotation in enumerate(normalized_annotations):
         saved = ResearchVideoAnnotation(
             video_id=video_id,
             frame_id=frame.id,
@@ -395,6 +512,10 @@ def _research_video_to_read(video: ResearchVideo) -> ResearchVideoRead:
         frame_count=video.frame_count,
         duration_ms=video.duration_ms,
         status=video.status,
+        source_video_id=video.source_video_id,
+        origin_type=video.origin_type,
+        trim_start_frame=video.trim_start_frame,
+        trim_end_frame_exclusive=video.trim_end_frame_exclusive,
         thumbnail_url=f"/api/research/videos/{video.id}/thumbnail" if video.thumbnail_path else None,
         created_at=video.created_at.isoformat(),
         updated_at=video.updated_at.isoformat(),
