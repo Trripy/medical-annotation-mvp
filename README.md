@@ -1,161 +1,150 @@
-# Medical Annotation MVP GPU
+# Medical Annotation MVP
 
-A GPU-ready medical image annotation platform with project/job management, frame-by-frame annotation, SAM2-assisted segmentation, export tools, and per-user annotation preferences.
+**A GPU-assisted annotation platform for medical images and surgical videos.**
 
-This repository is the GPU deployment variant of the Medical Annotation MVP. The frontend and PostgreSQL run in Docker, while the FastAPI backend runs directly on the host so SAM2 can access the local CUDA environment.
+Medical Annotation MVP is a self-hosted research annotation platform built for medical imaging and surgical video datasets. It combines conventional manual annotation tools with **SAM 2-assisted segmentation**, research video management, surgical phase annotation, skill assessment, and structured dataset export.
 
-## Features
+The project is designed for research workflows where data needs to remain on local or institutional infrastructure.
 
-- Project and job management for multi-image annotation workflows.
-- Image upload, thumbnail generation, and local filesystem-backed storage.
-- Annotation tools: cursor/edit, rectangle, polygon, and SAM2 prompt-based segmentation.
-- SAM2 mask generation with prompt points, box prompts, candidate selection, polygon simplification, mask thresholding, mask area filtering, and hole filling.
-- Per-user settings for default tool, frame resume behavior, zoom/pan behavior, shortcuts, SAM2 result edge snapping, and SAM2 default parameters.
-- Label management per project/job.
-- Frame navigation with URL frame query support and optional per-job last-frame persistence.
-- Export support for LabelMe, overlay images, indexed masks, and color masks.
-- FastAPI OpenAPI documentation at `/docs`.
+> **Status:** Research software / MVP. It is not a clinically validated medical device or a production-ready clinical system.
+
+---
+
+## Highlights
+
+* **Image & frame annotation** — rectangle, polygon, editing, layer ordering, review workflows, and configurable labels.
+* **SAM 2-assisted segmentation** — point/box prompting, multiple mask candidates, refinement, edge snapping, and mask post-processing.
+* **Surgical video workflows** — upload or server-side import, frame extraction, thumbnails, trimming, notes, provenance, and visibility management.
+* **Phase annotation** — timeline-based surgical phase labeling with draft/submitted versions, gap handling, validation, and label mapping.
+* **Skill assessment** — rubric-based surgical skill scoring with criteria, evidence, validation, and submission.
+* **Research-ready exports** — LabelMe, overlay, indexed/color masks, phase JSON, mapped labels, and multi-video batch export.
+* **Bilingual interface** — Simplified Chinese and English.
+* **Self-hosted storage** — PostgreSQL for structured data and local filesystem storage for images, videos, frames, and exports.
+
+---
 
 ## Tech Stack
 
-- Backend: FastAPI, SQLAlchemy, Alembic, PostgreSQL, Pydantic
-- Frontend: Vue 3, Vite, TypeScript, Element Plus, Pinia
-- Segmentation: SAM2, PyTorch CUDA
-- Storage: local filesystem
-- Deployment: Docker Compose for PostgreSQL/frontend, host Python environment for GPU backend
+| Layer              | Technology                                   |
+| ------------------ | -------------------------------------------- |
+| Frontend           | Vue 3, TypeScript, Vite, Element Plus, Pinia |
+| Backend            | FastAPI, SQLAlchemy, Pydantic                |
+| Database           | PostgreSQL + Alembic                         |
+| AI                 | PyTorch, CUDA, SAM 2                         |
+| Media              | OpenCV, FFmpeg / ffprobe                     |
+| Storage            | Local filesystem                             |
+| Linux deployment   | Docker Compose + host GPU backend            |
+| Windows deployment | Native PostgreSQL + Conda/Python + Node.js   |
 
-## Repository Layout
-
-```text
-medical-annotation-mvp-gpu/
-  backend/
-    app/
-      api/                 # FastAPI routes
-      core/                # application settings
-      db/                  # database session/base
-      models/              # SQLAlchemy models
-      schemas/             # Pydantic schemas
-      services/            # image storage, export, SAM2 service
-    alembic/               # database migrations
-    requirements.txt
-  frontend/
-    src/
-      components/          # sidebar, canvas, object panel
-      stores/              # Pinia stores
-      views/               # pages
-      utils/
-    package.json
-  scripts/
-    start_backend_gpu.sh   # host backend startup with Alembic migration
-    start_frontend.sh      # Docker frontend startup helper
-  storage/                 # runtime uploads and generated files, ignored by git
-  docker-compose.yml       # PostgreSQL and frontend services
-  .env.example
-```
+---
 
 ## Architecture
 
 ```text
-Browser
-  |
-  | http://<host>:5173
-  v
-Vue frontend container
-  |
-  | http://<host>:8000/api/...
-  v
-FastAPI backend on host Python/Conda
-  |
-  | PostgreSQL on localhost:5433
-  v
-PostgreSQL container
-
-FastAPI backend
-  |
-  | CUDA / PyTorch / SAM2 checkpoint
-  v
-Host GPU
+                         Browser
+                            │
+                     Vue Frontend
+                            │
+                     FastAPI Backend
+                  ┌─────────┼─────────┐
+                  │         │         │
+             PostgreSQL   Storage   FFmpeg
+                                      │
+                               PyTorch / SAM 2
+                                      │
+                                   NVIDIA GPU
 ```
 
-The backend is intentionally not containerized in this GPU variant. This avoids CUDA and SAM2 checkpoint access issues inside Docker and lets the backend use the host Conda environment directly.
+The backend intentionally runs outside the frontend container in the current GPU deployment so that it can directly access CUDA, SAM 2 checkpoints, FFmpeg, and local research data.
 
-## Prerequisites
+---
 
-- Linux host with Docker and Docker Compose.
-- NVIDIA driver and CUDA-capable GPU for SAM2 acceleration.
-- Python/Conda environment with the dependencies in `backend/requirements.txt`.
-- SAM2 source repository and checkpoint files available on the host.
-- Node.js is only required for local frontend development; Docker can build and run the frontend without a host Node install.
+# Getting Started
 
-## Configuration
+The project currently supports two deployment paths:
 
-Copy the example environment file if you want shell-based configuration:
+* **Linux GPU server** — recommended for shared laboratory servers.
+* **Native Windows** — supported for standalone Windows GPU workstations without WSL.
+
+---
+
+## Linux
+
+### Requirements
+
+* Linux
+* Docker + Docker Compose
+* Python / Conda
+* NVIDIA driver and CUDA-capable GPU
+* SAM 2 repository and checkpoint
+* FFmpeg / ffprobe
+
+Clone the repository:
 
 ```bash
+git clone https://github.com/Trripy/medical-annotation-mvp.git
+cd medical-annotation-mvp
+```
+
+Create the environment:
+
+```bash
+conda create -n med-annotate python=3.10 -y
+conda activate med-annotate
+
+pip install -r backend/requirements.txt
+```
+
+Clone and install SAM 2:
+
+```bash
+cd ..
+git clone https://github.com/facebookresearch/sam2.git
+cd sam2
+pip install -e .
+```
+
+Download a SAM 2.1 checkpoint, for example:
+
+```text
+sam2/checkpoints/sam2.1_hiera_large.pt
+```
+
+Create the application configuration:
+
+```bash
+cd ../medical-annotation-mvp
 cp .env.example .env
 ```
 
-Important variables:
+Configure at least:
 
-```text
+```env
 POSTGRES_DB=med_annotate
 POSTGRES_USER=med_annotate
 POSTGRES_PASSWORD=med_annotate
 POSTGRES_HOST=127.0.0.1
 POSTGRES_PORT=5433
 
-LOCAL_STORAGE_ROOT=/path/to/medical-annotation-mvp-gpu/storage
+LOCAL_STORAGE_ROOT=/path/to/medical-annotation-data
 
-# Optional. Leave empty to disable Research video server-side import.
-# JSON object: root alias -> absolute directory.
-RESEARCH_VIDEO_IMPORT_ROOTS={"dataset":"/data1/dataset","archive":"/data2/video_archive"}
-
-# Optional. Research video trimming uses ffmpeg/ffprobe. Leave blank to use PATH
-# or the bundled conda environment when available. Trimming requires libx264 or
-# libopenh264 so the generated MP4 remains browser-compatible H.264.
-RESEARCH_VIDEO_FFMPEG_BINARY=/path/to/ffmpeg
-RESEARCH_VIDEO_TRIM_MAX_CONCURRENCY=1
-
-CONDA_ENV=/path/to/conda/env
 SAM2_REPO_ROOT=/path/to/sam2
 SAM2_CHECKPOINT=/path/to/sam2/checkpoints/sam2.1_hiera_large.pt
-SAM2_MODEL_CFG=configs/sam2.1/sam2.1_hiera_l.yaml
 SAM2_DEVICE=cuda
-SAM2_LOAD_ON_STARTUP=true
 
-BACKEND_CORS_ORIGINS=*
+RESEARCH_VIDEO_FFMPEG_BINARY=/usr/bin/ffmpeg
 ```
 
-The startup script provides local defaults, but production or shared deployments should pass explicit environment variables.
-
-## Quick Start
-
-Start the GPU backend:
+Start the backend:
 
 ```bash
-cd medical-annotation-mvp-gpu
-CONDA_ENV=/path/to/conda/env \
+CONDA_ENV="$CONDA_PREFIX" \
 SAM2_REPO_ROOT=/path/to/sam2 \
 SAM2_CHECKPOINT=/path/to/sam2/checkpoints/sam2.1_hiera_large.pt \
 ./scripts/start_backend_gpu.sh
 ```
 
-The backend script:
-
-- starts PostgreSQL with `docker compose up -d db`;
-- waits for PostgreSQL readiness;
-- runs `alembic upgrade head`;
-- starts `uvicorn app.main:app --host 0.0.0.0 --port 8000`;
-- loads SAM2 on startup when `SAM2_LOAD_ON_STARTUP=true`.
-
-Start the frontend in another terminal:
-
-```bash
-cd medical-annotation-mvp-gpu
-./scripts/start_frontend.sh
-```
-
-Or directly:
+Start the frontend:
 
 ```bash
 docker compose up -d frontend
@@ -163,200 +152,569 @@ docker compose up -d frontend
 
 Open:
 
-- Frontend: `http://localhost:5173`
-- Backend API root: `http://localhost:8000`
-- API docs: `http://localhost:8000/docs`
-- Health check: `http://localhost:8000/api/v1/health`
-
-For LAN access, replace `localhost` with the server IP.
-
-## Backend Development
-
-Install dependencies in a Python environment:
-
-```bash
-cd backend
-python -m pip install -r requirements.txt
+```text
+http://localhost:5173
 ```
 
-Run migrations:
+API documentation:
 
-```bash
-cd backend
+```text
+http://localhost:8000/docs
+```
+
+---
+
+# Native Windows
+
+The full application can also run directly on Windows without WSL or Docker.
+
+The native Windows stack is:
+
+```text
+PostgreSQL Windows Service
+        +
+Conda / Python Backend
+        +
+PyTorch CUDA
+        +
+SAM 2
+        +
+FFmpeg
+        +
+Node.js Frontend
+```
+
+> SAM 2 upstream recommends WSL for Windows users. Native Windows therefore requires a little more setup. The SAM 2 CUDA extension can be skipped if it cannot be compiled; PyTorch CUDA inference can still use the NVIDIA GPU. SAM 2 explicitly supports disabling the optional extension with `SAM2_BUILD_CUDA=0`.
+
+### Requirements
+
+Install:
+
+* Git for Windows
+* Miniconda or Anaconda
+* PostgreSQL 16
+* Node.js
+* FFmpeg
+* NVIDIA GPU driver
+* Microsoft Visual C++ Redistributable
+
+Verify the GPU first:
+
+```powershell
+nvidia-smi
+```
+
+---
+
+## 1. Clone the repository
+
+A short path is recommended:
+
+```powershell
+cd D:\Projects
+
+git clone https://github.com/Trripy/medical-annotation-mvp.git
+
+cd medical-annotation-mvp
+```
+
+---
+
+## 2. Create the Python environment
+
+```powershell
+conda create -n med-annotate python=3.10 -y
+conda activate med-annotate
+
+python -m pip install --upgrade pip
+
+pip install -r backend\requirements.txt
+```
+
+Verify PyTorch:
+
+```powershell
+python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'No GPU')"
+```
+
+A working GPU environment should report:
+
+```text
+True
+```
+
+for:
+
+```python
+torch.cuda.is_available()
+```
+
+---
+
+## 3. Install SAM 2
+
+For example:
+
+```powershell
+cd D:\AI
+
+git clone https://github.com/facebookresearch/sam2.git
+
+cd sam2
+```
+
+Native Windows installations can skip the optional SAM 2 CUDA extension:
+
+```powershell
+$env:SAM2_BUILD_CUDA="0"
+
+pip install --no-build-isolation -e .
+
+Remove-Item Env:SAM2_BUILD_CUDA
+```
+
+Verify:
+
+```powershell
+python -c "import sam2; print('SAM2 OK')"
+```
+
+Download a checkpoint such as:
+
+```text
+sam2.1_hiera_large.pt
+```
+
+and place it at:
+
+```text
+D:\AI\sam2\checkpoints\sam2.1_hiera_large.pt
+```
+
+---
+
+## 4. Configure PostgreSQL
+
+Install PostgreSQL 16 and keep the default Windows service running.
+
+Create the application user and database:
+
+```sql
+CREATE USER med_annotate WITH PASSWORD 'med_annotate';
+CREATE DATABASE med_annotate OWNER med_annotate;
+```
+
+A typical native Windows PostgreSQL configuration uses:
+
+```text
+127.0.0.1:5432
+```
+
+---
+
+## 5. Install FFmpeg
+
+Install a Windows FFmpeg build containing:
+
+```text
+ffmpeg.exe
+ffprobe.exe
+```
+
+For example:
+
+```text
+D:\Tools\ffmpeg\bin\ffmpeg.exe
+D:\Tools\ffmpeg\bin\ffprobe.exe
+```
+
+Add the directory to `PATH` or configure it explicitly.
+
+Verify:
+
+```powershell
+ffmpeg -version
+ffprobe -version
+```
+
+The build must provide a browser-compatible H.264 encoder such as:
+
+```text
+libx264
+```
+
+or:
+
+```text
+libopenh264
+```
+
+---
+
+## 6. Configure the backend
+
+Because the backend loads `.env` from its working directory, the most direct native Windows setup is:
+
+```text
+medical-annotation-mvp\backend\.env
+```
+
+Create it from the repository example:
+
+```powershell
+Copy-Item .env.example backend\.env
+```
+
+Example:
+
+```env
+POSTGRES_DB=med_annotate
+POSTGRES_USER=med_annotate
+POSTGRES_PASSWORD=med_annotate
+POSTGRES_HOST=127.0.0.1
+POSTGRES_PORT=5432
+
+BACKEND_CORS_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
+
+LOCAL_STORAGE_ROOT=D:/MedicalAnnotationData/storage
+
+SAM2_REPO_ROOT=D:/AI/sam2
+SAM2_CHECKPOINT=D:/AI/sam2/checkpoints/sam2.1_hiera_large.pt
+SAM2_MODEL_CFG=configs/sam2.1/sam2.1_hiera_l.yaml
+SAM2_DEVICE=cuda
+SAM2_LOAD_ON_STARTUP=true
+
+RESEARCH_VIDEO_FFMPEG_BINARY=D:/Tools/ffmpeg/bin/ffmpeg.exe
+RESEARCH_VIDEO_TRIM_MAX_CONCURRENCY=1
+```
+
+Windows paths using `/` are recommended in `.env` files.
+
+For server-side video import, add for example:
+
+```env
+RESEARCH_VIDEO_IMPORT_ROOTS={"dataset":"D:/CataractVideos"}
+```
+
+Only explicitly configured directories are available through server-side import.
+
+---
+
+## 7. Initialize the database
+
+```powershell
+conda activate med-annotate
+
+cd D:\Projects\medical-annotation-mvp\backend
+
 alembic upgrade head
 ```
 
-Run the API:
+Check the migration state:
+
+```powershell
+alembic current
+alembic heads
+```
+
+They should point to the same revision.
+
+---
+
+## 8. Start the backend
+
+From the `backend` directory:
+
+```powershell
+conda activate med-annotate
+
+python -m uvicorn app.main:app `
+  --host 127.0.0.1 `
+  --port 8000
+```
+
+Verify:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+or:
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:8000/api/v1/health
+```
+
+Keep this PowerShell window running.
+
+---
+
+## 9. Build and start the frontend
+
+Open a second PowerShell window:
+
+```powershell
+cd D:\Projects\medical-annotation-mvp\frontend
+
+npm install
+npm run build
+node server.mjs
+```
+
+The frontend starts on:
+
+```text
+http://127.0.0.1:5173
+```
+
+Open that URL in Chrome or Microsoft Edge.
+
+---
+
+## 10. Daily Windows startup
+
+After the initial installation, PostgreSQL normally runs automatically as a Windows Service.
+
+Start the backend:
+
+```powershell
+conda activate med-annotate
+cd D:\Projects\medical-annotation-mvp\backend
+
+python -m uvicorn app.main:app `
+  --host 127.0.0.1 `
+  --port 8000
+```
+
+Start the frontend in another terminal:
+
+```powershell
+cd D:\Projects\medical-annotation-mvp\frontend
+node server.mjs
+```
+
+Then open:
+
+```text
+http://127.0.0.1:5173
+```
+
+Use `Ctrl+C` in both terminals to stop the application.
+
+---
+
+# Configuration
+
+Common environment variables:
+
+| Variable                              | Description                               |
+| ------------------------------------- | ----------------------------------------- |
+| `POSTGRES_*`                          | PostgreSQL connection                     |
+| `LOCAL_STORAGE_ROOT`                  | Managed image/video/export storage        |
+| `SAM2_REPO_ROOT`                      | Local SAM 2 repository                    |
+| `SAM2_CHECKPOINT`                     | Default SAM 2 checkpoint                  |
+| `SAM2_DEVICE`                         | `cuda`, `cpu`, or `auto`                  |
+| `RESEARCH_VIDEO_IMPORT_ROOTS`         | Whitelisted server-side video directories |
+| `RESEARCH_VIDEO_FFMPEG_BINARY`        | FFmpeg executable                         |
+| `RESEARCH_VIDEO_TRIM_MAX_CONCURRENCY` | Maximum simultaneous video trims          |
+| `BACKEND_CORS_ORIGINS`                | Allowed frontend origins                  |
+
+See `.env.example` for the complete set of runtime options.
+
+---
+
+# Typical Workflow
+
+```text
+Import images / videos
+        ↓
+Create labels / protocols
+        ↓
+Annotate
+ ┌──────┼──────────┐
+ │      │          │
+Frame  Phase      Skill
+ │      │          │
+ └──────┼──────────┘
+        ↓
+Review / Validate
+        ↓
+Submit
+        ↓
+Export
+```
+
+Research videos can also be trimmed before annotation while preserving the relationship to their original source video.
+
+---
+
+# Development
+
+## Backend
 
 ```bash
 cd backend
-PYTHONPATH="$(pwd)" uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+python -m pip install -r requirements.txt
+
+alembic upgrade head
+
+python -m uvicorn app.main:app \
+  --reload \
+  --host 127.0.0.1 \
+  --port 8000
 ```
 
-For GPU usage, make sure `PYTHONPATH` includes the SAM2 repository and the relevant SAM2 environment variables are set.
+OpenAPI documentation is available at:
 
-## Frontend Development
+```text
+http://localhost:8000/docs
+```
+
+---
+
+## Frontend
 
 ```bash
 cd frontend
+
 npm install
 npm run dev
 ```
 
-Build:
+Production build:
 
 ```bash
-cd frontend
 npm run build
 ```
 
-The frontend automatically resolves the API host from the browser host and port `8000` unless `VITE_API_BASE_URL` is set.
+---
 
-## Database Migrations
+# Testing
 
-Create a migration after model changes:
-
-```bash
-cd backend
-alembic revision --autogenerate -m "describe change"
-```
-
-Apply migrations:
+Backend:
 
 ```bash
 cd backend
-alembic upgrade head
+python -m pytest tests -q
 ```
 
-The GPU backend startup script runs `alembic upgrade head` automatically.
+Frontend:
 
-## SAM2 Notes
+```bash
+cd frontend
+node --test tests/*.test.ts
+```
 
-The SAM2 prediction endpoint is:
+Type checking:
+
+```bash
+npx vue-tsc -b --pretty false
+```
+
+Build verification:
+
+```bash
+npm run build
+```
+
+Repository patch check:
+
+```bash
+git diff --check
+```
+
+---
+
+# Data Storage
+
+Runtime data is intentionally kept outside Git.
+
+Typical runtime data includes:
 
 ```text
-POST /api/sam2/predict
+storage/
+├── uploaded images
+├── research videos
+├── extracted frames
+├── thumbnails
+└── exports
 ```
 
-The Annotation page sends the current sidebar SAM2 settings with each request. User Settings only control the defaults applied when an annotation page is opened; temporary changes in the Annotation page are preserved within the current page session and are used for Generate Mask.
+The PostgreSQL database stores structured application and annotation metadata.
 
-Useful validation command:
+Do **not** commit:
 
-```bash
-python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"
-```
+* patient data or PHI
+* clinical videos
+* local `.env` files
+* passwords or tokens
+* SAM 2 checkpoints
+* PostgreSQL data
+* runtime storage
+* generated exports
 
-If `torch.cuda.is_available()` is `False`, verify the NVIDIA driver, CUDA-compatible PyTorch build, and `SAM2_DEVICE`.
+For important datasets, back up both **PostgreSQL and `LOCAL_STORAGE_ROOT`**.
 
-## User Settings
+---
 
-Settings are stored per user in the `user_settings` table and exposed through:
+# Security
+
+This repository is currently intended for research and controlled institutional environments.
+
+Before exposing the application to untrusted networks or using it as a production service, review at least:
+
+* authentication and authorization
+* HTTPS
+* CORS restrictions
+* database and storage backups
+* access logging and auditing
+* secret management
+* data retention
+* PHI protection
+* disaster recovery
+
+For local Windows use, the examples intentionally bind FastAPI and the frontend to:
 
 ```text
-GET /api/users/me/settings?username=<username>
-PUT /api/users/me/settings
+127.0.0.1
 ```
 
-Current personalized settings include:
+instead of exposing them to the LAN.
 
-- default annotation tool;
-- edge snap threshold;
-- polygon edit shortcuts;
-- polygon confirm-point shortcut;
-- pan shortcut;
-- SAM2 Accept next-tool behavior;
-- remember last frame per job;
-- keep zoom and pan when switching frames;
-- SAM2 result edge snapping;
-- SAM2 default model, candidate, multimask output, prompt-point visibility, polygon simplification, mask threshold, minimum mask area, and maximum hole area.
+---
 
-Unauthenticated users use frontend defaults.
+# Project Status
 
-## Export Formats
+The platform is actively evolving around medical and surgical video research workflows.
 
-Job export endpoints include:
+Current limitations include:
 
-```text
-GET /api/jobs/{job_id}/export/labelme
-GET /api/jobs/{job_id}/export/overlay
-GET /api/jobs/{job_id}/export/indexed-mask
-GET /api/jobs/{job_id}/export/color-mask
-```
+* SAM 2 native Windows support is less mature than Linux and requires environment-specific validation.
+* Long video import and trimming operations can be resource intensive.
+* Extracted frames and research videos can consume substantial disk space.
+* The current platform is research software and has not undergone clinical validation or production security certification.
 
-Exports are generated from the saved annotation data for the job.
+---
 
-## Runtime Data
+# Contributing
 
-Runtime data is intentionally excluded from git:
+Issues, bug reports, feature proposals, and pull requests are welcome.
 
-- uploaded images;
-- thumbnails;
-- generated export files;
-- PostgreSQL volume data;
-- backend/frontend logs;
-- Python and Node build/cache artifacts.
-
-Do not commit PHI, patient data, private checkpoints, or local environment files.
-
-## Troubleshooting
-
-Check whether services are running:
+Before submitting changes:
 
 ```bash
-docker compose ps
-curl http://localhost:8000/api/v1/health
-curl http://localhost:5173/jobs
+git diff --check
 ```
 
-Check backend logs when using the startup script:
+and run the relevant backend/frontend test suites.
 
-```bash
-tail -f logs/backend_gpu.log
-```
+Please do not include patient data, private datasets, credentials, or model checkpoints in issues or pull requests.
 
-Common issues:
+---
 
-- `SAM2 model loaded ... device=cuda` is missing: verify `SAM2_REPO_ROOT`, `SAM2_CHECKPOINT`, PyTorch CUDA, and `SAM2_DEVICE`.
-- Frontend cannot reach backend: verify backend port `8000`, CORS settings, and `VITE_API_BASE_URL`.
-- Database errors after pulling new code: run `alembic upgrade head`.
-- Old frontend UI after rebuild: hard-refresh the browser with `Ctrl + F5`.
+# License
 
-## Publishing To GitHub
+This repository does not currently include a project `LICENSE`.
 
-Initialize and commit locally:
-
-```bash
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-```
-
-Create an empty GitHub repository, then connect and push:
-
-```bash
-git remote add origin git@github.com:<owner>/<repo>.git
-git push -u origin main
-```
-
-If using HTTPS:
-
-```bash
-git remote add origin https://github.com/<owner>/<repo>.git
-git push -u origin main
-```
-
-## Security Notes
-
-This project is an MVP. Before production use:
-
-- replace username-based settings APIs with real authentication and authorization;
-- restrict CORS instead of using `*`;
-- protect uploaded medical data and exports;
-- move secrets out of shell history and committed files;
-- review administrator access behavior;
-- add backup and retention policies for PostgreSQL and storage.
-
-## License
-
-No license file is included yet. Add a `LICENSE` file before public distribution if the repository should be open source.
+Before public redistribution or formal open-source release, select an appropriate project license and review the licenses of bundled or required third-party components, including SAM 2, PyTorch, FFmpeg, PostgreSQL, Vue, and other dependencies.
