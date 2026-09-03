@@ -34,6 +34,11 @@ FRAMEWISE_UNLABELED_KEY = "unlabeled"
 FRAMEWISE_UNLABELED_NAME = "Unlabeled"
 PHASE_EXPORT_SCHEMA_VERSION = 2
 PHASE_EXPORT_VIDEO_EXTENSIONS = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm")
+PHASE_COORDINATE_REFERENCE = "current_video"
+PHASE_COORDINATE_REFERENCE_NOTE = (
+    "Frame and timestamp fields are relative to the current annotated video. "
+    "If this video is a trimmed result, coordinates are relative to the trimmed video, not the source video."
+)
 WINDOWS_RESERVED_FILENAMES = {
     "CON",
     "PRN",
@@ -119,6 +124,7 @@ def build_phase_json_export(
             "frame_count": video.frame_count,
             "duration_ms": video.duration_ms,
         },
+        "coordinate_system": build_phase_coordinate_system(video),
         "annotation_set": {
             "id": detail.id,
             "status": detail.status,
@@ -186,6 +192,8 @@ def iter_phase_segment_csv(db: Session, annotation_set_id: int) -> PhaseStreamEx
         "source",
         "confidence",
         "notes",
+        "coordinate_reference",
+        "coordinate_reference_note",
     ]
 
     def rows() -> Iterator[list[Any]]:
@@ -218,6 +226,8 @@ def iter_phase_framewise_csv(db: Session, annotation_set_id: int) -> PhaseStream
         "phase_label_id",
         "segment_id",
         "annotation_status",
+        "coordinate_reference",
+        "coordinate_reference_note",
     ]
     ordered_segments = list(detail.segments)
     frame_count = max(0, int(video.frame_count or 0))
@@ -251,6 +261,8 @@ def iter_phase_framewise_csv(db: Session, annotation_set_id: int) -> PhaseStream
                     None,
                     None,
                     detail.status,
+                    PHASE_COORDINATE_REFERENCE,
+                    PHASE_COORDINATE_REFERENCE_NOTE,
                 ]
                 continue
 
@@ -262,6 +274,8 @@ def iter_phase_framewise_csv(db: Session, annotation_set_id: int) -> PhaseStream
                 covering_segment.phase_label_id,
                 covering_segment.id,
                 detail.status,
+                PHASE_COORDINATE_REFERENCE,
+                PHASE_COORDINATE_REFERENCE_NOTE,
             ]
 
     headers = build_phase_export_headers(
@@ -328,6 +342,32 @@ def segment_to_export_row(
         "source": segment.source,
         "confidence": segment.confidence,
         "notes": segment.notes,
+        "coordinate_reference": PHASE_COORDINATE_REFERENCE,
+        "coordinate_reference_note": PHASE_COORDINATE_REFERENCE_NOTE,
+    }
+
+
+def build_phase_coordinate_system(video: ResearchVideo) -> dict[str, Any]:
+    is_trimmed = video.origin_type == "trimmed"
+    conversion: dict[str, Any] | None = None
+    if is_trimmed and video.trim_start_frame is not None:
+        conversion = {
+            "source_start_frame_formula": "source_start_frame = start_frame + source_trim_start_frame",
+            "source_end_frame_exclusive_formula": "source_end_frame_exclusive = end_frame_exclusive + source_trim_start_frame",
+            "source_timestamp_formula": "source_timestamp_ms = source_frame / fps * 1000 when fps is available",
+        }
+
+    return {
+        "frame_interval_semantics": "[start_frame, end_frame_exclusive)",
+        "frame_reference": PHASE_COORDINATE_REFERENCE,
+        "time_reference": PHASE_COORDINATE_REFERENCE,
+        "description": PHASE_COORDINATE_REFERENCE_NOTE,
+        "current_video_origin_type": video.origin_type,
+        "current_video_is_trimmed_result": is_trimmed,
+        "source_video_id": video.source_video_id,
+        "source_trim_start_frame": video.trim_start_frame,
+        "source_trim_end_frame_exclusive": video.trim_end_frame_exclusive,
+        "source_coordinate_conversion": conversion,
     }
 
 

@@ -10,6 +10,7 @@ from app.schemas.research_phase import (
     CreateResearchPhaseAnnotationSetRequest,
     CreateResearchPhaseAnnotationSetResponse,
     CreateResearchPhaseSegmentRequest,
+    FillResearchPhaseGapsRequest,
     CreateResearchPhaseLabelMappingProfileRequest,
     DuplicateResearchPhaseLabelMappingProfileRequest,
     MergeResearchPhaseMappingClassesRequest,
@@ -19,6 +20,7 @@ from app.schemas.research_phase import (
     ResearchPhaseLabelMappingProfileDetail,
     ResearchPhaseLabelMappingProfileSummary,
     ResearchPhaseAnnotationSetSummary,
+    ResearchPhaseGapFillPreviewResponse,
     ResearchPhaseMutationResponse,
     ResearchPhaseProtocolDetail,
     ResearchPhaseProtocolSummary,
@@ -52,12 +54,14 @@ from app.services.research_phase_service import (
     close_active_phase_segment,
     create_phase_segment,
     delete_phase_segment,
+    fill_phase_gaps,
     get_or_create_phase_annotation_set,
     get_phase_annotation_set,
     get_phase_protocol,
     list_phase_protocols,
     list_video_phase_annotation_sets,
     merge_phase_segments,
+    preview_phase_gap_fill,
     reopen_phase_annotation_set,
     split_phase_segment,
     submit_phase_annotation_set,
@@ -291,6 +295,30 @@ async def export_phase_annotation_set_framewise_csv(
         media_type="text/csv; charset=utf-8",
         headers=export_result.headers,
     )
+
+
+@router.post(
+    "/phase-annotation-sets/{annotation_set_id}/fill-gaps/preview",
+    response_model=ResearchPhaseGapFillPreviewResponse,
+)
+async def preview_phase_gap_fill_route(
+    annotation_set_id: int,
+    payload: FillResearchPhaseGapsRequest,
+    db: Session = Depends(get_db),
+) -> ResearchPhaseGapFillPreviewResponse:
+    return preview_phase_gap_fill(db, annotation_set_id, payload)
+
+
+@router.post(
+    "/phase-annotation-sets/{annotation_set_id}/fill-gaps",
+    response_model=ResearchPhaseMutationResponse,
+)
+async def fill_phase_gaps_route(
+    annotation_set_id: int,
+    payload: FillResearchPhaseGapsRequest,
+    db: Session = Depends(get_db),
+) -> ResearchPhaseMutationResponse:
+    return fill_phase_gaps(db, annotation_set_id, payload)
 
 
 @router.post(

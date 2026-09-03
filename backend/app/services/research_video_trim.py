@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.models.research import ResearchVideo, ResearchVideoAnnotation
 from app.models.research_phase import ResearchPhaseAnnotationSet, ResearchPhaseSegment
 from app.models.research_skill import ResearchSkillAssessment, ResearchSkillEvidence, ResearchSkillScore
+from app.services.research_video_visibility import TRIMMED_SOURCE_HIDDEN_REASON, hide_research_video_from_list
 from app.services.video_import import InvalidVideoError, import_managed_research_video
 
 
@@ -123,8 +124,9 @@ def trim_research_video(
     end_frame_exclusive: int,
     display_name: str | None,
     acknowledge_annotations_not_copied: bool,
+    hide_source_after_success: bool = False,
     storage_root: Path,
-) -> tuple[ResearchVideo, list[str]]:
+) -> tuple[ResearchVideo, list[str], bool]:
     if source_video.status != "ready":
         raise ResearchVideoTrimError("Only ready research videos can be trimmed.")
     validate_trim_range(source_video, start_frame, end_frame_exclusive)
@@ -172,7 +174,7 @@ def trim_research_video(
         )
         part_path.replace(output_path)
         try:
-            return import_managed_research_video(
+            trimmed_video, warnings = import_managed_research_video(
                 db=db,
                 video_path=str(output_path),
                 original_filename=output_name,
@@ -185,6 +187,19 @@ def trim_research_video(
                 trim_end_frame_exclusive=end_frame_exclusive,
                 expected_frame_count=expected_frame_count,
             )
+            source_video = db.merge(source_video)
+            source_video_hidden = bool(source_video.hidden_from_video_list)
+            if hide_source_after_success and trimmed_video.status == "ready":
+                source_video_hidden = hide_research_video_from_list(
+                    source_video,
+                    reason=TRIMMED_SOURCE_HIDDEN_REASON,
+                    preserve_existing_reason=True,
+                )
+                db.commit()
+                db.refresh(source_video)
+                db.refresh(trimmed_video)
+                source_video_hidden = bool(source_video.hidden_from_video_list)
+            return trimmed_video, warnings, source_video_hidden
         except Exception:
             output_path.unlink(missing_ok=True)
             raise

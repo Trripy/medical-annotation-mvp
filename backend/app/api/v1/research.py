@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import mimetypes
 from pathlib import Path
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, Response
@@ -36,6 +37,14 @@ from app.schemas.research import (
     ResearchVideoTrimRequest,
     ResearchVideoTrimResponse,
     ResearchVideoUploadResponse,
+    ResearchVideoNotesRequest,
+    ResearchVideoNotesResponse,
+    ResearchVideoPhaseSummaryRead,
+    ResearchVideoVisibility,
+    ResearchVideoVisibilityBulkPreviewRead,
+    ResearchVideoVisibilityBulkResultRead,
+    ResearchVideoVisibilityRequest,
+    ResearchVideoVisibilityResponse,
     ResearchVideoWorkspaceRead,
 )
 from app.api.v1 import research_phases, research_skills
@@ -47,12 +56,22 @@ from app.services.research_video_trim import (
     minimum_keep_frames,
     trim_research_video,
 )
+from app.services.research_video_visibility import (
+    MANUAL_HIDDEN_REASON,
+    hide_research_video_from_list,
+    restore_research_video_to_list,
+)
 from app.services.research_video_checklist import (
     build_video_batch_export,
+    hide_trimmed_source_videos,
     list_default_phase_export_selections,
+    list_research_video_phase_summaries,
     list_video_operation_checklist,
+    preview_hide_trimmed_source_videos,
+    preview_restore_trimmed_source_videos,
     preview_video_batch_export,
     remove_batch_export_file,
+    restore_trimmed_source_videos,
 )
 from app.services.video_import import InvalidVideoError, import_managed_research_video, save_uploaded_video
 
@@ -62,12 +81,20 @@ router.include_router(research_skills.router)
 
 
 @router.get("/videos", response_model=list[ResearchVideoRead])
-def list_research_videos(db: Session = Depends(get_db)) -> list[ResearchVideoRead]:
+def list_research_videos(
+    visibility: ResearchVideoVisibility = Query(default="visible"),
+    db: Session = Depends(get_db),
+) -> list[ResearchVideoRead]:
+    statement = select(ResearchVideo)
+    if visibility == "visible":
+        statement = statement.where(ResearchVideo.hidden_from_video_list.is_(False))
+    elif visibility == "hidden":
+        statement = statement.where(ResearchVideo.hidden_from_video_list.is_(True))
     videos = db.scalars(
-        select(ResearchVideo)
-        .order_by(ResearchVideo.created_at.desc(), ResearchVideo.id.desc())
+        statement.order_by(ResearchVideo.created_at.desc(), ResearchVideo.id.desc())
     ).all()
-    return [_research_video_to_read(video) for video in videos]
+    phase_summaries = list_research_video_phase_summaries(db, [video.id for video in videos])
+    return [_research_video_to_read(video, phase_summaries.get(video.id)) for video in videos]
 
 
 @router.get("/video-operation-checklist", response_model=ResearchVideoChecklistPageRead)
@@ -79,6 +106,7 @@ def get_research_video_operation_checklist(
     trim_status: str = Query(default="all"),
     phase_status: str = Query(default="all"),
     protocol_id: int | None = Query(default=None),
+    visibility: str = Query(default="all"),
     sort_by: str = Query(default="created_at"),
     sort_order: str = Query(default="desc"),
     db: Session = Depends(get_db),
@@ -92,6 +120,7 @@ def get_research_video_operation_checklist(
         trim_status=trim_status,
         phase_status=phase_status,
         protocol_id=protocol_id,
+        visibility=visibility,
         sort_by=sort_by,
         sort_order=sort_order,
     )
@@ -107,6 +136,7 @@ def get_research_video_operation_checklist_default_phase_selections(
     trim_status: str = Query(default="all"),
     phase_status: str = Query(default="all"),
     protocol_id: int | None = Query(default=None),
+    visibility: str = Query(default="all"),
     db: Session = Depends(get_db),
 ) -> list[ResearchVideoChecklistDefaultPhaseSelectionRead]:
     return list_default_phase_export_selections(
@@ -116,7 +146,48 @@ def get_research_video_operation_checklist_default_phase_selections(
         trim_status=trim_status,
         phase_status=phase_status,
         protocol_id=protocol_id,
+        visibility=visibility,
     )
+
+
+@router.post(
+    "/videos/visibility/hide-trimmed-sources/preview",
+    response_model=ResearchVideoVisibilityBulkPreviewRead,
+)
+def preview_hide_research_video_trimmed_sources(
+    db: Session = Depends(get_db),
+) -> ResearchVideoVisibilityBulkPreviewRead:
+    return preview_hide_trimmed_source_videos(db)
+
+
+@router.post(
+    "/videos/visibility/hide-trimmed-sources",
+    response_model=ResearchVideoVisibilityBulkResultRead,
+)
+def hide_research_video_trimmed_sources(
+    db: Session = Depends(get_db),
+) -> ResearchVideoVisibilityBulkResultRead:
+    return hide_trimmed_source_videos(db)
+
+
+@router.post(
+    "/videos/visibility/restore-trimmed-sources/preview",
+    response_model=ResearchVideoVisibilityBulkPreviewRead,
+)
+def preview_restore_research_video_trimmed_sources(
+    db: Session = Depends(get_db),
+) -> ResearchVideoVisibilityBulkPreviewRead:
+    return preview_restore_trimmed_source_videos(db)
+
+
+@router.post(
+    "/videos/visibility/restore-trimmed-sources",
+    response_model=ResearchVideoVisibilityBulkResultRead,
+)
+def restore_research_video_trimmed_sources(
+    db: Session = Depends(get_db),
+) -> ResearchVideoVisibilityBulkResultRead:
+    return restore_trimmed_source_videos(db)
 
 
 @router.post("/video-batch-export/preview", response_model=ResearchVideoBatchExportPreviewRead)
@@ -185,6 +256,50 @@ def get_research_video(video_id: int, db: Session = Depends(get_db)) -> Research
     return _research_video_to_detail(video)
 
 
+@router.patch("/videos/{video_id}/notes", response_model=ResearchVideoNotesResponse)
+def update_research_video_notes(
+    video_id: int,
+    payload: ResearchVideoNotesRequest,
+    db: Session = Depends(get_db),
+) -> ResearchVideoNotesResponse:
+    video = db.get(ResearchVideo, video_id)
+    if video is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research video not found")
+    video.notes = payload.notes
+    video.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(video)
+    return ResearchVideoNotesResponse(
+        video_id=video.id,
+        notes=video.notes,
+        updated_at=video.updated_at.isoformat(),
+    )
+
+
+@router.patch("/videos/{video_id}/visibility", response_model=ResearchVideoVisibilityResponse)
+def update_research_video_visibility(
+    video_id: int,
+    payload: ResearchVideoVisibilityRequest,
+    db: Session = Depends(get_db),
+) -> ResearchVideoVisibilityResponse:
+    video = db.get(ResearchVideo, video_id)
+    if video is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research video not found")
+    if payload.hidden_from_video_list:
+        hide_research_video_from_list(video, reason=MANUAL_HIDDEN_REASON, preserve_existing_reason=False)
+    else:
+        restore_research_video_to_list(video)
+    db.commit()
+    db.refresh(video)
+    return ResearchVideoVisibilityResponse(
+        video_id=video.id,
+        hidden_from_video_list=video.hidden_from_video_list,
+        hidden_at=video.hidden_at.isoformat() if video.hidden_at else None,
+        hidden_reason=video.hidden_reason,
+        updated_at=video.updated_at.isoformat(),
+    )
+
+
 @router.get("/videos/{video_id}/workspace", response_model=ResearchVideoWorkspaceRead)
 def get_research_video_workspace(video_id: int, db: Session = Depends(get_db)) -> ResearchVideoWorkspaceRead:
     video = _get_research_video_workspace_or_404(video_id, db)
@@ -219,13 +334,14 @@ def trim_research_video_endpoint(
     source_video = _get_research_video_workspace_or_404(video_id, db)
     storage_root = Path(settings.local_storage_root) / "research" / "videos"
     try:
-        trimmed_video, warnings = trim_research_video(
+        trimmed_video, warnings, source_video_hidden = trim_research_video(
             db=db,
             source_video=source_video,
             start_frame=payload.start_frame,
             end_frame_exclusive=payload.end_frame_exclusive,
             display_name=payload.display_name,
             acknowledge_annotations_not_copied=payload.acknowledge_annotations_not_copied,
+            hide_source_after_success=payload.hide_source_after_success,
             storage_root=storage_root,
         )
     except ResearchVideoTrimConflictError as exc:
@@ -238,6 +354,7 @@ def trim_research_video_endpoint(
         source_video_id=source_video.id,
         trimmed_video_id=trimmed_video.id,
         status=trimmed_video.status,
+        source_video_hidden=source_video_hidden,
         warnings=warnings,
     )
 
@@ -501,7 +618,10 @@ def _get_research_video_label_or_404(video: ResearchVideo, label_id: int) -> Res
     return label
 
 
-def _research_video_to_read(video: ResearchVideo) -> ResearchVideoRead:
+def _research_video_to_read(
+    video: ResearchVideo,
+    phase_summary: ResearchVideoPhaseSummaryRead | None = None,
+) -> ResearchVideoRead:
     return ResearchVideoRead(
         id=video.id,
         name=video.name,
@@ -516,6 +636,11 @@ def _research_video_to_read(video: ResearchVideo) -> ResearchVideoRead:
         origin_type=video.origin_type,
         trim_start_frame=video.trim_start_frame,
         trim_end_frame_exclusive=video.trim_end_frame_exclusive,
+        hidden_from_video_list=video.hidden_from_video_list,
+        hidden_at=video.hidden_at.isoformat() if video.hidden_at else None,
+        hidden_reason=video.hidden_reason,
+        notes=video.notes,
+        phase_summary=phase_summary or ResearchVideoPhaseSummaryRead(),
         thumbnail_url=f"/api/research/videos/{video.id}/thumbnail" if video.thumbnail_path else None,
         created_at=video.created_at.isoformat(),
         updated_at=video.updated_at.isoformat(),

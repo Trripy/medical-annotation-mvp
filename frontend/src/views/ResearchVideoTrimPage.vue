@@ -21,10 +21,12 @@ import {
   isFullRange,
   isRangeTooShort,
   parseTrimTimestamp,
+  readHideSourceAfterTrimPreference,
   sanitizeTrimOutputName,
   secondsToFrame,
   trimOutputFrameCount,
   uiRangeToBackend,
+  writeHideSourceAfterTrimPreference,
   type TrimRange,
 } from '../utils/videoTrim'
 
@@ -42,6 +44,8 @@ const trimRange = ref<TrimRange>({ startFrame: 0, endFrameExclusive: 0 })
 const currentFrame = ref(0)
 const outputName = ref('')
 const acknowledged = ref(false)
+const hideSourceAfterSuccess = ref(false)
+const rememberHideSourceChoice = ref(false)
 const trimResponseId = ref<number | null>(null)
 const submitting = ref(false)
 const previewing = ref(false)
@@ -84,6 +88,7 @@ const rangeError = computed(() => {
 useVideoPlaybackRate(videoRef, computed(() => sourceVideo.value?.file_url ?? null))
 
 onMounted(async () => {
+  hideSourceAfterSuccess.value = readHideSourceAfterTrimPreference()
   const videoId = Number(props.videoId)
   const payload = await store.fetchVideoTrimInfo(videoId)
   if (!payload) {
@@ -208,9 +213,12 @@ async function submitTrim() {
   submitting.value = true
   const sanitizedName = sanitizeTrimOutputName(outputName.value, sourceVideo.value.original_filename || sourceVideo.value.name)
   outputName.value = sanitizedName
+  if (rememberHideSourceChoice.value) {
+    writeHideSourceAfterTrimPreference(hideSourceAfterSuccess.value)
+  }
   const response = await store.trimVideo(
     sourceVideo.value.id,
-    buildTrimPayload(trimRange.value, sanitizedName, acknowledged.value),
+    buildTrimPayload(trimRange.value, sanitizedName, acknowledged.value, hideSourceAfterSuccess.value),
   )
   submitting.value = false
   if (!response) {
@@ -218,7 +226,13 @@ async function submitTrim() {
     return
   }
   trimResponseId.value = response.trimmed_video_id
-  ElMessage.success(t('videoTrim.completed'))
+  if (response.source_video_hidden && hideSourceAfterSuccess.value) {
+    ElMessage.success(t('videoTrim.trimSucceededSourceHidden'))
+  } else if (response.source_video_hidden) {
+    ElMessage.success(t('videoTrim.sourceAlreadyHidden'))
+  } else {
+    ElMessage.success(t('videoTrim.trimSucceededSourceVisible'))
+  }
 }
 </script>
 
@@ -336,6 +350,15 @@ async function submitTrim() {
             <el-checkbox v-if="hasLinkedData" v-model="acknowledged">
               {{ t('videoTrim.annotationsAcknowledgement') }}
             </el-checkbox>
+            <div class="research-trim-output-options" data-storage-key="researchVideoTrim.hideSourceAfterSuccess">
+              <el-checkbox v-model="hideSourceAfterSuccess" :disabled="saving || submitting">
+                {{ t('videoTrim.hideSourceAfterSuccess') }}
+              </el-checkbox>
+              <p>{{ t('videoTrim.hideSourceAfterSuccessDescription') }}</p>
+              <el-checkbox v-model="rememberHideSourceChoice" :disabled="saving || submitting">
+                {{ t('videoTrim.rememberHideSourceChoice') }}
+              </el-checkbox>
+            </div>
             <el-button type="primary" :loading="saving || submitting" :disabled="submitDisabled" @click="submitTrim">
               {{ t('videoTrim.create') }}
             </el-button>

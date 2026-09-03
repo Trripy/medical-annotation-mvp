@@ -28,6 +28,10 @@ function item(id: number, sets: ChecklistItem['phase']['sets'] = []): ChecklistI
       height: 240,
       created_at: '2026-07-30T00:00:00Z',
       thumbnail_url: null,
+      hidden_from_video_list: false,
+      hidden_at: null,
+      hidden_reason: null,
+      notes: null,
     },
     trim: {
       origin_type: 'uploaded',

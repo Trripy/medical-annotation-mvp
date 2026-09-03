@@ -4,6 +4,7 @@ export type ResearchPhaseAnnotationSetStatus = 'draft' | 'submitted' | 'reviewed
 export type ResearchPhaseSegmentSource = 'manual' | 'model_suggestion' | 'model_corrected' | 'imported'
 export type ResearchPhaseMutationAction =
   | 'created'
+  | 'filled_gaps'
   | 'transitioned'
   | 'closed'
   | 'updated'
@@ -26,6 +27,7 @@ export type ResearchPhaseValidationIssueType =
   | 'very_short_segment'
   | 'video_end_not_covered'
   | 'duplicate_start'
+export type ResearchPhaseGapType = 'leading' | 'internal' | 'trailing'
 
 export type ResearchPhaseLabel = {
   id: number
@@ -211,6 +213,34 @@ export type MergePhaseSegmentsRequest = {
   left_segment_id: number
   right_segment_id: number
   expected_revision: number
+}
+
+export type FillPhaseGapsRequest = {
+  phase_label_id: number
+  expected_revision: number
+}
+
+export type ResearchPhaseGap = {
+  start_frame: number
+  end_frame_exclusive: number
+  frame_count: number
+  gap_type: ResearchPhaseGapType
+}
+
+export type ResearchPhaseGapFillPreview = {
+  annotation_set_id: number
+  current_revision: number
+  phase_label_id: number
+  phase_label_name: string
+  video_frame_count: number
+  gap_count: number
+  total_gap_frames: number
+  total_gap_duration_ms: number | null
+  leading_gap_count: number
+  internal_gap_count: number
+  trailing_gap_count: number
+  gaps: ResearchPhaseGap[]
+  truncated: boolean
 }
 
 export type SubmitPhaseAnnotationSetRequest = {

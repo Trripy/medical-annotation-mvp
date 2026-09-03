@@ -701,7 +701,9 @@ def test_export_phase_annotation_set_framewise_csv_endpoint_returns_streaming_bo
     assert response.headers["x-phase-validation-warnings"] == "3"
     rows = parse_csv_rows(response.body)
     assert len(rows) == 7
-    assert rows[1] == ["0", "0", "unlabeled", "Unlabeled", "", "", "draft"]
+    assert rows[1][:7] == ["0", "0", "unlabeled", "Unlabeled", "", "", "draft"]
+    assert rows[1][7] == "current_video"
+    assert "trimmed video, not the source video" in rows[1][8]
     assert rows[6][2] == "viscoelastic"
 
 

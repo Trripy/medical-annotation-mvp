@@ -11,20 +11,24 @@ import {
   defaultTrimmedName,
   formatTrimTimestamp,
   getTimelineGeometry,
+  HIDE_SOURCE_AFTER_TRIM_STORAGE_KEY,
   frameToSeconds,
   isFullRange,
   isRangeTooShort,
   parseTrimTimestamp,
+  readHideSourceAfterTrimPreference,
   sanitizeTrimOutputName,
   secondsToFrame,
   trimOutputFrameCount,
   uiRangeToBackend,
+  writeHideSourceAfterTrimPreference,
 } from '../src/utils/videoTrim.ts'
 
 const trimPageSource = readFileSync(new URL('../src/views/ResearchVideoTrimPage.vue', import.meta.url), 'utf8')
 const timelineSource = readFileSync(new URL('../src/components/research/VideoTrimTimeline.vue', import.meta.url), 'utf8')
 const routerSource = readFileSync(new URL('../src/router.ts', import.meta.url), 'utf8')
 const videosPageSource = readFileSync(new URL('../src/views/ResearchVideosPage.vue', import.meta.url), 'utf8')
+const videoStoreSource = readFileSync(new URL('../src/stores/researchVideos.ts', import.meta.url), 'utf8')
 
 test('trim range converts between backend half-open and UI inclusive frames', () => {
   assert.deepEqual(backendRangeToUi({ startFrame: 100, endFrameExclusive: 1000 }), {
@@ -67,16 +71,53 @@ test('default output names are mp4 and path characters are sanitized', () => {
   assert.equal(sanitizeTrimOutputName('bad:name', 'case001.mov'), 'bad_name.mp4')
 })
 
-test('submit payload sends only backend range output name and acknowledgement', () => {
+test('submit payload sends backend range output name acknowledgement and hide-source option', () => {
   const payload = buildTrimPayload({ startFrame: 2, endFrameExclusive: 50 }, 'case_trimmed.mp4', true)
   assert.deepEqual(payload, {
     start_frame: 2,
     end_frame_exclusive: 50,
     display_name: 'case_trimmed.mp4',
     acknowledge_annotations_not_copied: true,
+    hide_source_after_success: false,
   })
   assert.equal('fps' in payload, false)
   assert.equal('frame_count' in payload, false)
+
+  assert.equal(
+    buildTrimPayload({ startFrame: 2, endFrameExclusive: 50 }, 'case_trimmed.mp4', true, true)
+      .hide_source_after_success,
+    true,
+  )
+})
+
+test('trim hide-source preference stores only a boolean in a fixed localStorage key', () => {
+  const values = new Map<string, string>()
+  const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      values.set(key, value)
+    },
+  }
+
+  assert.equal(HIDE_SOURCE_AFTER_TRIM_STORAGE_KEY, 'researchVideoTrim.hideSourceAfterSuccess')
+  assert.equal(readHideSourceAfterTrimPreference(storage), false)
+  writeHideSourceAfterTrimPreference(true, storage)
+  assert.equal(values.get(HIDE_SOURCE_AFTER_TRIM_STORAGE_KEY), 'true')
+  assert.equal(readHideSourceAfterTrimPreference(storage), true)
+  writeHideSourceAfterTrimPreference(false, storage)
+  assert.equal(values.get(HIDE_SOURCE_AFTER_TRIM_STORAGE_KEY), 'false')
+  assert.deepEqual([...values.entries()], [[HIDE_SOURCE_AFTER_TRIM_STORAGE_KEY, 'false']])
+})
+
+test('trim page exposes hide-source controls and sends backend field with actual-response toasts', () => {
+  assert.match(trimPageSource, /hideSourceAfterSuccess/)
+  assert.match(trimPageSource, /rememberHideSourceChoice/)
+  assert.match(trimPageSource, /researchVideoTrim\.hideSourceAfterSuccess/)
+  assert.match(videoStoreSource, /hide_source_after_success/)
+  assert.match(trimPageSource, /response\.source_video_hidden/)
+  assert.match(trimPageSource, /trimSucceededSourceHidden/)
+  assert.match(trimPageSource, /trimSucceededSourceVisible/)
+  assert.doesNotMatch(trimPageSource, /\/visibility/)
 })
 
 test('trim route list action and timeline do not create per-frame DOM', () => {

@@ -4,7 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { storeToRefs } from 'pinia'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowReactive, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 
 import VirtualFrameList from '../components/VirtualFrameList.vue'
 import PhaseSegmentInspector from '../components/research/PhaseSegmentInspector.vue'
@@ -27,6 +27,7 @@ import { useUsersStore } from '../stores/users'
 import type {
   ResearchPhaseLabel,
   ResearchPhaseLabelMappingProfileDetail,
+  ResearchPhaseGapFillPreview,
   ResearchPhaseMutationResponse,
   ResearchPhaseSegment,
   ResearchPhaseValidationIssue,
@@ -59,7 +60,12 @@ import {
   parsePersistedPhaseVideoHeight,
   type PhaseRightPanelTab,
 } from '../utils/researchWorkflowUi.ts'
-import { findSegmentAtFrame, resolveNewPhaseStartFrame } from '../utils/researchPhaseTimeline'
+import {
+  findPhaseGapAtFrame,
+  findSegmentAtFrame,
+  getValidPhaseNextStartHint,
+  type PhaseNextStartHint,
+} from '../utils/researchPhaseTimeline'
 import {
   formatDateTime,
   getPhaseLabelDisplayName,
@@ -82,8 +88,20 @@ const PAUSE_AFTER_PHASE_CHANGE_STORAGE_KEY = 'research-phase-pause-after-change'
 const FRAME_PAGE_SIZE = DEFAULT_FRAME_PAGE_SIZE
 const MAX_CACHED_FRAME_PAGES = DEFAULT_MAX_CACHED_FRAME_PAGES
 const PHASE_VIDEO_HEIGHT_KEYBOARD_STEP = 24
+const PENDING_PHASE_SEGMENT_ID = -1
 
 const props = defineProps<{ videoId: string }>()
+
+type PendingPhaseDraft = {
+  labelId: number
+  labelName: string
+  startFrame: number
+  gapStartFrame: number
+  gapEndFrameExclusive: number
+  startedAt: string
+  source: 'manual'
+  notes: string
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -149,7 +167,8 @@ const phaseVideoHeight = ref(320)
 const isVideoCollapsed = ref(false)
 const lastExpandedVideoHeight = ref(320)
 const isDraggingVideoHeight = ref(false)
-const pendingNextStartFrame = ref<number | null>(null)
+const nextPhaseStartHint = ref<PhaseNextStartHint | null>(null)
+const pendingPhaseDraft = ref<PendingPhaseDraft | null>(null)
 const labelViewMode = ref<PhaseLabelViewMode>('original')
 const selectedMappingProfileId = ref<number | null>(null)
 const showMappingDrawer = ref(false)
@@ -162,6 +181,9 @@ const createMappingProfileForm = ref({
   name: '',
   description: '',
 })
+const showGapFillDialog = ref(false)
+const gapFillPreview = ref<ResearchPhaseGapFillPreview | null>(null)
+const previewingGapFill = ref(false)
 
 let videoLoadGeneration = 0
 let frameNavigationSequence = 0
@@ -185,6 +207,8 @@ const isLastFrame = computed(() => selectedFrameIndex.value >= Math.max(totalFra
 const activeProtocolChoices = computed(() => protocols.value.filter((protocol) => protocol.status === 'active'))
 const protocolLabels = computed<ResearchPhaseLabel[]>(() => currentAnnotationSet.value?.protocol.labels ?? [])
 const activeLabels = computed(() => protocolLabels.value.filter((label) => label.is_active))
+const idlePhaseLabels = computed(() => activeLabels.value.filter((label) => label.key === 'idle'))
+const idlePhaseLabel = computed(() => idlePhaseLabels.value.length === 1 ? idlePhaseLabels.value[0] : null)
 const selectedSegment = computed(() => segments.value.find((segment) => segment.id === selectedSegmentId.value) ?? null)
 const currentFrameSegment = computed(() => findSegmentAtFrame(segments.value, selectedFrameIndex.value))
 const openSegment = computed(() => segments.value.find((segment) => segment.end_frame_exclusive === null) ?? null)
@@ -203,6 +227,49 @@ const timelineSegments = computed<ResearchPhaseSegment[]>(() => (
     ? mappedSegments.value
     : segments.value
 ))
+const pendingPhaseLabel = computed(() => {
+  const draft = pendingPhaseDraft.value
+  if (!draft) {
+    return null
+  }
+  return protocolLabels.value.find((label) => label.id === draft.labelId) ?? null
+})
+const pendingPhasePreviewEndFrameExclusive = computed(() => {
+  const draft = pendingPhaseDraft.value
+  if (!draft) {
+    return null
+  }
+  return Math.min(
+    Math.max(draft.startFrame + 1, selectedFrameIndex.value + 1),
+    draft.gapEndFrameExclusive,
+  )
+})
+const pendingTimelineSegments = computed<ResearchPhaseSegment[]>(() => {
+  const draft = pendingPhaseDraft.value
+  const label = pendingPhaseLabel.value
+  const previewEnd = pendingPhasePreviewEndFrameExclusive.value
+  if (!draft || !label || previewEnd === null || isMappedView.value) {
+    return []
+  }
+  return [{
+    id: PENDING_PHASE_SEGMENT_ID,
+    annotation_set_id: currentAnnotationSet.value?.id ?? -1,
+    phase_label_id: draft.labelId,
+    start_frame: draft.startFrame,
+    end_frame_exclusive: previewEnd,
+    source: draft.source,
+    confidence: null,
+    notes: draft.notes || null,
+    created_at: draft.startedAt,
+    updated_at: draft.startedAt,
+    phase_label: {
+      id: label.id,
+      key: label.key,
+      name: getPhaseLabelDisplayName(label, currentLocale.value),
+      color: label.color,
+    },
+  }]
+})
 const mappingFrameConservation = computed(() => calculateMappedFrameConservation(segments.value, mappedSegments.value, totalFrames.value))
 const mergedMappingTargets = computed(() => selectedMappingProfile.value?.targets.filter((target) => target.source_labels.length > 1) ?? [])
 const selectedMappingLabels = computed(() => activeLabels.value.filter((label) => selectedMappingSourceLabelIds.value.includes(label.id)))
@@ -224,9 +291,15 @@ const phaseExportFilenamePreview = computed(() => buildPhaseExportFilename({
     ? slugifyMappingKey(mappingProfiles.value.find((profile) => profile.id === exportMappingProfileId.value)?.name ?? '')
     : null,
 }))
-const currentPhaseName = computed(() => currentFrameSegment.value
-  ? getPhaseLabelDisplayName(currentFrameSegment.value.phase_label, currentLocale.value)
-  : t('phaseAnnotation.unlabeled'))
+const currentPhaseName = computed(() => {
+  const draft = pendingPhaseDraft.value
+  if (draft && selectedFrameIndex.value >= draft.startFrame && selectedFrameIndex.value < draft.gapEndFrameExclusive) {
+    return draft.labelName
+  }
+  return currentFrameSegment.value
+    ? getPhaseLabelDisplayName(currentFrameSegment.value.phase_label, currentLocale.value)
+    : t('phaseAnnotation.unlabeled')
+})
 const compactVideoTimeText = computed(() => formatTimestamp(currentVideoTimeMs.value))
 const totalVideoTimeText = computed(() => formatTimestamp(video.value?.duration_ms ?? 0))
 const currentFrameTimeText = computed(() => formatTimestamp(currentFrame.value?.timestamp_ms ?? currentVideoTimeMs.value))
@@ -305,10 +378,58 @@ const canMergeNext = computed(() => Boolean(
   && selectedSegment.value.end_frame_exclusive === nextSegment.value.start_frame
   && nextSegment.value.phase_label_id === selectedSegment.value.phase_label_id,
 ))
+const gapFillDisabledReason = computed(() => {
+  if (!currentAnnotationSet.value || isReadOnly.value) {
+    return t('phaseGapFill.readOnly')
+  }
+  if (isMappedView.value) {
+    return t('phaseGapFill.mappedViewDisabled')
+  }
+  if (pendingPhaseDraft.value) {
+    return t('phaseGapFill.pendingPhaseExists')
+  }
+  if (openSegment.value) {
+    return t('phaseGapFill.openSegmentExists')
+  }
+  if (saving.value || saveState.value === 'saving' || saveState.value === 'conflict') {
+    return t('phaseGapFill.unsavedSegmentExists')
+  }
+  if (!idlePhaseLabel.value) {
+    return t('phaseGapFill.idleLabelNotFound')
+  }
+  return ''
+})
+const canFillGapsWithIdle = computed(() => gapFillDisabledReason.value === '')
 const showVideoEndCloseHint = computed(() => Boolean(
   openSegment.value
   && totalFrames.value > 0
   && selectedFrameIndex.value >= totalFrames.value - 1,
+))
+const pendingPhaseCanEndAtCurrentFrame = computed(() => Boolean(
+  pendingPhaseDraft.value
+  && selectedFrameIndex.value >= pendingPhaseDraft.value.startFrame,
+))
+const pendingPhaseEndLimitLabel = computed(() => {
+  const draft = pendingPhaseDraft.value
+  if (!draft) {
+    return t('phaseAnnotation.endAtVideoEnd')
+  }
+  return draft.gapEndFrameExclusive >= totalFrames.value
+    ? t('phaseAnnotation.endAtVideoEnd')
+    : t('phaseAnnotation.endAtGapEnd')
+})
+const pendingPhaseAvailableRangeText = computed(() => {
+  const draft = pendingPhaseDraft.value
+  if (!draft) {
+    return ''
+  }
+  return `${draft.gapStartFrame + 1}-${draft.gapEndFrameExclusive}`
+})
+const pendingPhaseStartText = computed(() => (
+  pendingPhaseDraft.value ? String(pendingPhaseDraft.value.startFrame + 1) : ''
+))
+const pendingPhasePreviewEndText = computed(() => (
+  pendingPhasePreviewEndFrameExclusive.value === null ? '' : String(pendingPhasePreviewEndFrameExclusive.value)
 ))
 const workspaceHeaderMetaItems = computed(() => [
   `${t('common.frame')} ${currentFrameNumber.value} / ${totalFrames.value}`,
@@ -316,35 +437,73 @@ const workspaceHeaderMetaItems = computed(() => [
   `${t('phaseAnnotation.currentPhase')} ${currentPhaseName.value}`,
 ])
 const pendingNextPhaseText = computed(() => {
-  if (pendingNextStartFrame.value === null) {
+  if (!nextPhaseStartHint.value) {
     return ''
   }
-  const previousEndFrame = pendingNextStartFrame.value
-  const nextFrame = pendingNextStartFrame.value + 1
+  const previousEndFrame = nextPhaseStartHint.value.sourceEndFrameExclusive
+  const nextFrame = nextPhaseStartHint.value.startFrame + 1
   return `${t('phaseAnnotation.previousSegmentEndedAt', { frame: previousEndFrame })} ${t('phaseAnnotation.nextSegmentStartsAt', { frame: nextFrame })}`
 })
+const gapFillPreviewDurationText = computed(() => formatDurationMs(gapFillPreview.value?.total_gap_duration_ms ?? null))
+
+function clearNextPhaseStartHint() {
+  nextPhaseStartHint.value = null
+}
+
+function getUsableNextPhaseStartHint() {
+  return getValidPhaseNextStartHint(nextPhaseStartHint.value, {
+    annotationSetId: currentAnnotationSet.value?.id,
+    annotationSetRevision: currentAnnotationSet.value?.revision,
+    currentFrame: selectedFrameIndex.value,
+    videoFrameCount: totalFrames.value,
+    existingSegments: segments.value,
+  })
+}
+
+function resetFailedPendingPhaseAttempt() {
+  if (!pendingPhaseDraft.value) {
+    selectedSegmentId.value = selectedSegmentId.value ?? null
+  }
+}
 
 onMounted(async () => {
   restoreLayoutPreferences()
   restorePauseAfterPhaseChangePreference()
   window.addEventListener('resize', handleViewportResize)
   window.addEventListener('keydown', handleLabelShortcutKeydown)
+  window.addEventListener('beforeunload', handleBeforeUnload)
   await loadPhaseWorkspace()
 })
 
 onBeforeUnmount(() => {
   videoLoadGeneration += 1
-  pendingNextStartFrame.value = null
+  clearNextPhaseStartHint()
+  pendingPhaseDraft.value = null
   window.removeEventListener('resize', handleViewportResize)
   removeVideoResizeListeners()
   window.removeEventListener('keydown', handleLabelShortcutKeydown)
+  window.removeEventListener('beforeunload', handleBeforeUnload)
   researchPhasesStore.clearVideoState()
+})
+
+onBeforeRouteLeave((_to, _from, next) => {
+  if (!pendingPhaseDraft.value) {
+    next()
+    return
+  }
+  if (window.confirm(t('phaseAnnotation.pendingPhaseLeaveConfirm'))) {
+    pendingPhaseDraft.value = null
+    next()
+    return
+  }
+  next(false)
 })
 
 watch(
   () => props.videoId,
   () => {
-    pendingNextStartFrame.value = null
+    clearNextPhaseStartHint()
+    pendingPhaseDraft.value = null
     void loadPhaseWorkspace()
   },
 )
@@ -359,8 +518,8 @@ watch(
 watch(
   () => selectedFrameIndex.value,
   async (nextFrameIndex) => {
-    if (pendingNextStartFrame.value !== null && nextFrameIndex !== pendingNextStartFrame.value) {
-      pendingNextStartFrame.value = null
+    if (nextPhaseStartHint.value && nextFrameIndex !== nextPhaseStartHint.value.closedAtPlayheadFrame) {
+      clearNextPhaseStartHint()
     }
     if (!gotoFrameFocused.value) {
       gotoFrameInput.value = totalFrames.value > 0 ? String(nextFrameIndex + 1) : ''
@@ -391,7 +550,8 @@ watch(
   () => currentAnnotationSet.value?.status,
   () => {
     if (isReadOnly.value) {
-      pendingNextStartFrame.value = null
+      clearNextPhaseStartHint()
+      pendingPhaseDraft.value = null
     }
   },
 )
@@ -448,7 +608,7 @@ async function loadPhaseWorkspace() {
   const videoId = Number(props.videoId)
   phasePageError.value = ''
   selectedSegmentId.value = null
-  pendingNextStartFrame.value = null
+  clearNextPhaseStartHint()
   workspaceVideo.value = null
   isPlaying.value = false
   currentVideoTimeMs.value = 0
@@ -656,8 +816,8 @@ async function goToFrame(index: number, options: { syncVideo: boolean; preserveP
   if (index < 0 || index >= totalFrames.value) {
     return false
   }
-  if (!options.preservePending && pendingNextStartFrame.value !== null && index !== pendingNextStartFrame.value) {
-    pendingNextStartFrame.value = null
+  if (!options.preservePending && nextPhaseStartHint.value && index !== nextPhaseStartHint.value.closedAtPlayheadFrame) {
+    clearNextPhaseStartHint()
   }
   if (index === selectedFrameIndex.value && currentFrame.value) {
     if (options.syncVideo) {
@@ -734,6 +894,17 @@ function onVideoLoadedMetadata() {
 
 function onVideoTimeUpdate() {
   syncFrameFromVideo()
+  const draft = pendingPhaseDraft.value
+  if (
+    draft
+    && videoRef.value
+    && selectedFrameIndex.value >= draft.gapEndFrameExclusive - 1
+    && !videoRef.value.paused
+  ) {
+    videoRef.value.pause()
+    void goToFrame(draft.gapEndFrameExclusive - 1, { syncVideo: true, preservePending: true })
+    ElMessage.info(t('phaseAnnotation.reachedGapEnd'))
+  }
 }
 
 function clearGoToFrameError() {
@@ -957,11 +1128,24 @@ function shouldIgnorePhaseGlobalShortcut(event: KeyboardEvent) {
   )
 }
 
+function handleBeforeUnload(event: BeforeUnloadEvent) {
+  if (!pendingPhaseDraft.value) {
+    return
+  }
+  event.preventDefault()
+  event.returnValue = ''
+}
+
 function handleLabelShortcutKeydown(event: KeyboardEvent) {
   if (researchPhasesStore.isReadOnly || saving.value || saveState.value === 'conflict') {
     return
   }
   if (shouldIgnorePhaseGlobalShortcut(event)) {
+    return
+  }
+  if (event.key === 'Escape' && pendingPhaseDraft.value) {
+    event.preventDefault()
+    cancelPendingPhase()
     return
   }
   const pressedKey = event.key.toLowerCase()
@@ -986,7 +1170,7 @@ async function afterMutation(
 ) {
   if (!result.ok) {
     if (result.error.kind !== 'conflict') {
-      ElMessage.error(result.error.message)
+      ElMessage.error(translateApiErrorMessage(result.error.message, t) || result.error.message)
     }
     return false
   }
@@ -1005,71 +1189,256 @@ async function afterMutation(
   return true
 }
 
+async function startPendingPhase(
+  label: ResearchPhaseLabel,
+  startFrame: number,
+  options: { showSuccessMessage?: boolean } = {},
+) {
+  if (isReadOnly.value || isMappedView.value || totalFrames.value <= 0) {
+    resetFailedPendingPhaseAttempt()
+    return false
+  }
+  const gap = findPhaseGapAtFrame(segments.value, startFrame, totalFrames.value)
+  if (!gap || gap.gapEndFrameExclusive <= startFrame) {
+    ElMessage.warning(t('phaseAnnotation.noAvailableGap'))
+    resetFailedPendingPhaseAttempt()
+    return false
+  }
+  const candidatePendingDraft: PendingPhaseDraft = {
+    labelId: label.id,
+    labelName: getPhaseLabelDisplayName(label, currentLocale.value),
+    startFrame,
+    gapStartFrame: gap.gapStartFrame,
+    gapEndFrameExclusive: gap.gapEndFrameExclusive,
+    startedAt: new Date().toISOString(),
+    source: 'manual',
+    notes: '',
+  }
+  pendingPhaseDraft.value = candidatePendingDraft
+  clearNextPhaseStartHint()
+  selectedSegmentId.value = null
+  activeRightPanelTab.value = 'inspector'
+  if (options.showSuccessMessage !== false) {
+    ElMessage.success(t('phaseAnnotation.phaseInProgress'))
+  }
+  return true
+}
+
+async function finishPendingPhase(closeAtGapEnd = false) {
+  const draft = pendingPhaseDraft.value
+  if (!draft) {
+    return false
+  }
+  await researchPhasesStore.waitForPendingMutations()
+  if (saving.value || saveState.value === 'conflict') {
+    ElMessage.warning(t('phaseAnnotation.saveBeforeCreating'))
+    return false
+  }
+  const currentGap = findPhaseGapAtFrame(segments.value, draft.startFrame, totalFrames.value)
+  if (
+    !currentGap
+    || currentGap.gapStartFrame !== draft.gapStartFrame
+    || currentGap.gapEndFrameExclusive !== draft.gapEndFrameExclusive
+  ) {
+    pendingPhaseDraft.value = {
+      ...draft,
+      gapStartFrame: currentGap?.gapStartFrame ?? draft.gapStartFrame,
+      gapEndFrameExclusive: currentGap?.gapEndFrameExclusive ?? draft.gapEndFrameExclusive,
+    }
+    ElMessage.warning(t('phaseAnnotation.availableRangeChanged'))
+    return false
+  }
+  if (!closeAtGapEnd && selectedFrameIndex.value < draft.startFrame) {
+    ElMessage.warning(t('phaseAnnotation.currentFrameBeforeStart'))
+    return false
+  }
+  const endFrameExclusive = closeAtGapEnd
+    ? draft.gapEndFrameExclusive
+    : Math.min(buildCloseActiveEndFrame(selectedFrameIndex.value, totalFrames.value), draft.gapEndFrameExclusive)
+  if (endFrameExclusive <= draft.startFrame) {
+    ElMessage.warning(t('phaseAnnotation.currentFrameBeforeStart'))
+    return false
+  }
+  const result = await researchPhasesStore.createSegment({
+    phase_label_id: draft.labelId,
+    start_frame: draft.startFrame,
+    end_frame_exclusive: endFrameExclusive,
+    source: draft.source,
+    notes: draft.notes.trim() ? draft.notes : null,
+  })
+  const createdSegmentId = result.ok && result.data.created_segment_ids.length > 0
+    ? result.data.created_segment_ids[result.data.created_segment_ids.length - 1]
+    : null
+  if (await afterMutation(result, {
+    message: closeAtGapEnd && endFrameExclusive >= totalFrames.value
+      ? t('phaseAnnotation.activeClosedAtEnd')
+      : t('phaseAnnotation.activeClosed'),
+    nextSelectedSegmentId: createdSegmentId,
+    scrollFrame: draft.startFrame,
+  })) {
+    pendingPhaseDraft.value = null
+    return true
+  }
+  return false
+}
+
+function cancelPendingPhase(showMessage = true) {
+  if (!pendingPhaseDraft.value) {
+    return
+  }
+  pendingPhaseDraft.value = null
+  if (showMessage) {
+    ElMessage.info(t('phaseAnnotation.pendingPhaseCancelled'))
+  }
+}
+
+function formatGapFillRange(startFrame: number, endFrameExclusive: number) {
+  return t('phaseGapFill.range', {
+    start: startFrame + 1,
+    end: endFrameExclusive,
+  })
+}
+
+function formatGapFillTimeRange(startFrame: number, endFrameExclusive: number) {
+  const fps = video.value?.fps ?? null
+  const startMs = frameToTimestampMs(startFrame, fps)
+  const endMs = frameToTimestampMs(endFrameExclusive, fps)
+  return `${formatTimestamp(startMs)}-${formatTimestamp(endMs)}`
+}
+
+function gapTypeLabel(type: string) {
+  if (type === 'leading') {
+    return t('phaseGapFill.leadingGap')
+  }
+  if (type === 'trailing') {
+    return t('phaseGapFill.trailingGap')
+  }
+  return t('phaseGapFill.internalGap')
+}
+
+async function openGapFillPreview() {
+  if (!canFillGapsWithIdle.value || !idlePhaseLabel.value) {
+    ElMessage.warning(gapFillDisabledReason.value || t('phaseGapFill.failed'))
+    return
+  }
+  await researchPhasesStore.waitForPendingMutations()
+  if (!canFillGapsWithIdle.value || !idlePhaseLabel.value) {
+    ElMessage.warning(gapFillDisabledReason.value || t('phaseGapFill.failed'))
+    return
+  }
+  previewingGapFill.value = true
+  const result = await researchPhasesStore.previewGapFill(idlePhaseLabel.value.id)
+  previewingGapFill.value = false
+  if (!result.ok) {
+    ElMessage.error(translateApiErrorMessage(result.error.message, t) || t('phaseGapFill.failed'))
+    return
+  }
+  if (result.data.gap_count === 0) {
+    gapFillPreview.value = null
+    showGapFillDialog.value = false
+    ElMessage.info(t('phaseGapFill.noGaps'))
+    return
+  }
+  gapFillPreview.value = result.data
+  showGapFillDialog.value = true
+}
+
+async function confirmGapFill() {
+  const preview = gapFillPreview.value
+  if (!preview) {
+    return
+  }
+  const result = await researchPhasesStore.fillGaps(preview.phase_label_id, preview.current_revision)
+  if (!result.ok) {
+    if (result.error.kind === 'conflict') {
+      ElMessage.warning(t('phaseGapFill.revisionConflict'))
+      await researchPhasesStore.fetchAnnotationSet(preview.annotation_set_id)
+    } else {
+      ElMessage.error(translateApiErrorMessage(result.error.message, t) || t('phaseGapFill.failed'))
+    }
+    return
+  }
+  const createdCount = result.data.created_segment_ids.length
+  await researchPhasesStore.validateAnnotationSet()
+  showGapFillDialog.value = false
+  gapFillPreview.value = null
+  ElMessage.success(t('phaseGapFill.success', {
+    count: createdCount,
+    frames: preview.total_gap_frames,
+  }))
+}
+
 async function handleTransition(label: ResearchPhaseLabel) {
   if (isMappedView.value) {
     ElMessage.info(t('phaseMapping.mappingViewNotice'))
     return
   }
-  if (pendingNextStartFrame.value !== null) {
-    const resolution = resolveNewPhaseStartFrame({
-      currentFrame: selectedFrameIndex.value,
-      pendingNextStartFrame: pendingNextStartFrame.value,
-      existingSegments: segments.value,
-      videoFrameCount: totalFrames.value,
-    })
-    if (resolution.conflict !== 'none') {
-      const occupiedSegment = resolution.occupiedSegmentId === null
-        ? null
-        : segments.value.find((segment) => segment.id === resolution.occupiedSegmentId) ?? null
-      if (occupiedSegment) {
-        selectedSegmentId.value = occupiedSegment.id
-        activeRightPanelTab.value = nextPhaseRightPanelTabAfterSegmentSelect()
-      }
-      if (resolution.reason === 'no-next-frame') {
-        ElMessage.warning(t('phaseAnnotation.noNextFrame'))
-      } else if (resolution.reason === 'next-frame-already-annotated' && occupiedSegment) {
-        ElMessage.warning(t('phaseAnnotation.nextFrameAlreadyAnnotated', {
-          label: getPhaseLabelDisplayName(occupiedSegment.phase_label, currentLocale.value),
-        }))
-      } else {
-        ElMessage.warning(t('phaseAnnotation.nextFrameOccupied'))
-      }
-      pendingNextStartFrame.value = null
+  if (pendingPhaseDraft.value) {
+    if (pendingPhaseDraft.value.labelId === label.id) {
+      ElMessage.info(t('phaseAnnotation.phaseInProgress'))
       return
     }
+    try {
+      await ElMessageBox({
+        message: t('phaseAnnotation.pendingPhaseSwitchConfirm'),
+        title: t('phaseAnnotation.pendingPhaseUnsaved'),
+        type: 'warning',
+        showCancelButton: true,
+        distinguishCancelAndClose: true,
+        confirmButtonText: t('phaseAnnotation.finishAndSwitch'),
+        cancelButtonText: t('phaseAnnotation.cancelAndSwitch'),
+      })
+      const finished = await finishPendingPhase(false)
+      if (!finished) {
+        return
+      }
+      const nextStartFrame = Math.min(selectedFrameIndex.value + 1, Math.max(totalFrames.value - 1, 0))
+      await goToFrame(nextStartFrame, { syncVideo: true, preservePending: true })
+      await startPendingPhase(label, nextStartFrame)
+    } catch (action) {
+      if (action === 'cancel') {
+        cancelPendingPhase(false)
+        await startPendingPhase(label, selectedFrameIndex.value)
+      }
+    }
+    return
+  }
+  await researchPhasesStore.waitForPendingMutations()
+  if (saving.value || saveState.value === 'conflict') {
+    ElMessage.warning(t('phaseAnnotation.saveBeforeCreating'))
+    return
+  }
+  const startHint = getUsableNextPhaseStartHint()
+  if (startHint) {
+    const occupiedSegment = findSegmentAtFrame(segments.value, startHint.startFrame)
+    if (occupiedSegment) {
+      selectedSegmentId.value = occupiedSegment.id
+      activeRightPanelTab.value = nextPhaseRightPanelTabAfterSegmentSelect()
+      ElMessage.warning(t('phaseAnnotation.nextFrameAlreadyOccupied', {
+        label: getPhaseLabelDisplayName(occupiedSegment.phase_label, currentLocale.value),
+      }))
+      return
+    }
+    const started = await startPendingPhase(label, startHint.startFrame, { showSuccessMessage: false })
+    if (started) {
+      ElMessage.info(t('phaseAnnotation.nextPhaseStartsAtFollowingFrame', { frame: startHint.startFrame + 1 }))
+    }
+    return
+  }
+  if (nextPhaseStartHint.value) {
+    clearNextPhaseStartHint()
+  }
 
-    const nextStartFrame = resolution.startFrame
-    if (nextStartFrame === null) {
-      ElMessage.warning(t('phaseAnnotation.nextFrameOccupied'))
-      pendingNextStartFrame.value = null
-      return
-    }
-    const result = await researchPhasesStore.createSegment({
-      phase_label_id: label.id,
-      start_frame: nextStartFrame,
-      end_frame_exclusive: null,
-      source: 'manual',
-    })
-    const createdSegmentId = result.ok && result.data.created_segment_ids.length > 0
-      ? result.data.created_segment_ids[result.data.created_segment_ids.length - 1]
-      : null
-    if (await afterMutation(result, {
-      message: t('phaseAnnotation.startedAtNextFrame', { frame: (resolution.startFrame ?? 0) + 1 }),
-      nextSelectedSegmentId: createdSegmentId,
-      scrollFrame: nextStartFrame,
-    })) {
-      pendingNextStartFrame.value = null
-      if (pauseAfterPhaseChange.value && videoRef.value && !videoRef.value.paused) {
-        videoRef.value.pause()
-      }
-    }
+  const gap = findPhaseGapAtFrame(segments.value, selectedFrameIndex.value, totalFrames.value)
+  if (gap?.containsTargetFrame && gap.gapEndFrameExclusive > selectedFrameIndex.value) {
+    await startPendingPhase(label, selectedFrameIndex.value)
     return
   }
 
   const result = await researchPhasesStore.transitionPhase(label.id, selectedFrameIndex.value)
   if (!result.ok) {
     if (result.error.kind !== 'conflict') {
-      ElMessage.error(result.error.message)
+      ElMessage.error(translateApiErrorMessage(result.error.message, t) || result.error.message)
     }
     return
   }
@@ -1092,31 +1461,45 @@ async function handleTransition(label: ResearchPhaseLabel) {
 }
 
 async function handleCloseCurrentPhase(closeAtVideoEnd = false) {
+  if (pendingPhaseDraft.value) {
+    await finishPendingPhase(closeAtVideoEnd)
+    return
+  }
+  const closingSegmentId = openSegment.value?.id ?? selectedSegmentId.value
   const endFrameExclusive = closeAtVideoEnd
     ? totalFrames.value
     : buildCloseActiveEndFrame(selectedFrameIndex.value, totalFrames.value)
+  const closeResult = await researchPhasesStore.closeActiveSegment(endFrameExclusive)
   const closed = await afterMutation(
-    await researchPhasesStore.closeActiveSegment(endFrameExclusive),
+    closeResult,
     {
       message: closeAtVideoEnd ? t('phaseAnnotation.activeClosedAtEnd') : t('phaseAnnotation.activeClosed'),
-      nextSelectedSegmentId: openSegment.value?.id ?? selectedSegmentId.value,
+      nextSelectedSegmentId: closingSegmentId,
     },
   )
-  if (!closed || closeAtVideoEnd) {
-    pendingNextStartFrame.value = null
+  if (!closed || closeAtVideoEnd || !closingSegmentId) {
+    clearNextPhaseStartHint()
     return
   }
-  if (endFrameExclusive >= totalFrames.value) {
-    pendingNextStartFrame.value = null
-    ElMessage.info(t('phaseAnnotation.noNextFrame'))
+  const savedSegment = segments.value.find((segment) => segment.id === closingSegmentId) ?? null
+  const savedEndFrameExclusive = savedSegment?.end_frame_exclusive ?? endFrameExclusive
+  if (savedEndFrameExclusive >= totalFrames.value) {
+    clearNextPhaseStartHint()
+    ElMessage.info(t('phaseAnnotation.noFrameAfterPreviousPhase'))
     return
   }
-  pendingNextStartFrame.value = endFrameExclusive
+  nextPhaseStartHint.value = {
+    annotationSetId: currentAnnotationSet.value?.id ?? -1,
+    startFrame: savedEndFrameExclusive,
+    sourceSegmentId: closingSegmentId,
+    sourceEndFrameExclusive: savedEndFrameExclusive,
+    annotationSetRevision: currentAnnotationSet.value?.revision ?? -1,
+    closedAtPlayheadFrame: Math.max(0, savedEndFrameExclusive - 1),
+  }
   if (videoRef.value && !videoRef.value.paused) {
     videoRef.value.pause()
   }
-  await goToFrame(endFrameExclusive, { syncVideo: true, preservePending: true })
-  ElMessage.info(t('phaseAnnotation.pendingNextPhase', { frame: endFrameExclusive + 1 }))
+  ElMessage.info(t('phaseAnnotation.pendingNextPhase', { frame: savedEndFrameExclusive + 1 }))
 }
 
 async function handleSegmentPatch(segmentId: number, patch: Record<string, unknown>) {
@@ -1181,6 +1564,10 @@ async function handleMergeSegments(leftSegmentId: number, rightSegmentId: number
 }
 
 async function handleValidate() {
+  if (pendingPhaseDraft.value) {
+    ElMessage.warning(t('phaseAnnotation.pendingPhaseUnsaved'))
+    return
+  }
   const result = await researchPhasesStore.validateAnnotationSet()
   if (!result.ok) {
     ElMessage.error(result.error.message)
@@ -1205,7 +1592,7 @@ async function handleGoToIssue(issue: ResearchPhaseValidationIssue) {
 }
 
 function handleTimelineSegmentSelect(segmentId: number) {
-  pendingNextStartFrame.value = null
+  clearNextPhaseStartHint()
   selectedSegmentId.value = segmentId
   activeRightPanelTab.value = nextPhaseRightPanelTabAfterSegmentSelect()
 }
@@ -1218,6 +1605,10 @@ async function handleMergeIssue(issue: ResearchPhaseValidationIssue) {
 }
 
 async function handleSubmit() {
+  if (pendingPhaseDraft.value) {
+    ElMessage.warning(t('phaseAnnotation.pendingPhaseUnsaved'))
+    return
+  }
   const validationResult = await researchPhasesStore.validateAnnotationSet()
   if (!validationResult.ok) {
     ElMessage.error(validationResult.error.message)
@@ -1282,6 +1673,10 @@ async function handleReopen() {
 }
 
 async function handleExport(command: 'json' | 'segments' | 'framewise') {
+  if (pendingPhaseDraft.value) {
+    ElMessage.warning(t('phaseAnnotation.pendingPhaseUnsaved'))
+    return
+  }
   if (command === 'framewise') {
     ElMessage.info(t('phaseAnnotation.preparingFramewiseCsv'))
   }
@@ -1692,9 +2087,9 @@ function formatTimestamp(timestampMs: number | null | undefined) {
               <span>{{ t('phaseAnnotation.activeSegmentOpen') }}</span>
               <el-button size="small" @click="handleCloseCurrentPhase(true)">{{ t('phaseAnnotation.closeAtVideoEnd') }}</el-button>
             </div>
-            <div v-if="pendingNextStartFrame !== null && !isReadOnly" class="research-phase-banner is-pending-next">
+            <div v-if="nextPhaseStartHint && !isReadOnly" class="research-phase-banner is-pending-next">
               <span>{{ pendingNextPhaseText }}</span>
-              <strong>{{ t('phaseAnnotation.pendingNextPhase', { frame: pendingNextStartFrame + 1 }) }}</strong>
+              <strong>{{ t('phaseAnnotation.pendingNextPhase', { frame: nextPhaseStartHint.startFrame + 1 }) }}</strong>
             </div>
             <div v-if="isMappedView" class="research-phase-banner">
               <span>{{ t('phaseMapping.mappingViewNotice') }}</span>
@@ -1708,6 +2103,7 @@ function formatTimestamp(timestampMs: number | null | undefined) {
           :current-frame-index="selectedFrameIndex"
           :fps="video?.fps ?? null"
           :frame-count="totalFrames"
+          :pending-segments="pendingTimelineSegments"
           :readonly="isReadOnly || isMappedView || saveState === 'conflict'"
           :segments="timelineSegments"
           :selected-segment-id="selectedSegmentId"
@@ -1722,7 +2118,62 @@ function formatTimestamp(timestampMs: number | null | undefined) {
         <el-tabs v-model="activeRightPanelTab" class="research-phase-right-tabs">
           <el-tab-pane :label="t('phaseAnnotation.inspector')" name="inspector">
             <div class="research-phase-right-scroll">
+              <div v-if="pendingPhaseDraft" class="research-phase-pending-inspector">
+                <p class="research-phase-card-eyebrow">{{ t('phaseAnnotation.segmentInspector') }}</p>
+                <div class="research-phase-pending-inspector__header">
+                  <strong>{{ pendingPhaseDraft.labelName }}</strong>
+                  <span>{{ t('phaseAnnotation.phaseInProgress') }}</span>
+                </div>
+                <dl class="research-phase-pending-inspector__meta">
+                  <div>
+                    <dt>{{ t('phaseAnnotation.startFrame') }}</dt>
+                    <dd>{{ pendingPhaseStartText }}</dd>
+                  </div>
+                  <div>
+                    <dt>{{ t('phaseAnnotation.endFrameInclusive') }}</dt>
+                    <dd>{{ t('phaseAnnotation.waitingForEnd') }}</dd>
+                  </div>
+                  <div>
+                    <dt>{{ t('phaseAnnotation.availableRange') }}</dt>
+                    <dd>{{ pendingPhaseAvailableRangeText }}</dd>
+                  </div>
+                  <div>
+                    <dt>{{ t('phaseAnnotation.status') }}</dt>
+                    <dd>{{ t('phaseAnnotation.phaseInProgress') }}</dd>
+                  </div>
+                  <div>
+                    <dt>{{ t('phaseAnnotation.currentPhase') }}</dt>
+                    <dd>{{ pendingPhasePreviewEndText }}</dd>
+                  </div>
+                </dl>
+                <label class="research-phase-pending-inspector__notes">
+                  <span>{{ t('phaseAnnotation.notes') }}</span>
+                  <textarea
+                    v-model="pendingPhaseDraft.notes"
+                    :placeholder="t('phaseNote.multilineSupported')"
+                    @keydown.stop
+                    @keydown.ctrl.enter.prevent.stop="finishPendingPhase(false)"
+                    @keydown.meta.enter.prevent.stop="finishPendingPhase(false)"
+                  ></textarea>
+                </label>
+                <div class="research-phase-pending-inspector__actions">
+                  <el-button
+                    :disabled="saving || !pendingPhaseCanEndAtCurrentFrame"
+                    :loading="saving"
+                    @click="finishPendingPhase(false)"
+                  >
+                    {{ t('phaseAnnotation.endAtCurrentFrame') }}
+                  </el-button>
+                  <el-button :disabled="saving" :loading="saving" @click="finishPendingPhase(true)">
+                    {{ pendingPhaseEndLimitLabel }}
+                  </el-button>
+                  <el-button :disabled="saving" @click="cancelPendingPhase()">
+                    {{ t('phaseAnnotation.cancelPendingPhase') }}
+                  </el-button>
+                </div>
+              </div>
               <PhaseSegmentInspector
+                v-else
                 :can-merge-next="canMergeNext"
                 :can-merge-previous="canMergePrevious"
                 :current-frame-index="selectedFrameIndex"
@@ -1755,17 +2206,28 @@ function formatTimestamp(timestampMs: number | null | undefined) {
         </el-tabs>
 
         <div class="research-phase-right-actions">
-          <el-button :disabled="saving || isReadOnly || saveState === 'conflict' || !openSegment" @click="handleCloseCurrentPhase(false)">
-            {{ t('phaseAnnotation.closeCurrent') }}
+          <el-button :disabled="saving || isReadOnly || saveState === 'conflict' || (!openSegment && !pendingPhaseDraft)" @click="handleCloseCurrentPhase(false)">
+            {{ pendingPhaseDraft ? t('phaseAnnotation.endAtCurrentFrame') : t('phaseAnnotation.closeCurrent') }}
           </el-button>
-          <el-button :disabled="validating" :loading="validating" @click="handleValidate">
+          <el-tooltip :content="gapFillDisabledReason" :disabled="canFillGapsWithIdle" placement="top">
+            <span>
+              <el-button
+                :disabled="!canFillGapsWithIdle || previewingGapFill"
+                :loading="previewingGapFill"
+                @click="openGapFillPreview"
+              >
+                {{ t('phaseGapFill.button') }}
+              </el-button>
+            </span>
+          </el-tooltip>
+          <el-button :disabled="validating || Boolean(pendingPhaseDraft)" :loading="validating" @click="handleValidate">
             <el-icon><RefreshRight /></el-icon>
             {{ t('common.validate') }}
           </el-button>
           <el-button
             v-if="currentAnnotationSet?.status === 'draft'"
             type="primary"
-            :disabled="submitting || saveState === 'conflict'"
+            :disabled="submitting || saveState === 'conflict' || Boolean(pendingPhaseDraft)"
             :loading="submitting"
             @click="handleSubmit"
           >
@@ -1779,7 +2241,7 @@ function formatTimestamp(timestampMs: number | null | undefined) {
           >
             {{ t('skillAssessment.reopenForEditing') }}
           </el-button>
-          <el-dropdown :disabled="exporting || !currentAnnotationSet" @command="handleExport">
+          <el-dropdown :disabled="exporting || !currentAnnotationSet || Boolean(pendingPhaseDraft)" @command="handleExport">
             <el-button :loading="exporting">{{ t('common.export') }}</el-button>
             <template #dropdown>
               <el-dropdown-menu>
@@ -1808,6 +2270,69 @@ function formatTimestamp(timestampMs: number | null | undefined) {
         </div>
       </aside>
     </section>
+
+    <el-dialog
+      v-model="showGapFillDialog"
+      :title="t('phaseGapFill.title')"
+      width="min(720px, 92vw)"
+      class="phase-gap-fill-dialog-shell"
+    >
+      <div v-if="gapFillPreview" class="phase-gap-fill-dialog">
+        <p>{{ t('phaseGapFill.description') }}</p>
+        <div class="phase-gap-fill-summary">
+          <div>
+            <span>{{ t('phaseGapFill.idleLabel') }}</span>
+            <strong>{{ idlePhaseLabel ? getPhaseLabelDisplayName(idlePhaseLabel, currentLocale) : gapFillPreview.phase_label_name }}</strong>
+          </div>
+          <div>
+            <span>{{ t('phaseGapFill.gapCount') }}</span>
+            <strong>{{ gapFillPreview.gap_count }}</strong>
+          </div>
+          <div>
+            <span>{{ t('phaseGapFill.totalFrames') }}</span>
+            <strong>{{ gapFillPreview.total_gap_frames }}</strong>
+          </div>
+          <div>
+            <span>{{ t('phaseGapFill.totalDuration') }}</span>
+            <strong>{{ gapFillPreviewDurationText }}</strong>
+          </div>
+          <div>
+            <span>{{ t('phaseGapFill.leadingGap') }}</span>
+            <strong>{{ gapFillPreview.leading_gap_count }}</strong>
+          </div>
+          <div>
+            <span>{{ t('phaseGapFill.internalGap') }}</span>
+            <strong>{{ gapFillPreview.internal_gap_count }}</strong>
+          </div>
+          <div>
+            <span>{{ t('phaseGapFill.trailingGap') }}</span>
+            <strong>{{ gapFillPreview.trailing_gap_count }}</strong>
+          </div>
+        </div>
+        <p class="phase-gap-fill-description">
+          {{ t('phaseGapFill.confirmSummary', { count: gapFillPreview.gap_count, frames: gapFillPreview.total_gap_frames, duration: gapFillPreviewDurationText }) }}
+        </p>
+        <div class="phase-gap-fill-gap-list">
+          <div v-for="gap in gapFillPreview.gaps" :key="`${gap.start_frame}-${gap.end_frame_exclusive}`" class="phase-gap-fill-gap-row">
+            <span>{{ gapTypeLabel(gap.gap_type) }}</span>
+            <strong>{{ formatGapFillRange(gap.start_frame, gap.end_frame_exclusive) }}</strong>
+            <span>{{ gap.frame_count }} {{ t('common.frames') }}</span>
+            <span>{{ formatGapFillTimeRange(gap.start_frame, gap.end_frame_exclusive) }}</span>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="showGapFillDialog = false">{{ t('phaseGapFill.cancel') }}</el-button>
+        <el-button
+          type="primary"
+          :disabled="saving || !gapFillPreview"
+          :loading="saving"
+          @click="confirmGapFill"
+        >
+          {{ saving ? t('phaseGapFill.filling') : t('phaseGapFill.confirm') }}
+        </el-button>
+      </template>
+    </el-dialog>
 
     <el-drawer v-model="showMappingDrawer" :title="t('phaseMapping.title')" size="min(1120px, 92vw)" class="phase-mapping-drawer-shell">
       <div class="phase-mapping-drawer">
@@ -2053,7 +2578,62 @@ function formatTimestamp(timestampMs: number | null | undefined) {
     </el-drawer>
 
     <el-drawer v-model="showInspectorDrawer" direction="rtl" :title="t('phaseAnnotation.segmentInspector')" size="88%">
+      <div v-if="pendingPhaseDraft" class="research-phase-pending-inspector">
+        <p class="research-phase-card-eyebrow">{{ t('phaseAnnotation.segmentInspector') }}</p>
+        <div class="research-phase-pending-inspector__header">
+          <strong>{{ pendingPhaseDraft.labelName }}</strong>
+          <span>{{ t('phaseAnnotation.phaseInProgress') }}</span>
+        </div>
+        <dl class="research-phase-pending-inspector__meta">
+          <div>
+            <dt>{{ t('phaseAnnotation.startFrame') }}</dt>
+            <dd>{{ pendingPhaseStartText }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('phaseAnnotation.endFrameInclusive') }}</dt>
+            <dd>{{ t('phaseAnnotation.waitingForEnd') }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('phaseAnnotation.availableRange') }}</dt>
+            <dd>{{ pendingPhaseAvailableRangeText }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('phaseAnnotation.status') }}</dt>
+            <dd>{{ t('phaseAnnotation.phaseInProgress') }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('phaseAnnotation.currentPhase') }}</dt>
+            <dd>{{ pendingPhasePreviewEndText }}</dd>
+          </div>
+        </dl>
+        <label class="research-phase-pending-inspector__notes">
+          <span>{{ t('phaseAnnotation.notes') }}</span>
+          <textarea
+            v-model="pendingPhaseDraft.notes"
+            :placeholder="t('phaseNote.multilineSupported')"
+            @keydown.stop
+            @keydown.ctrl.enter.prevent.stop="finishPendingPhase(false)"
+            @keydown.meta.enter.prevent.stop="finishPendingPhase(false)"
+          ></textarea>
+        </label>
+        <div class="research-phase-pending-inspector__actions">
+          <el-button
+            :disabled="saving || !pendingPhaseCanEndAtCurrentFrame"
+            :loading="saving"
+            @click="finishPendingPhase(false)"
+          >
+            {{ t('phaseAnnotation.endAtCurrentFrame') }}
+          </el-button>
+          <el-button :disabled="saving" :loading="saving" @click="finishPendingPhase(true)">
+            {{ pendingPhaseEndLimitLabel }}
+          </el-button>
+          <el-button :disabled="saving" @click="cancelPendingPhase()">
+            {{ t('phaseAnnotation.cancelPendingPhase') }}
+          </el-button>
+        </div>
+      </div>
       <PhaseSegmentInspector
+        v-else
         :can-merge-next="canMergeNext"
         :can-merge-previous="canMergePrevious"
         :current-frame-index="selectedFrameIndex"
@@ -2175,6 +2755,227 @@ function formatTimestamp(timestampMs: number | null | undefined) {
   flex: 1 1 auto;
   min-height: 220px;
   overflow: hidden;
+}
+
+.research-phase-pending-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 0.72rem;
+  padding: 0.85rem;
+  border-radius: 0.72rem;
+  border: 1px dashed rgba(125, 211, 252, 0.42);
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.research-phase-pending-inspector__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.research-phase-pending-inspector__header strong {
+  min-width: 0;
+  color: #f8fafc;
+  overflow-wrap: anywhere;
+}
+
+.research-phase-pending-inspector__header span {
+  flex: 0 0 auto;
+  padding: 0.16rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(14, 165, 233, 0.18);
+  color: #bae6fd;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.research-phase-pending-inspector__meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+  margin: 0;
+}
+
+.research-phase-pending-inspector__meta div {
+  min-width: 0;
+  padding: 0.48rem;
+  border-radius: 0.54rem;
+  background: rgba(15, 23, 42, 0.62);
+}
+
+.research-phase-pending-inspector__meta dt {
+  color: rgba(148, 163, 184, 0.92);
+  font-size: 0.76rem;
+}
+
+.research-phase-pending-inspector__meta dd {
+  margin: 0.12rem 0 0;
+  color: #f8fafc;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.research-phase-pending-inspector__notes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: rgba(226, 232, 240, 0.92);
+  font-size: 0.84rem;
+}
+
+.research-phase-pending-inspector__notes textarea {
+  width: 100%;
+  min-height: 92px;
+  box-sizing: border-box;
+  resize: vertical;
+  border-radius: 0.58rem;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(15, 23, 42, 0.74);
+  color: #f8fafc;
+  padding: 0.62rem;
+  font: inherit;
+}
+
+.research-phase-pending-inspector__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.phase-gap-fill-dialog {
+  --phase-gap-fill-text: #0f172a;
+  --phase-gap-fill-muted: #334155;
+  --phase-gap-fill-soft: #475569;
+  --phase-gap-fill-border: #cbd5e1;
+  --phase-gap-fill-card-bg: #f8fafc;
+  --phase-gap-fill-row-bg: #ffffff;
+  --phase-gap-fill-info-bg: #e0f2fe;
+  --phase-gap-fill-info-border: #7dd3fc;
+  --phase-gap-fill-info-text: #0c4a6e;
+
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  color: var(--phase-gap-fill-text);
+}
+
+:deep(.phase-gap-fill-dialog-shell .el-dialog__title) {
+  color: #0f172a;
+  font-weight: 700;
+}
+
+:deep(.phase-gap-fill-dialog-shell .el-dialog__body) {
+  color: #0f172a;
+}
+
+:deep(.phase-gap-fill-dialog-shell .el-dialog__footer) {
+  border-top: 1px solid #e2e8f0;
+}
+
+:deep(.phase-gap-fill-dialog-shell .el-button:not(.el-button--primary)) {
+  color: #1e293b;
+  border-color: #94a3b8;
+}
+
+:deep(.phase-gap-fill-dialog-shell .el-button:not(.el-button--primary):hover),
+:deep(.phase-gap-fill-dialog-shell .el-button:not(.el-button--primary):focus-visible) {
+  color: #0f172a;
+  border-color: #64748b;
+  background: #f1f5f9;
+}
+
+.phase-gap-fill-dialog p {
+  margin: 0;
+  color: var(--phase-gap-fill-muted);
+  line-height: 1.55;
+}
+
+.phase-gap-fill-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.phase-gap-fill-summary div {
+  min-width: 0;
+  padding: 0.65rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--phase-gap-fill-border);
+  background: var(--phase-gap-fill-card-bg);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.phase-gap-fill-summary span {
+  display: block;
+  color: var(--phase-gap-fill-soft);
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.phase-gap-fill-summary strong {
+  display: block;
+  margin-top: 0.18rem;
+  color: var(--phase-gap-fill-text);
+  font-size: 1.04rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.phase-gap-fill-description {
+  padding: 0.7rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--phase-gap-fill-info-border);
+  background: var(--phase-gap-fill-info-bg);
+  color: var(--phase-gap-fill-info-text) !important;
+  font-weight: 600;
+}
+
+.phase-gap-fill-gap-list {
+  max-height: min(300px, 44vh);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.phase-gap-fill-gap-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 0.7fr) minmax(110px, 1fr) minmax(88px, 0.7fr) minmax(120px, 1fr);
+  gap: 0.55rem;
+  align-items: center;
+  padding: 0.56rem 0.65rem;
+  border-radius: 0.56rem;
+  border: 1px solid #dbe3ef;
+  background: var(--phase-gap-fill-row-bg);
+  color: var(--phase-gap-fill-muted);
+  font-size: 0.86rem;
+  line-height: 1.4;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.035);
+}
+
+.phase-gap-fill-gap-row span {
+  color: var(--phase-gap-fill-muted);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.phase-gap-fill-gap-row strong {
+  color: var(--phase-gap-fill-text);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.phase-gap-fill-gap-row:hover {
+  border-color: #94a3b8;
+  background: #f8fafc;
+}
+
+.phase-gap-fill-gap-row:focus-within {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
 }
 
 .research-phase-set-status {

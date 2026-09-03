@@ -36,6 +36,10 @@ export type ChecklistItem = {
     height: number | null
     created_at: string
     thumbnail_url: string | null
+    hidden_from_video_list: boolean
+    hidden_at: string | null
+    hidden_reason: string | null
+    notes: string | null
   }
   trim: {
     origin_type: string
@@ -123,6 +127,19 @@ export type BatchExportRequest = {
   }>
   include_summary_csv: boolean
   batch_name?: string | null
+}
+
+export type VisibilityPreviewItem = {
+  video_id: number
+  display_name: string
+  ready_derived_count: number
+}
+
+export type VisibilityPreview = {
+  eligible_count: number
+  already_hidden_count: number
+  skipped_count: number
+  items: VisibilityPreviewItem[]
 }
 
 export function emptySelection(): VideoExportSelection {

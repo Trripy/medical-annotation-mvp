@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ArrowLeft, Download, RefreshRight, Search } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ArrowLeft, Download, Hide, RefreshRight, Search, View } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import AppSidebar from '../components/AppSidebar.vue'
+import ResearchVideoNotesDialog from '../components/research/ResearchVideoNotesDialog.vue'
 import { apiUrl } from '../utils/api'
 import { downloadBlobWithFilename } from '../utils/download'
 import { formatDateTime, formatDuration as formatDurationValue, type SupportedLocale } from '../utils/locale'
@@ -25,10 +26,12 @@ import {
   type ChecklistDefaultPhaseSelection,
   type ChecklistItem,
   type ChecklistPage,
+  type VisibilityPreview,
   type VideoExportSelection,
 } from '../utils/researchVideoChecklist'
 
 const router = useRouter()
+const route = useRoute()
 const { locale, t } = useI18n()
 
 const loading = ref(false)
@@ -40,6 +43,7 @@ const filters = reactive({
   trimStatus: 'all',
   phaseStatus: 'all',
   protocolId: null as number | null,
+  visibility: 'all',
 })
 const page = ref(1)
 const pageSize = ref(50)
@@ -66,10 +70,21 @@ const previewResult = ref<{
   invalid_items: Array<{ message: string; video_id?: number | null; annotation_set_id?: number | null }>
   suggested_filename: string
 } | null>(null)
+const visibilityPreviewDialogVisible = ref(false)
+const visibilityPreviewLoading = ref(false)
+const visibilityActionLoading = ref(false)
+const visibilityAction = ref<'hide' | 'restore'>('hide')
+const visibilityPreview = ref<VisibilityPreview | null>(null)
+const notesDialogVisible = ref(false)
+const notesItem = ref<ChecklistItem | null>(null)
 
 let searchTimer: number | null = null
 
 onMounted(() => {
+  const routeVisibility = typeof route.query.visibility === 'string' ? route.query.visibility : ''
+  if (['all', 'visible', 'hidden'].includes(routeVisibility)) {
+    filters.visibility = routeVisibility
+  }
   void fetchChecklist({ announceAutoSelect: true })
 })
 
@@ -115,8 +130,9 @@ function checklistQueryParams(options: { includePaging: boolean }) {
   })
   if (options.includePaging) {
     params.set('page', String(page.value))
-    params.set('page_size', String(pageSize.value))
+  params.set('page_size', String(pageSize.value))
   }
+  params.set('visibility', filters.visibility)
   if (searchText.value.trim()) {
     params.set('search', searchText.value.trim())
   }
@@ -329,6 +345,107 @@ function buildPayload(): BatchExportRequest {
   return buildBatchExportPayload(selectedExports.value, { batchName: batchName.value, includeSummaryCsv: true })
 }
 
+async function previewVisibilityAction(action: 'hide' | 'restore') {
+  visibilityAction.value = action
+  visibilityPreviewLoading.value = true
+  try {
+    const endpoint = action === 'hide'
+      ? '/api/research/videos/visibility/hide-trimmed-sources/preview'
+      : '/api/research/videos/visibility/restore-trimmed-sources/preview'
+    const response = await fetch(apiUrl(endpoint), { method: 'POST' })
+    if (!response.ok) {
+      throw new Error(`Visibility preview failed: ${response.status}`)
+    }
+    visibilityPreview.value = await response.json()
+    visibilityPreviewDialogVisible.value = true
+  } catch (visibilityError) {
+    ElMessage.error(visibilityError instanceof Error ? visibilityError.message : t('videoChecklist.visibilityPreviewFailed'))
+  } finally {
+    visibilityPreviewLoading.value = false
+  }
+}
+
+async function confirmVisibilityAction() {
+  visibilityActionLoading.value = true
+  try {
+    const endpoint = visibilityAction.value === 'hide'
+      ? '/api/research/videos/visibility/hide-trimmed-sources'
+      : '/api/research/videos/visibility/restore-trimmed-sources'
+    const response = await fetch(apiUrl(endpoint), { method: 'POST' })
+    if (!response.ok) {
+      throw new Error(`Visibility update failed: ${response.status}`)
+    }
+    const result = await response.json() as { affected_count: number }
+    visibilityPreviewDialogVisible.value = false
+    ElMessage.success(visibilityAction.value === 'hide'
+      ? t('videoChecklist.hideTrimmedSourcesDone', { count: result.affected_count })
+      : t('videoChecklist.restoreTrimmedSourcesDone', { count: result.affected_count }))
+    await fetchChecklist()
+  } catch (visibilityError) {
+    ElMessage.error(visibilityError instanceof Error ? visibilityError.message : t('videoChecklist.visibilitySaveFailed'))
+  } finally {
+    visibilityActionLoading.value = false
+  }
+}
+
+async function restoreSingleVideo(item: ChecklistItem) {
+  try {
+    await ElMessageBox.confirm(
+      t('videoChecklist.restoreSingleConfirm', { name: item.video.display_name }),
+      t('researchVideos.restoreVisibility'),
+      {
+        cancelButtonText: t('common.cancel'),
+        confirmButtonText: t('researchVideos.restoreVisibility'),
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+  const response = await fetch(apiUrl(`/api/research/videos/${item.video.id}/visibility`), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hidden_from_video_list: false }),
+  })
+  if (!response.ok) {
+    ElMessage.error(t('videoChecklist.visibilitySaveFailed'))
+    return
+  }
+  ElMessage.success(t('researchVideos.visibilityRestored'))
+  await fetchChecklist()
+}
+
+function openNotesDialog(item: ChecklistItem) {
+  notesItem.value = item
+  notesDialogVisible.value = true
+}
+
+async function saveVideoNotes(payload: { videoId: number; notes: string | null }) {
+  const response = await fetch(apiUrl(`/api/research/videos/${payload.videoId}/notes`), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ notes: payload.notes }),
+  })
+  if (!response.ok) {
+    ElMessage.error(t('researchVideos.notesSaveFailed'))
+    return
+  }
+  const result = await response.json() as { notes: string | null }
+  if (notesItem.value?.video.id === payload.videoId) {
+    notesItem.value.video.notes = result.notes
+  }
+  if (pageData.value) {
+    pageData.value.items = pageData.value.items.map((item) => (
+      item.video.id === payload.videoId
+        ? { ...item, video: { ...item.video, notes: result.notes } }
+        : item
+    ))
+  }
+  notesDialogVisible.value = false
+  notesItem.value = null
+  ElMessage.success(t('researchVideos.notesSaved'))
+}
+
 async function previewExport() {
   previewLoading.value = true
   try {
@@ -403,6 +520,20 @@ function phaseStatusText(item: ChecklistItem) {
   return t('videoChecklist.draft')
 }
 
+function visibilityStatusText(item: ChecklistItem) {
+  return item.video.hidden_from_video_list ? t('researchVideos.hidden') : t('researchVideos.visible')
+}
+
+function hiddenReasonText(reason: string | null) {
+  if (reason === 'trimmed_source') {
+    return t('researchVideos.hiddenReasonTrimmedSource')
+  }
+  if (reason === 'manual') {
+    return t('researchVideos.hiddenReasonManual')
+  }
+  return t('common.unknown')
+}
+
 function formatDuration(durationMs: number | null) {
   return durationMs && durationMs > 0 ? formatDurationValue(durationMs) : t('common.unknown')
 }
@@ -433,6 +564,14 @@ function formatFrameRange(start: number | null, end: number | null) {
           <el-button :loading="loading" @click="fetchChecklist">
             <el-icon><RefreshRight /></el-icon>
             {{ t('common.refresh') }}
+          </el-button>
+          <el-button :loading="visibilityPreviewLoading" @click="previewVisibilityAction('hide')">
+            <el-icon><Hide /></el-icon>
+            {{ t('videoChecklist.hideTrimmedSources') }}
+          </el-button>
+          <el-button :loading="visibilityPreviewLoading" @click="previewVisibilityAction('restore')">
+            <el-icon><View /></el-icon>
+            {{ t('videoChecklist.restoreTrimmedSources') }}
           </el-button>
           <el-button type="primary" :disabled="exportDisabled" :loading="previewLoading" @click="previewExport">
             <el-icon><Download /></el-icon>
@@ -484,6 +623,11 @@ function formatFrameRange(start: number | null, end: number | null) {
         <el-select v-model="filters.protocolId" clearable :placeholder="t('videoChecklist.protocol')">
           <el-option v-for="protocol in protocolOptions" :key="protocol.id" :label="protocol.name" :value="protocol.id" />
         </el-select>
+        <el-select v-model="filters.visibility" :placeholder="t('videoChecklist.visibilityStatus')">
+          <el-option :label="t('videoChecklist.all')" value="all" />
+          <el-option :label="t('researchVideos.visible')" value="visible" />
+          <el-option :label="t('researchVideos.hidden')" value="hidden" />
+        </el-select>
       </section>
 
       <section class="checklist-bulk-actions">
@@ -514,6 +658,11 @@ function formatFrameRange(start: number | null, end: number | null) {
             <div class="checklist-expanded">
               <section>
                 <h4>{{ t('videoChecklist.trimDetails') }}</h4>
+                <p>
+                  {{ t('videoChecklist.visibilityStatus') }}: {{ visibilityStatusText(row) }}
+                  <span v-if="row.video.hidden_from_video_list"> · {{ t('researchVideos.hiddenReason') }}: {{ hiddenReasonText(row.video.hidden_reason) }}</span>
+                </p>
+                <p>{{ t('researchVideos.videoNotes') }}: {{ row.video.notes || t('researchVideos.noNotes') }}</p>
                 <p v-if="row.trim.is_trimmed">
                   {{ t('videoChecklist.sourceVideo') }}: {{ row.trim.source_video_display_name || row.trim.source_video_id || t('common.unknown') }}
                   · {{ t('videoChecklist.keepRange') }} {{ formatFrameRange(row.trim.trim_start_frame, row.trim.trim_end_frame_exclusive) }}
@@ -565,8 +714,10 @@ function formatFrameRange(start: number | null, end: number | null) {
               </div>
               <div>
                 <strong>{{ row.video.display_name }}</strong>
+                <el-tag v-if="row.video.hidden_from_video_list" size="small" type="info">{{ t('researchVideos.hiddenBadge') }}</el-tag>
                 <small>ID {{ row.video.id }} · {{ formatDuration(row.video.duration_ms) }} · {{ row.video.frame_count }} {{ t('videoChecklist.frames') }}</small>
                 <small>{{ row.video.fps ? `${row.video.fps.toFixed(2)} fps` : t('common.unknown') }} · {{ formatDateTime(row.video.created_at, locale as SupportedLocale) }}</small>
+                <small>{{ t('researchVideos.videoNotes') }}: {{ row.video.notes || t('researchVideos.noNotes') }}</small>
               </div>
             </div>
           </template>
@@ -603,6 +754,8 @@ function formatFrameRange(start: number | null, end: number | null) {
           <template #default="{ row }">
             <el-button text size="small" @click="router.push(`/research/videos/${row.video.id}/annotate`)">{{ t('common.open') }}</el-button>
             <el-button text size="small" @click="router.push(`/research/videos/${row.video.id}/phases`)">{{ t('videoChecklist.openPhase') }}</el-button>
+            <el-button text size="small" @click="openNotesDialog(row)">{{ t('researchVideos.editNotes') }}</el-button>
+            <el-button v-if="row.video.hidden_from_video_list" text size="small" @click="restoreSingleVideo(row)">{{ t('researchVideos.restoreVisibility') }}</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -683,6 +836,55 @@ function formatFrameRange(start: number | null, end: number | null) {
           <el-button type="primary" :loading="exportLoading" :disabled="Boolean(previewResult?.invalid_items.length)" @click="exportSelected">{{ t('videoChecklist.exportSelected') }}</el-button>
         </template>
       </el-dialog>
+
+      <el-dialog
+        v-model="visibilityPreviewDialogVisible"
+        :title="visibilityAction === 'hide' ? t('videoChecklist.hideTrimmedSourcesPreview') : t('videoChecklist.restoreTrimmedSourcesPreview')"
+        width="640px"
+      >
+        <div v-if="visibilityPreview" class="visibility-preview">
+          <p v-if="visibilityAction === 'hide'">
+            {{ t('videoChecklist.hideTrimmedSourcesConfirm', { count: visibilityPreview.eligible_count }) }}
+          </p>
+          <p v-else>
+            {{ t('videoChecklist.restoreTrimmedSourcesConfirm', { count: visibilityPreview.eligible_count }) }}
+          </p>
+          <el-alert
+            v-if="visibilityAction === 'hide'"
+            :title="t('videoChecklist.hideTrimmedSourcesDescription')"
+            type="warning"
+            show-icon
+            :closable="false"
+          />
+          <ul>
+            <li v-for="item in visibilityPreview.items" :key="item.video_id">
+              {{ item.display_name }} · {{ t('videoChecklist.readyDerivedCount', { count: item.ready_derived_count }) }}
+            </li>
+          </ul>
+          <p v-if="visibilityPreview.eligible_count > visibilityPreview.items.length" class="checklist-muted">
+            {{ t('videoChecklist.moreItems', { count: visibilityPreview.eligible_count - visibilityPreview.items.length }) }}
+          </p>
+        </div>
+        <template #footer>
+          <el-button @click="visibilityPreviewDialogVisible = false">{{ t('common.cancel') }}</el-button>
+          <el-button
+            type="primary"
+            :loading="visibilityActionLoading"
+            :disabled="!visibilityPreview?.eligible_count"
+            @click="confirmVisibilityAction"
+          >
+            {{ visibilityAction === 'hide' ? t('videoChecklist.hideTrimmedSources') : t('videoChecklist.restoreTrimmedSources') }}
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <ResearchVideoNotesDialog
+        v-model="notesDialogVisible"
+        :video-id="notesItem?.video.id ?? null"
+        :video-name="notesItem?.video.display_name ?? ''"
+        :notes="notesItem?.video.notes ?? null"
+        @save="saveVideoNotes"
+      />
     </section>
   </main>
 </template>
@@ -726,7 +928,7 @@ function formatFrameRange(start: number | null, end: number | null) {
 }
 
 .checklist-filters {
-  grid-template-columns: minmax(220px, 1fr) repeat(4, minmax(150px, 220px));
+  grid-template-columns: minmax(220px, 1fr) repeat(5, minmax(140px, 210px));
 }
 
 .checklist-bulk-actions {
@@ -742,7 +944,21 @@ function formatFrameRange(start: number | null, end: number | null) {
 .checklist-video-cell {
   display: flex;
   gap: 10px;
-  align-items: center;
+  align-items: flex-start;
+}
+
+.checklist-video-cell > div:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.checklist-video-cell small {
+  overflow: hidden;
+  color: #64748b;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .checklist-thumbnail {
@@ -779,6 +995,12 @@ function formatFrameRange(start: number | null, end: number | null) {
   grid-template-columns: 1fr 1.4fr;
   gap: 20px;
   padding: 12px 24px;
+}
+
+.visibility-preview ul {
+  max-height: 260px;
+  margin: 12px 0;
+  overflow-y: auto;
 }
 
 .checklist-pagination {

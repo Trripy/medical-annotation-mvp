@@ -6,6 +6,20 @@ import { normalizeAnnotationObject } from '../utils/polygon'
 import type { AnnotationObject, ShapeType } from './annotation'
 
 export type ResearchVideoStatus = 'processing' | 'ready' | 'failed'
+export type ResearchVideoVisibility = 'visible' | 'hidden' | 'all'
+export type ResearchVideoPhaseSummary = {
+  annotation_set_count: number
+  draft_count: number
+  submitted_count: number
+  latest_submitted_set_id: number | null
+  latest_submitted_version: number | null
+  latest_submitted_protocol_name: string | null
+  latest_submitted_coverage_percent: number
+  latest_draft_set_id: number | null
+  latest_draft_version: number | null
+  latest_error_count: number
+  latest_warning_count: number
+}
 export type ResearchVideoListItem = {
   id: number
   name: string
@@ -20,6 +34,11 @@ export type ResearchVideoListItem = {
   origin_type: string
   trim_start_frame: number | null
   trim_end_frame_exclusive: number | null
+  hidden_from_video_list: boolean
+  hidden_at: string | null
+  hidden_reason: string | null
+  notes: string | null
+  phase_summary: ResearchVideoPhaseSummary
   thumbnail_url: string | null
   created_at: string
   updated_at: string
@@ -142,14 +161,30 @@ export type ResearchVideoTrimPayload = {
   end_frame_exclusive: number
   display_name: string | null
   acknowledge_annotations_not_copied: boolean
+  hide_source_after_success: boolean
 }
 
 export type ResearchVideoTrimResponse = {
   source_video_id: number
   trimmed_video_id: number
   status: ResearchVideoStatus
+  source_video_hidden: boolean
   warnings: string[]
 }
+
+const emptyPhaseSummary = (): ResearchVideoPhaseSummary => ({
+  annotation_set_count: 0,
+  draft_count: 0,
+  submitted_count: 0,
+  latest_submitted_set_id: null,
+  latest_submitted_version: null,
+  latest_submitted_protocol_name: null,
+  latest_submitted_coverage_percent: 0,
+  latest_draft_set_id: null,
+  latest_draft_version: null,
+  latest_error_count: 0,
+  latest_warning_count: 0,
+})
 
 function resolveStorageUrl(path: string): string {
   return resolveApiUrl(path)
@@ -163,6 +198,11 @@ function withCacheBuster(url: string, seed: number): string {
 function normalizeVideo(video: ResearchVideoListItem): ResearchVideoListItem {
   return {
     ...video,
+    hidden_from_video_list: Boolean(video.hidden_from_video_list),
+    hidden_at: video.hidden_at ?? null,
+    hidden_reason: video.hidden_reason ?? null,
+    notes: video.notes ?? null,
+    phase_summary: video.phase_summary ?? emptyPhaseSummary(),
     thumbnail_url: video.thumbnail_url ? withCacheBuster(resolveStorageUrl(video.thumbnail_url), video.id) : null,
   }
 }
@@ -204,13 +244,17 @@ export const useResearchVideosStore = defineStore('researchVideos', {
     loading: false,
     saving: false,
     error: '',
+    visibility: 'visible' as ResearchVideoVisibility,
   }),
   actions: {
-    async fetchVideos() {
+    async fetchVideos(visibility?: ResearchVideoVisibility) {
+      const requestedVisibility = visibility ?? this.visibility
       this.loading = true
       this.error = ''
+      this.visibility = requestedVisibility
       try {
-        const response = await fetch(apiUrl('/api/research/videos'), { cache: 'no-store' })
+        const params = new URLSearchParams({ visibility: requestedVisibility })
+        const response = await fetch(apiUrl(`/api/research/videos?${params.toString()}`), { cache: 'no-store' })
         if (!response.ok) {
           throw new Error(`Video list request failed: ${response.status}`)
         }
@@ -219,6 +263,74 @@ export const useResearchVideosStore = defineStore('researchVideos', {
         this.error = error instanceof Error ? error.message : 'Unknown error'
       } finally {
         this.loading = false
+      }
+    },
+    async updateVideoNotes(videoId: number, notes: string | null): Promise<boolean> {
+      this.saving = true
+      this.error = ''
+      try {
+        const response = await fetch(apiUrl(`/api/research/videos/${videoId}/notes`), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ notes }),
+        })
+        if (!response.ok) {
+          throw new Error(`Video notes update failed: ${response.status}`)
+        }
+        const payload = await response.json() as { notes: string | null; updated_at: string }
+        this.videos = this.videos.map((video) => (
+          video.id === videoId
+            ? { ...video, notes: payload.notes, updated_at: payload.updated_at }
+            : video
+        ))
+        if (this.currentVideo?.id === videoId) {
+          this.currentVideo = { ...this.currentVideo, notes: payload.notes, updated_at: payload.updated_at }
+        }
+        return true
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return false
+      } finally {
+        this.saving = false
+      }
+    },
+    async updateVideoVisibility(videoId: number, hidden: boolean): Promise<boolean> {
+      this.saving = true
+      this.error = ''
+      try {
+        const response = await fetch(apiUrl(`/api/research/videos/${videoId}/visibility`), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hidden_from_video_list: hidden }),
+        })
+        if (!response.ok) {
+          throw new Error(`Video visibility update failed: ${response.status}`)
+        }
+        const payload = await response.json() as {
+          hidden_from_video_list: boolean
+          hidden_at: string | null
+          hidden_reason: string | null
+          updated_at: string
+        }
+        this.videos = this.videos
+          .map((video) => (
+            video.id === videoId
+              ? {
+                ...video,
+                hidden_from_video_list: payload.hidden_from_video_list,
+                hidden_at: payload.hidden_at,
+                hidden_reason: payload.hidden_reason,
+                updated_at: payload.updated_at,
+              }
+              : video
+          ))
+          .filter((video) => this.visibility === 'all' || (this.visibility === 'hidden' ? video.hidden_from_video_list : !video.hidden_from_video_list))
+        return true
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return false
+      } finally {
+        this.saving = false
       }
     },
     async fetchVideo(videoId: number) {

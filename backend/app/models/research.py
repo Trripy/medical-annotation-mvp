@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, JSON, String, UniqueConstraint, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -16,6 +16,12 @@ if TYPE_CHECKING:
 
 class ResearchVideo(Base):
     __tablename__ = "research_videos"
+    __table_args__ = (
+        CheckConstraint(
+            "hidden_reason IS NULL OR hidden_reason IN ('trimmed_source', 'manual')",
+            name="ck_research_videos_hidden_reason",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -32,6 +38,10 @@ class ResearchVideo(Base):
     origin_type: Mapped[str] = mapped_column(String(32), nullable=False, default="uploaded")
     trim_start_frame: Mapped[int | None] = mapped_column(Integer)
     trim_end_frame_exclusive: Mapped[int | None] = mapped_column(Integer)
+    hidden_from_video_list: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    hidden_reason: Mapped[str | None] = mapped_column(String(64))
+    notes: Mapped[str | None] = mapped_column(Text)
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -84,6 +94,7 @@ class ResearchVideo(Base):
 
 Index("ix_research_videos_source_video_id", ResearchVideo.source_video_id)
 Index("ix_research_videos_source_trim_processing", ResearchVideo.source_video_id, ResearchVideo.trim_start_frame, ResearchVideo.trim_end_frame_exclusive, ResearchVideo.status)
+Index("ix_research_videos_hidden_from_video_list", ResearchVideo.hidden_from_video_list)
 
 
 class ResearchVideoFrame(Base):

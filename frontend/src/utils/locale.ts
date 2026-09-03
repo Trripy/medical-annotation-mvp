@@ -165,6 +165,7 @@ const API_ERROR_KEYS: Record<string, string> = {
   'Phase annotation set revision conflict.': 'errors.phaseConflict',
   'Skill assessment revision conflict.': 'errors.skillConflict',
   'Only draft phase annotation sets can be modified.': 'errors.phaseReadOnly',
+  'Phase segment overlaps an existing segment.': 'phaseAnnotation.segmentOverlap',
   'Only draft skill assessments can be modified.': 'errors.skillReadOnly',
   'Phase annotation set has validation errors.': 'errors.phaseValidationErrors',
   'Phase annotation set has warnings that require confirmation.': 'errors.phaseWarningsConfirm',

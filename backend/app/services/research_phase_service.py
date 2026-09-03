@@ -23,9 +23,12 @@ from app.schemas.research_phase import (
     CloseActivePhaseSegmentRequest,
     CreateResearchPhaseAnnotationSetResponse,
     CreateResearchPhaseSegmentRequest,
+    FillResearchPhaseGapsRequest,
     MergeResearchPhaseSegmentsRequest,
     ReopenResearchPhaseAnnotationSetRequest,
     ResearchPhaseAnnotationSetDetail,
+    ResearchPhaseGapFillPreviewResponse,
+    ResearchPhaseGapResponse,
     ResearchPhaseAnnotationSetSummary,
     ResearchPhaseLabelResponse,
     ResearchPhaseMutationResponse,
@@ -50,6 +53,7 @@ REVISION_CONFLICT_DETAIL = "Phase annotation set revision conflict."
 VALIDATION_SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
 IDLE_PHASE_KEY = "idle"
 MIN_SHORT_SEGMENT_FRAMES = 3
+MAX_GAP_FILL_PREVIEW_GAPS = 1000
 
 
 def list_phase_protocols(
@@ -447,6 +451,77 @@ def create_phase_segment(
         annotation_set_id=annotation_set.id,
         changed_segment_ids=[new_segment.id],
         created_segment_ids=[new_segment.id],
+    )
+
+
+def preview_phase_gap_fill(
+    db: Session,
+    annotation_set_id: int,
+    payload: FillResearchPhaseGapsRequest,
+) -> ResearchPhaseGapFillPreviewResponse:
+    annotation_set = _get_annotation_set_or_404(db, annotation_set_id)
+    _require_draft_annotation_set(annotation_set)
+    _validate_expected_revision(payload.expected_revision)
+    label = _validate_phase_label_for_set(db, annotation_set, payload.phase_label_id)
+    return _build_gap_fill_preview(annotation_set, label)
+
+
+def fill_phase_gaps(
+    db: Session,
+    annotation_set_id: int,
+    payload: FillResearchPhaseGapsRequest,
+) -> ResearchPhaseMutationResponse:
+    db.execute(
+        select(ResearchPhaseAnnotationSet.id)
+        .where(ResearchPhaseAnnotationSet.id == annotation_set_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    annotation_set = _get_annotation_set_for_mutation(db, annotation_set_id)
+    _require_draft_annotation_set(annotation_set)
+    _validate_expected_revision(payload.expected_revision)
+    _ensure_annotation_set_revision_matches_current(annotation_set, payload.expected_revision)
+    label = _validate_phase_label_for_set(db, annotation_set, payload.phase_label_id)
+    gaps = calculate_phase_annotation_gaps(annotation_set.video.frame_count if annotation_set.video else 0, annotation_set.segments)
+
+    if not gaps:
+        return _build_mutation_response(
+            db,
+            action="unchanged",
+            annotation_set_id=annotation_set.id,
+        )
+
+    created_segments: list[ResearchPhaseSegment] = []
+    for gap in gaps:
+        segment = ResearchPhaseSegment(
+            annotation_set_id=annotation_set.id,
+            phase_label_id=label.id,
+            start_frame=gap.start_frame,
+            end_frame_exclusive=gap.end_frame_exclusive,
+            source="manual",
+            confidence=None,
+            notes=None,
+        )
+        db.add(segment)
+        created_segments.append(segment)
+
+    try:
+        db.flush()
+        created_segment_ids = [segment.id for segment in created_segments]
+        _claim_annotation_set_revision(db, annotation_set.id, payload.expected_revision)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
+    return _build_mutation_response(
+        db,
+        action="filled_gaps",
+        annotation_set_id=annotation_set.id,
+        changed_segment_ids=created_segment_ids,
+        created_segment_ids=created_segment_ids,
     )
 
 
@@ -1685,6 +1760,101 @@ def _check_segment_overlap(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Phase segment overlaps an existing segment.",
             )
+
+
+def calculate_phase_annotation_gaps(
+    video_frame_count: int,
+    segments: list[ResearchPhaseSegment],
+) -> list[ResearchPhaseGapResponse]:
+    if video_frame_count <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Video frame count must be positive.",
+        )
+
+    sorted_segments = sorted(segments, key=lambda segment: (
+        segment.start_frame,
+        segment.end_frame_exclusive if segment.end_frame_exclusive is not None else video_frame_count + 1,
+        segment.id or 0,
+    ))
+    cursor = 0
+    gaps: list[ResearchPhaseGapResponse] = []
+    closed_segment_count = len([segment for segment in sorted_segments if segment.end_frame_exclusive is not None])
+    closed_index = 0
+
+    for segment in sorted_segments:
+        if segment.end_frame_exclusive is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error_code": "open_phase_segment_exists",
+                    "message": "Please close the active phase segment before filling gaps.",
+                },
+            )
+        if segment.start_frame < 0 or segment.end_frame_exclusive > video_frame_count or segment.end_frame_exclusive <= segment.start_frame:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Existing phase segment range is invalid.",
+            )
+        if segment.start_frame < cursor:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error_code": "phase_segment_overlap",
+                    "message": "Existing phase segments overlap.",
+                },
+            )
+        if cursor < segment.start_frame:
+            gap_type = "leading" if closed_index == 0 else "internal"
+            gaps.append(ResearchPhaseGapResponse(
+                start_frame=cursor,
+                end_frame_exclusive=segment.start_frame,
+                frame_count=segment.start_frame - cursor,
+                gap_type=gap_type,
+            ))
+        cursor = max(cursor, segment.end_frame_exclusive)
+        closed_index += 1
+
+    if cursor < video_frame_count:
+        gap_type = "leading" if closed_segment_count == 0 else "trailing"
+        gaps.append(ResearchPhaseGapResponse(
+            start_frame=cursor,
+            end_frame_exclusive=video_frame_count,
+            frame_count=video_frame_count - cursor,
+            gap_type=gap_type,
+        ))
+
+    return gaps
+
+
+def _build_gap_fill_preview(
+    annotation_set: ResearchPhaseAnnotationSet,
+    label: ResearchPhaseLabel,
+) -> ResearchPhaseGapFillPreviewResponse:
+    video = annotation_set.video
+    if video is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research video not found.")
+    gaps = calculate_phase_annotation_gaps(int(video.frame_count or 0), annotation_set.segments)
+    visible_gaps = gaps[:MAX_GAP_FILL_PREVIEW_GAPS]
+    total_gap_frames = sum(gap.frame_count for gap in gaps)
+    duration_ms = None
+    if video.fps and video.fps > 0:
+        duration_ms = int(round((total_gap_frames / video.fps) * 1000))
+    return ResearchPhaseGapFillPreviewResponse(
+        annotation_set_id=annotation_set.id,
+        current_revision=annotation_set.revision,
+        phase_label_id=label.id,
+        phase_label_name=label.name,
+        video_frame_count=int(video.frame_count or 0),
+        gap_count=len(gaps),
+        total_gap_frames=total_gap_frames,
+        total_gap_duration_ms=duration_ms,
+        leading_gap_count=sum(1 for gap in gaps if gap.gap_type == "leading"),
+        internal_gap_count=sum(1 for gap in gaps if gap.gap_type == "internal"),
+        trailing_gap_count=sum(1 for gap in gaps if gap.gap_type == "trailing"),
+        gaps=visible_gaps,
+        truncated=len(gaps) > len(visible_gaps),
+    )
 
 
 def _merge_segment_notes(left_notes: str | None, right_notes: str | None) -> str | None:

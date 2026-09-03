@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field, field_validator
 Point = list[float]
 ShapeType = Literal["rectangle", "polygon", "point"]
 ResearchVideoStatus = Literal["processing", "ready", "failed"]
+ResearchVideoVisibility = Literal["visible", "hidden", "all"]
+ResearchVideoHiddenReason = Literal["trimmed_source", "manual"]
 
 
 class ResearchVideoLabelPayload(BaseModel):
@@ -46,6 +48,20 @@ class ResearchVideoFrameRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ResearchVideoPhaseSummaryRead(BaseModel):
+    annotation_set_count: int = 0
+    draft_count: int = 0
+    submitted_count: int = 0
+    latest_submitted_set_id: int | None = None
+    latest_submitted_version: int | None = None
+    latest_submitted_protocol_name: str | None = None
+    latest_submitted_coverage_percent: float = 0.0
+    latest_draft_set_id: int | None = None
+    latest_draft_version: int | None = None
+    latest_error_count: int = 0
+    latest_warning_count: int = 0
+
+
 class ResearchVideoRead(BaseModel):
     id: int
     name: str
@@ -60,6 +76,11 @@ class ResearchVideoRead(BaseModel):
     origin_type: str = "uploaded"
     trim_start_frame: int | None = None
     trim_end_frame_exclusive: int | None = None
+    hidden_from_video_list: bool = False
+    hidden_at: str | None = None
+    hidden_reason: str | None = None
+    notes: str | None = None
+    phase_summary: ResearchVideoPhaseSummaryRead = Field(default_factory=ResearchVideoPhaseSummaryRead)
     thumbnail_url: str | None
     created_at: str
     updated_at: str
@@ -140,13 +161,68 @@ class ResearchVideoTrimRequest(BaseModel):
     end_frame_exclusive: int = Field(gt=0)
     display_name: str | None = Field(default=None, max_length=255)
     acknowledge_annotations_not_copied: bool = False
+    hide_source_after_success: bool = Field(
+        default=False,
+        description=(
+            "Hide the source video from the regular research video list after the trimmed video "
+            "has been fully created and marked ready."
+        ),
+    )
 
 
 class ResearchVideoTrimResponse(BaseModel):
     source_video_id: int
     trimmed_video_id: int
     status: ResearchVideoStatus
+    source_video_hidden: bool = False
     warnings: list[str] = Field(default_factory=list)
+
+
+class ResearchVideoNotesRequest(BaseModel):
+    notes: str | None = Field(default=None, max_length=5000)
+
+    @field_validator("notes")
+    @classmethod
+    def normalize_notes(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value if value.strip() else None
+
+
+class ResearchVideoNotesResponse(BaseModel):
+    video_id: int
+    notes: str | None = None
+    updated_at: str
+
+
+class ResearchVideoVisibilityRequest(BaseModel):
+    hidden_from_video_list: bool
+
+
+class ResearchVideoVisibilityResponse(BaseModel):
+    video_id: int
+    hidden_from_video_list: bool
+    hidden_at: str | None = None
+    hidden_reason: str | None = None
+    updated_at: str
+
+
+class ResearchVideoVisibilityBulkItemRead(BaseModel):
+    video_id: int
+    display_name: str
+    ready_derived_count: int = 0
+
+
+class ResearchVideoVisibilityBulkPreviewRead(BaseModel):
+    eligible_count: int = 0
+    already_hidden_count: int = 0
+    skipped_count: int = 0
+    items: list[ResearchVideoVisibilityBulkItemRead] = Field(default_factory=list)
+
+
+class ResearchVideoVisibilityBulkResultRead(BaseModel):
+    affected_count: int = 0
+    items: list[ResearchVideoVisibilityBulkItemRead] = Field(default_factory=list)
 
 
 class ServerVideoImportRootRead(BaseModel):
@@ -217,6 +293,10 @@ class ResearchVideoChecklistVideoRead(BaseModel):
     height: int | None = None
     created_at: datetime
     thumbnail_url: str | None = None
+    hidden_from_video_list: bool = False
+    hidden_at: datetime | None = None
+    hidden_reason: str | None = None
+    notes: str | None = None
 
 
 class ResearchVideoChecklistDerivedVideoRead(BaseModel):

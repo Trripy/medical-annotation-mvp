@@ -187,6 +187,68 @@ test('unchanged mutation does not invent a new revision on the client', async ()
   assert.equal(store.currentAnnotationSet?.revision, 3)
 })
 
+test('phase mutations are serialized and later requests use the latest confirmed revision', async () => {
+  const store = useFreshStore()
+  store.applyAnnotationSet(createAnnotationSet(3))
+  const requests: Array<{ url: string, body: string }> = []
+  let resolveFirst: ((response: Response) => void) | null = null
+
+  globalThis.fetch = async (input, init) => {
+    requests.push({
+      url: String(input),
+      body: String(init?.body ?? ''),
+    })
+    if (requests.length === 1) {
+      return new Promise<Response>((resolve) => {
+        resolveFirst = resolve
+      })
+    }
+    return jsonResponse({
+      action: 'created',
+      annotation_set: createAnnotationSet(5, 'draft', [
+        { ...sampleSegment, end_frame_exclusive: 80 },
+        { ...sampleSegment, id: 30, phase_label_id: 3, start_frame: 80, end_frame_exclusive: 160 },
+      ]),
+      changed_segment_ids: [],
+      created_segment_ids: [30],
+      deleted_segment_ids: [],
+    })
+  }
+
+  const update = store.updateSegment(20, { end_frame_exclusive: 80 })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const create = store.createSegment({
+    phase_label_id: 3,
+    start_frame: 80,
+    end_frame_exclusive: 160,
+    source: 'manual',
+  })
+
+  assert.equal(requests.length, 1)
+  assert.match(requests[0].url, /\/api\/research\/phase-segments\/20$/)
+  assert.equal(JSON.parse(requests[0].body).expected_revision, 3)
+
+  resolveFirst?.(jsonResponse({
+    action: 'updated',
+    annotation_set: createAnnotationSet(4, 'draft', [
+      { ...sampleSegment, end_frame_exclusive: 80 },
+    ]),
+    changed_segment_ids: [20],
+    created_segment_ids: [],
+    deleted_segment_ids: [],
+  }))
+
+  const updateResult = await update
+  const createResult = await create
+
+  assert.equal(updateResult.ok, true)
+  assert.equal(createResult.ok, true)
+  assert.equal(requests.length, 2)
+  assert.match(requests[1].url, /\/api\/research\/phase-annotation-sets\/11\/segments$/)
+  assert.equal(JSON.parse(requests[1].body).expected_revision, 4)
+  assert.equal(store.currentAnnotationSet?.revision, 5)
+})
+
 test('submitted annotation sets are treated as read-only until reopened', () => {
   const store = useFreshStore()
   store.applyAnnotationSet(createAnnotationSet(4, 'submitted'))
@@ -411,4 +473,44 @@ test('phase note editor keeps note edits local and isolates keyboard shortcuts',
   assert.match(phasePage, /event\.keyCode === 229/)
   assert.match(phasePage, /isEditableEventTarget/)
   assert.match(phasePage, /validate: !isNotesOnlyPatch/)
+})
+
+test('phase creation in an existing gap starts a pending draft instead of posting a closed segment', () => {
+  const phasePage = readFileSync(new URL('../src/views/ResearchVideoPhasePage.vue', import.meta.url), 'utf8')
+  const timeline = readFileSync(new URL('../src/components/research/PhaseTimeline.vue', import.meta.url), 'utf8')
+
+  assert.match(phasePage, /waitForPendingMutations\(\)/)
+  assert.doesNotMatch(phasePage, /saveState\.value === 'error' \|\| saveState\.value === 'conflict'/)
+  assert.match(phasePage, /saving\.value \|\| saveState\.value === 'conflict'/)
+  assert.match(phasePage, /type PendingPhaseDraft/)
+  assert.match(phasePage, /pendingPhaseDraft = ref<PendingPhaseDraft \| null>\(null\)/)
+  assert.match(phasePage, /async function startPendingPhase/)
+  assert.match(phasePage, /const candidatePendingDraft: PendingPhaseDraft = \{/)
+  assert.match(phasePage, /pendingPhaseDraft\.value = candidatePendingDraft/)
+  assert.match(phasePage, /findPhaseGapAtFrame\(segments\.value, selectedFrameIndex\.value, totalFrames\.value\)/)
+  assert.match(phasePage, /pendingPhasePreviewEndFrameExclusive/)
+  assert.match(phasePage, /async function finishPendingPhase/)
+  assert.match(phasePage, /end_frame_exclusive: endFrameExclusive/)
+  assert.match(phasePage, /cancelPendingPhase/)
+  assert.match(phasePage, /handleBeforeUnload/)
+  assert.match(timeline, /pendingSegments\?: ResearchPhaseSegment\[\]/)
+  assert.match(timeline, /renderedCoverageGaps[\s\S]*sortedSegments\.value/)
+  assert.match(timeline, /isPendingDraft/)
+  assert.doesNotMatch(phasePage, /phase_label_id: label\.id,[\s\S]{0,180}end_frame_exclusive: gap\.gapEndFrameExclusive/)
+  assert.doesNotMatch(phasePage, /phase_label_id: label\.id,[\s\S]{0,180}end_frame_exclusive: null/)
+})
+
+test('next phase after closing starts from server end_frame_exclusive without duplicate start toasts', () => {
+  const phasePage = readFileSync(new URL('../src/views/ResearchVideoPhasePage.vue', import.meta.url), 'utf8')
+
+  assert.match(phasePage, /type PhaseNextStartHint/)
+  assert.match(phasePage, /const nextPhaseStartHint = ref<PhaseNextStartHint \| null>\(null\)/)
+  assert.match(phasePage, /sourceEndFrameExclusive: savedEndFrameExclusive/)
+  assert.match(phasePage, /startFrame: savedEndFrameExclusive/)
+  assert.match(phasePage, /closedAtPlayheadFrame: Math\.max\(0, savedEndFrameExclusive - 1\)/)
+  assert.doesNotMatch(phasePage, /await goToFrame\(endFrameExclusive/)
+  assert.match(phasePage, /getUsableNextPhaseStartHint\(\)/)
+  assert.match(phasePage, /startPendingPhase\(label, startHint\.startFrame, \{ showSuccessMessage: false \}\)/)
+  assert.match(phasePage, /nextPhaseStartsAtFollowingFrame/)
+  assert.match(phasePage, /resetFailedPendingPhaseAttempt\(\)/)
 })

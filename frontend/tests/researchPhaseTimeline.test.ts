@@ -6,6 +6,7 @@ import enUS from '../src/i18n/locales/en-US.ts'
 import zhCN from '../src/i18n/locales/zh-CN.ts'
 import {
   calculateSegmentGeometry,
+  calculatePhaseSegmentEdges,
   calculateTimelineWidth,
   calculateVisibleFrameRange,
   clampFrame,
@@ -13,8 +14,10 @@ import {
   frameToPixel,
   getClippedPhaseSegmentGeometry,
   getFocusedVisibleRange,
+  findPhaseGapAtFrame,
   getPhaseSegmentPresentation,
   getPhaseSegmentTooltip,
+  getValidPhaseNextStartHint,
   getVisiblePhaseCoverageGaps,
   getTimelinePlayheadPercent,
   hitTestPhaseSegment,
@@ -142,6 +145,36 @@ test('adjacent half-open intervals meet without cumulative rounding gaps', () =>
   assert.equal(first.widthPercent + second.widthPercent, 100)
 })
 
+test('phase segment edge geometry uses shared left and right boundaries', () => {
+  const timelineWidth = calculateTimelineWidth({ frameCount: 200, framesPerPixel: 1 })
+  const first = calculatePhaseSegmentEdges({ start_frame: 0, end_frame_exclusive: 100 }, {
+    frameCount: 200,
+    framesPerPixel: 1,
+  })
+  const second = calculatePhaseSegmentEdges({ start_frame: 100, end_frame_exclusive: 200 }, {
+    frameCount: 200,
+    framesPerPixel: 1,
+  })
+
+  assert.equal(first.leftPx, 0)
+  assert.equal(first.rightPx, timelineWidth - 100)
+  assert.equal(second.leftPx, 100)
+  assert.equal(second.rightPx, timelineWidth - 200)
+  assert.equal(first.leftPx + first.trueWidthPx, second.leftPx)
+})
+
+test('subpixel phase segment marker does not change true geometry', () => {
+  const edges = calculatePhaseSegmentEdges({ start_frame: 100, end_frame_exclusive: 101 }, {
+    frameCount: 1_000_000,
+    framesPerPixel: 100,
+  })
+
+  assert.ok(edges.trueWidthPx < 1)
+  assert.equal(edges.needsSubpixelMarker, true)
+  assert.equal(edges.leftPx, 1)
+  assert.ok(Math.abs((calculateTimelineWidth({ frameCount: 1_000_000, framesPerPixel: 100 }) - edges.rightPx) - 1.01) < 1e-9)
+})
+
 test('coverage gaps are only emitted for real unannotated frames', () => {
   assert.deepEqual(getVisiblePhaseCoverageGaps({ startFrame: 0, endFrameExclusive: 300 }, [
     { start_frame: 0, end_frame_exclusive: 100 },
@@ -208,6 +241,53 @@ test('findSegmentAtFrame chooses the first covering segment and respects left-cl
   assert.equal(findSegmentAtFrame(segments, 240), null)
 })
 
+test('findPhaseGapAtFrame returns real unannotated gaps from confirmed half-open segments', () => {
+  const segments = [
+    { ...sampleSegment, id: 1, start_frame: 1760, end_frame_exclusive: 2588 },
+    { ...sampleSegment, id: 2, start_frame: 3400, end_frame_exclusive: 4200 },
+  ]
+
+  assert.deepEqual(findPhaseGapAtFrame(segments, 2818, 5_000), {
+    gapStartFrame: 2588,
+    gapEndFrameExclusive: 3400,
+    previousSegmentId: 1,
+    nextSegmentId: 2,
+    containsTargetFrame: true,
+  })
+  assert.equal(findPhaseGapAtFrame(segments, 2587, 5_000), null)
+  assert.deepEqual(findPhaseGapAtFrame(segments, 120, 5_000), {
+    gapStartFrame: 0,
+    gapEndFrameExclusive: 1760,
+    previousSegmentId: null,
+    nextSegmentId: 1,
+    containsTargetFrame: true,
+  })
+  assert.deepEqual(findPhaseGapAtFrame(segments, 4500, 5_000), {
+    gapStartFrame: 4200,
+    gapEndFrameExclusive: 5000,
+    previousSegmentId: 2,
+    nextSegmentId: null,
+    containsTargetFrame: true,
+  })
+})
+
+test('findPhaseGapAtFrame does not create fake gaps at adjacent segment boundaries', () => {
+  const segments = [
+    { ...sampleSegment, id: 1, start_frame: 0, end_frame_exclusive: 100 },
+    { ...sampleSegment, id: 2, start_frame: 100, end_frame_exclusive: 200 },
+  ]
+
+  assert.equal(findPhaseGapAtFrame(segments, 99, 300), null)
+  assert.equal(findPhaseGapAtFrame(segments, 100, 300), null)
+  assert.deepEqual(findPhaseGapAtFrame(segments, 250, 300), {
+    gapStartFrame: 200,
+    gapEndFrameExclusive: 300,
+    previousSegmentId: 2,
+    nextSegmentId: null,
+    containsTargetFrame: true,
+  })
+})
+
 test('phase segment presentation changes by pixel width', () => {
   assert.equal(getPhaseSegmentPresentation(120), 'full')
   assert.equal(getPhaseSegmentPresentation(80), 'label-only')
@@ -270,6 +350,8 @@ test('playhead percent uses the same visible window coordinate system', () => {
 
 test('phase timeline source does not use per-frame DOM arrays or geometry-breaking segment CSS', () => {
   const segmentCssBlock = phaseTimelineSource.match(/\.phase-timeline-segment\s*\{[^}]*\}/)?.[0] ?? ''
+  const segmentBodyCssBlock = phaseTimelineSource.match(/\.phase-timeline-segment__body\s*\{[^}]*\}/)?.[0] ?? ''
+  const markerOnlyCssBlock = phaseTimelineSource.match(/\.phase-timeline-segment\.is-marker-only\s*\{[^}]*\}/)?.[0] ?? ''
   assert.doesNotMatch(phaseTimelineSource, /Array\.from\(\{\s*length:\s*frameCount/)
   assert.doesNotMatch(phaseTimelineSource, /new Array\(frameCount/)
   assert.doesNotMatch(phaseTimelineSource, /v-for="frame in frameCount/)
@@ -278,11 +360,19 @@ test('phase timeline source does not use per-frame DOM arrays or geometry-breaki
   assert.doesNotMatch(segmentCssBlock, /min-width:\s*(?:30|40|60)px/)
   assert.match(segmentCssBlock, /margin:\s*0/)
   assert.match(segmentCssBlock, /border-radius:\s*0/)
+  assert.match(segmentBodyCssBlock, /--phase-segment-color/)
+  assert.doesNotMatch(segmentBodyCssBlock, /background:\s*transparent/)
+  assert.doesNotMatch(markerOnlyCssBlock, /background:\s*transparent/)
+  assert.doesNotMatch(phaseTimelineSource, /\.phase-timeline-segment\.is-marker-only::before/)
+  assert.match(phaseTimelineSource, /phase-timeline-segment__subpixel-marker/)
+  assert.match(phaseTimelineSource, /renderedConfirmedSegments/)
+  assert.match(phaseTimelineSource, /v-for="entry in renderedConfirmedSegments"/)
   assert.match(phaseTimelineSource, /phase-timeline-coverage-layer/)
   assert.match(phaseTimelineSource, /phase-timeline-coverage-segment/)
   assert.match(phaseTimelineSource, /phase-timeline-gap/)
   assert.match(phaseTimelineSource, /is-marker-only/)
-  assert.match(phaseTimelineSource, /@dblclick\.stop\.prevent="handleSegmentDblClick/)
+  assert.match(phaseTimelineSource, /@dblclick\.stop\.prevent="!entry\.isPendingDraft && handleSegmentDblClick/)
+  assert.match(phaseTimelineSource, /!entry\.isPendingDraft && emit\('selectSegment'/)
   assert.match(phaseTimelineSource, /role="option"/)
   assert.match(phaseTimelineSource, /aria-selected/)
 })
@@ -344,6 +434,40 @@ test('pending next phase detects occupied next frame and video end', () => {
     existingSegments: existing,
     videoFrameCount: 400,
   }).reason, 'no-next-frame')
+})
+
+test('next phase start hint is valid only for the server-confirmed following frame', () => {
+  const hint = {
+    annotationSetId: 7,
+    startFrame: 12192,
+    sourceSegmentId: 3,
+    sourceEndFrameExclusive: 12192,
+    annotationSetRevision: 28,
+    closedAtPlayheadFrame: 12191,
+  }
+  const context = {
+    annotationSetId: 7,
+    annotationSetRevision: 28,
+    currentFrame: 12191,
+    videoFrameCount: 14961,
+    existingSegments: [
+      { ...sampleSegment, id: 3, end_frame_exclusive: 12192 },
+      { ...sampleSegment, id: 4, end_frame_exclusive: 13000 },
+    ],
+  }
+
+  assert.deepEqual(getValidPhaseNextStartHint(hint, context), hint)
+  assert.equal(getValidPhaseNextStartHint({ ...hint, startFrame: 12191 }, context), null)
+  assert.equal(getValidPhaseNextStartHint(hint, { ...context, currentFrame: 12192 }), null)
+  assert.equal(getValidPhaseNextStartHint(hint, { ...context, annotationSetRevision: 29 }), null)
+  assert.equal(getValidPhaseNextStartHint(hint, {
+    ...context,
+    existingSegments: [{ ...sampleSegment, id: 3, end_frame_exclusive: 12191 }],
+  }), null)
+  assert.equal(getValidPhaseNextStartHint({ ...hint, startFrame: 14961, sourceEndFrameExclusive: 14961 }, {
+    ...context,
+    existingSegments: [{ ...sampleSegment, id: 3, end_frame_exclusive: 14961 }],
+  }), null)
 })
 
 test('phase timeline i18n keys match between Chinese and English', () => {

@@ -130,6 +130,21 @@ def test_build_phase_json_export_returns_expected_structure_without_paths(phase_
     assert payload["manifest"]["mapping_mode"] == "original"
     assert payload["manifest"]["video_display_name"] == "张玉柱 手术"
     assert payload["video"]["id"] == seeded.video_id
+    assert payload["coordinate_system"] == {
+        "frame_interval_semantics": "[start_frame, end_frame_exclusive)",
+        "frame_reference": "current_video",
+        "time_reference": "current_video",
+        "description": (
+            "Frame and timestamp fields are relative to the current annotated video. "
+            "If this video is a trimmed result, coordinates are relative to the trimmed video, not the source video."
+        ),
+        "current_video_origin_type": "uploaded",
+        "current_video_is_trimmed_result": False,
+        "source_video_id": None,
+        "source_trim_start_frame": None,
+        "source_trim_end_frame_exclusive": None,
+        "source_coordinate_conversion": None,
+    }
     assert payload["annotation_set"]["id"] == seeded.set_reader_id
     assert payload["protocol"]["labels"][0]["key"] == "idle"
     assert [segment["start_frame"] for segment in payload["segments"]] == [10, 120]
@@ -152,6 +167,33 @@ def test_build_phase_json_export_returns_expected_structure_without_paths(phase_
         expected_filename,
         f"research-video-{seeded.video_id}.json",
     )
+
+
+def test_phase_json_export_declares_trimmed_video_coordinate_reference(phase_export_context) -> None:
+    session_factory, seeded = phase_export_context
+    update_video(
+        session_factory,
+        seeded.video_id,
+        origin_type="trimmed",
+        trim_start_frame=1000,
+        trim_end_frame_exclusive=2000,
+    )
+
+    with session_factory() as db:
+        export_result = build_phase_json_export(db, seeded.set_reader_id)
+
+    coordinate_system = export_result.payload["coordinate_system"]
+    assert coordinate_system["frame_reference"] == "current_video"
+    assert coordinate_system["time_reference"] == "current_video"
+    assert coordinate_system["current_video_is_trimmed_result"] is True
+    assert coordinate_system["source_trim_start_frame"] == 1000
+    assert "trimmed video, not the source video" in coordinate_system["description"]
+    assert coordinate_system["source_coordinate_conversion"] == {
+        "source_start_frame_formula": "source_start_frame = start_frame + source_trim_start_frame",
+        "source_end_frame_exclusive_formula": "source_end_frame_exclusive = end_frame_exclusive + source_trim_start_frame",
+        "source_timestamp_formula": "source_timestamp_ms = source_frame / fps * 1000 when fps is available",
+    }
+    assert export_result.payload["segments"][0]["start_frame"] == 10
 
 
 def test_segment_csv_export_uses_expected_columns_and_escapes_notes(phase_export_context) -> None:
@@ -204,9 +246,13 @@ def test_segment_csv_export_uses_expected_columns_and_escapes_notes(phase_export
         "source",
         "confidence",
         "notes",
+        "coordinate_reference",
+        "coordinate_reference_note",
     ]
     assert rows[1][13:17] == ["incision", "Incision", "0", "10"]
     assert rows[1][23] == 'line1,"quoted"\nline2,comma'
+    assert rows[1][24] == "current_video"
+    assert "trimmed video, not the source video" in rows[1][25]
     assert rows[2][13:17] == ["viscoelastic", "Viscoelastic Injection", "10", ""]
     assert rows[2][18:21] == ["", "", ""]
 
@@ -258,10 +304,12 @@ def test_framewise_csv_export_respects_boundaries_gaps_open_segments_and_validat
 
     rows = parse_csv_rows(csv_bytes)
     assert len(rows) == 7
-    assert rows[1] == ["0", "0", "unlabeled", "Unlabeled", "", "", "draft"]
-    assert rows[2] == ["1", "500", "incision", "Incision", str(seeded.active_default_label_ids["incision"]), rows[2][5], "draft"]
+    assert rows[1][:7] == ["0", "0", "unlabeled", "Unlabeled", "", "", "draft"]
+    assert rows[1][7] == "current_video"
+    assert "trimmed video, not the source video" in rows[1][8]
+    assert rows[2][:7] == ["1", "500", "incision", "Incision", str(seeded.active_default_label_ids["incision"]), rows[2][5], "draft"]
     assert rows[3][0:4] == ["2", "1000", "incision", "Incision"]
-    assert rows[4] == ["3", "1500", "unlabeled", "Unlabeled", "", "", "draft"]
+    assert rows[4][:7] == ["3", "1500", "unlabeled", "Unlabeled", "", "", "draft"]
     assert rows[5][0:4] == ["4", "2000", "viscoelastic", "Viscoelastic Injection"]
     assert rows[6][0:4] == ["5", "2500", "viscoelastic", "Viscoelastic Injection"]
     assert export_result.headers["X-Phase-Validation-Errors"] == "1"

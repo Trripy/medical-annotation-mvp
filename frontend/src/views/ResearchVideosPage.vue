@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Clock, Delete, Folder, RefreshRight, Tickets, UploadFilled, VideoPlay } from '@element-plus/icons-vue'
+import { Clock, Delete, EditPen, Folder, RefreshRight, Tickets, UploadFilled, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { storeToRefs } from 'pinia'
 import { computed, onMounted, ref } from 'vue'
@@ -7,8 +7,9 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
 import AppSidebar from '../components/AppSidebar.vue'
+import ResearchVideoNotesDialog from '../components/research/ResearchVideoNotesDialog.vue'
 import { apiUrl } from '../utils/api'
-import { useResearchVideosStore, type ServerVideoFileEntry, type ServerVideoImportRoot, type ServerVideoBrowseResult, type ServerVideoScanResult } from '../stores/researchVideos'
+import { useResearchVideosStore, type ResearchVideoListItem, type ResearchVideoVisibility, type ServerVideoFileEntry, type ServerVideoImportRoot, type ServerVideoBrowseResult, type ServerVideoScanResult } from '../stores/researchVideos'
 import { formatDateTime, formatDuration as formatDurationValue, translateStatus, type SupportedLocale } from '../utils/locale'
 import {
   buildImportQueue,
@@ -54,9 +55,12 @@ const selectionFilter = ref<ServerVideoSelectionFilter>('all')
 const importQueue = ref<ImportQueueItem[]>([])
 const importingQueue = ref(false)
 const stopQueueRequested = ref(false)
+const visibilityFilter = ref<ResearchVideoVisibility>('visible')
+const notesDialogVisible = ref(false)
+const notesVideo = ref<ResearchVideoListItem | null>(null)
 
 onMounted(() => {
-  void researchVideosStore.fetchVideos()
+  void researchVideosStore.fetchVideos(visibilityFilter.value)
 })
 
 const videoCards = computed(() => videos.value)
@@ -111,6 +115,7 @@ const selectionCheckboxState = computed(() =>
 const currentImportItem = computed(() => importQueue.value.find((item) => item.status === 'importing') ?? null)
 const canStartSelectedImport = computed(() => selectedVideoCount.value > 0 && !importingQueue.value)
 const scannedPathLabel = computed(() => serverScan.value?.relative_path || t('researchVideoImport.server.rootPath'))
+const hiddenCount = computed(() => videos.value.filter((video) => video.hidden_from_video_list).length)
 
 function clearServerScanState() {
   serverScan.value = null
@@ -418,6 +423,69 @@ function openVideoChecklist() {
   void router.push('/research/videos/checklist')
 }
 
+async function onVisibilityChange() {
+  await researchVideosStore.fetchVideos(visibilityFilter.value)
+}
+
+function openNotesDialog(video: ResearchVideoListItem) {
+  notesVideo.value = video
+  notesDialogVisible.value = true
+}
+
+async function saveVideoNotes(payload: { videoId: number; notes: string | null }) {
+  const saved = await researchVideosStore.updateVideoNotes(payload.videoId, payload.notes)
+  if (!saved) {
+    ElMessage.error(researchVideosStore.error || t('researchVideos.notesSaveFailed'))
+    return
+  }
+  notesDialogVisible.value = false
+  notesVideo.value = null
+  ElMessage.success(t('researchVideos.notesSaved'))
+}
+
+async function restoreVideo(video: ResearchVideoListItem) {
+  const restored = await researchVideosStore.updateVideoVisibility(video.id, false)
+  if (!restored) {
+    ElMessage.error(researchVideosStore.error || t('researchVideos.visibilitySaveFailed'))
+    return
+  }
+  ElMessage.success(t('researchVideos.visibilityRestored'))
+}
+
+function phaseStatusLabel(video: ResearchVideoListItem) {
+  const summary = video.phase_summary
+  if (summary.annotation_set_count === 0) {
+    return t('researchVideos.phaseNotStarted')
+  }
+  if (summary.submitted_count > 0 && summary.draft_count > 0) {
+    return t('researchVideos.phaseCompletedWithDraft')
+  }
+  if (summary.submitted_count > 0) {
+    return t('researchVideos.phaseCompleted')
+  }
+  return t('researchVideos.phaseDraft')
+}
+
+function phaseStatusType(video: ResearchVideoListItem) {
+  if (video.phase_summary.submitted_count > 0) {
+    return 'success'
+  }
+  if (video.phase_summary.draft_count > 0) {
+    return 'warning'
+  }
+  return 'info'
+}
+
+function hiddenReasonLabel(reason: string | null) {
+  if (reason === 'trimmed_source') {
+    return t('researchVideos.hiddenReasonTrimmedSource')
+  }
+  if (reason === 'manual') {
+    return t('researchVideos.hiddenReasonManual')
+  }
+  return t('common.unknown')
+}
+
 async function deleteVideo(videoId: number, name: string) {
   try {
     await ElMessageBox.confirm(
@@ -458,7 +526,12 @@ async function deleteVideo(videoId: number, name: string) {
           <p class="page-subtitle">{{ t('research.videosDescription') }}</p>
         </div>
         <div class="topbar-actions">
-          <el-button :loading="loading" @click="researchVideosStore.fetchVideos">
+          <el-select v-model="visibilityFilter" class="research-video-visibility-select" @change="onVisibilityChange">
+            <el-option :label="t('researchVideos.visible')" value="visible" />
+            <el-option :label="t('researchVideos.hidden')" value="hidden" />
+            <el-option :label="t('researchVideos.allVisibility')" value="all" />
+          </el-select>
+          <el-button :loading="loading" @click="researchVideosStore.fetchVideos(visibilityFilter)">
             <el-icon><RefreshRight /></el-icon>
             {{ t('common.refresh') }}
           </el-button>
@@ -474,6 +547,17 @@ async function deleteVideo(videoId: number, name: string) {
       </header>
 
       <el-alert v-if="error" :title="error" type="error" show-icon />
+      <el-alert
+        v-if="visibilityFilter !== 'hidden' && hiddenCount > 0"
+        :title="t('researchVideos.hiddenCount', { count: hiddenCount })"
+        type="info"
+        show-icon
+        :closable="false"
+      >
+        <template #default>
+          <el-button size="small" @click="router.push('/research/videos/checklist?visibility=hidden')">{{ t('researchVideos.viewHidden') }}</el-button>
+        </template>
+      </el-alert>
 
       <section class="research-video-grid">
         <article v-for="video in videoCards" :key="video.id" class="research-video-card">
@@ -488,6 +572,7 @@ async function deleteVideo(videoId: number, name: string) {
             <div class="research-video-title-row">
               <h3>{{ video.name }}</h3>
               <span class="research-video-status" :class="video.status">{{ translateStatus(video.status, t) }}</span>
+              <el-tag v-if="video.hidden_from_video_list" type="info">{{ t('researchVideos.hiddenBadge') }}</el-tag>
             </div>
             <p class="research-video-filename">{{ video.original_filename }}</p>
             <div class="research-video-stats">
@@ -500,6 +585,38 @@ async function deleteVideo(videoId: number, name: string) {
               <el-icon><Clock /></el-icon>
               <span>{{ formatDateTime(video.created_at, locale as SupportedLocale) }}</span>
             </div>
+            <p v-if="video.hidden_from_video_list" class="research-video-hidden-meta">
+              {{ t('researchVideos.hiddenReason') }}: {{ hiddenReasonLabel(video.hidden_reason) }}
+            </p>
+          </div>
+
+          <div class="research-video-phase-summary">
+            <span class="research-video-section-title">{{ t('researchVideos.phaseAnnotation') }}</span>
+            <el-tag :type="phaseStatusType(video)">{{ phaseStatusLabel(video) }}</el-tag>
+            <p v-if="video.phase_summary.latest_submitted_set_id" class="research-video-section-copy">
+              {{ video.phase_summary.latest_submitted_protocol_name || t('common.unknown') }}
+              · v{{ video.phase_summary.latest_submitted_version }}
+              · {{ video.phase_summary.latest_submitted_coverage_percent }}%
+            </p>
+            <p v-else-if="video.phase_summary.latest_draft_set_id" class="research-video-section-copy">
+              v{{ video.phase_summary.latest_draft_version }}
+            </p>
+            <p v-if="video.phase_summary.latest_error_count || video.phase_summary.latest_warning_count" class="research-video-section-copy">
+              {{ t('videoChecklist.errors') }} {{ video.phase_summary.latest_error_count }}
+              · {{ t('videoChecklist.warnings') }} {{ video.phase_summary.latest_warning_count }}
+            </p>
+            <el-button text size="small" @click="router.push(`/research/videos/${video.id}/phases`)">{{ t('researchVideos.openPhaseAnnotation') }}</el-button>
+          </div>
+
+          <div class="research-video-notes-summary">
+            <span class="research-video-section-title">{{ t('researchVideos.videoNotes') }}</span>
+            <el-tooltip :content="video.notes || t('researchVideos.noNotes')" placement="top">
+              <p class="research-video-notes-text" :class="{ empty: !video.notes }">{{ video.notes || t('researchVideos.noNotes') }}</p>
+            </el-tooltip>
+            <el-button text size="small" @click="openNotesDialog(video)">
+              <el-icon><EditPen /></el-icon>
+              {{ t('researchVideos.editNotes') }}
+            </el-button>
           </div>
 
           <div class="research-video-actions">
@@ -521,6 +638,9 @@ async function deleteVideo(videoId: number, name: string) {
               <el-icon><Delete /></el-icon>
               {{ t('common.delete') }}
             </el-button>
+            <el-button v-if="video.hidden_from_video_list" text @click="restoreVideo(video)">
+              {{ t('researchVideos.restoreVisibility') }}
+            </el-button>
           </div>
         </article>
 
@@ -528,6 +648,15 @@ async function deleteVideo(videoId: number, name: string) {
           {{ t('research.noVideos') }}
         </div>
       </section>
+
+      <ResearchVideoNotesDialog
+        v-model="notesDialogVisible"
+        :video-id="notesVideo?.id ?? null"
+        :video-name="notesVideo?.name ?? ''"
+        :notes="notesVideo?.notes ?? null"
+        :saving="saving"
+        @save="saveVideoNotes"
+      />
 
       <el-dialog
         v-model="importDialogVisible"

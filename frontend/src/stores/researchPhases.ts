@@ -9,6 +9,7 @@ import type {
   CreateResearchPhaseAnnotationSetResponse,
   CreateResearchPhaseSegmentRequest,
   DuplicateResearchPhaseLabelMappingProfileRequest,
+  FillPhaseGapsRequest,
   MergeResearchPhaseMappingClassesRequest,
   MergePhaseSegmentsRequest,
   ReopenPhaseAnnotationSetRequest,
@@ -18,6 +19,7 @@ import type {
   ResearchPhaseLabelMappingProfileSummary,
   ResearchPhaseAnnotationSetSummary,
   ResearchPhaseConflictDetail,
+  ResearchPhaseGapFillPreview,
   ResearchPhaseMutationResponse,
   ResearchPhaseProtocolDetail,
   ResearchPhaseProtocolSummary,
@@ -58,6 +60,8 @@ export type PhaseConflictState = {
   message: string
   currentRevision: number | null
 }
+
+let phaseMutationQueue: Promise<void> = Promise.resolve()
 
 export function isPhaseRevisionConflict(detail: unknown): detail is ResearchPhaseConflictDetail {
   return typeof detail === 'object'
@@ -464,140 +468,203 @@ export const useResearchPhasesStore = defineStore('researchPhases', {
       this.loadingAnnotationSet = false
       return result
     },
-    async applyMutationRequest(request: Promise<PhaseActionResult<ResearchPhaseMutationResponse>>) {
-      this.saving = true
-      this.setSaveState('saving')
-      const result = await request
-      this.saving = false
-      if (!result.ok) {
-        return this.handleActionError(result.error)
+    async applyMutationRequest(requestFactory: () => Promise<PhaseActionResult<ResearchPhaseMutationResponse>>) {
+      const runMutation = async () => {
+        this.saving = true
+        this.setSaveState('saving')
+        const result = await requestFactory()
+        this.saving = false
+        if (!result.ok) {
+          return this.handleActionError(result.error)
+        }
+        this.applyAnnotationSet(result.data.annotation_set)
+        this.conflictState = null
+        this.setSaveState('saved')
+        return result
       }
-      this.applyAnnotationSet(result.data.annotation_set)
-      this.conflictState = null
-      this.setSaveState('saved')
-      return result
+      const queuedResult = phaseMutationQueue.then(runMutation, runMutation)
+      phaseMutationQueue = queuedResult.then(
+        () => undefined,
+        () => undefined,
+      )
+      return queuedResult
+    },
+    async waitForPendingMutations() {
+      await phaseMutationQueue
     },
     async createSegment(payload: Omit<CreateResearchPhaseSegmentRequest, 'expected_revision'>) {
-      const current = this.requireDraftAnnotationSet()
-      if (!current.ok) {
-        return this.handleActionError(current.error)
-      }
-      return this.applyMutationRequest(requestJson<ResearchPhaseMutationResponse>(
-        `/api/research/phase-annotation-sets/${current.data.id}/segments`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...payload,
-            expected_revision: current.data.revision,
-          } satisfies CreateResearchPhaseSegmentRequest),
-        },
-      ))
+      return this.applyMutationRequest(() => {
+        const current = this.requireDraftAnnotationSet()
+        if (!current.ok) {
+          return Promise.resolve(this.handleActionError(current.error))
+        }
+        return requestJson<ResearchPhaseMutationResponse>(
+          `/api/research/phase-annotation-sets/${current.data.id}/segments`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ...payload,
+              expected_revision: current.data.revision,
+            } satisfies CreateResearchPhaseSegmentRequest),
+          },
+        )
+      })
     },
     async transitionPhase(phaseLabelId: number, currentFrame: number) {
-      const current = this.requireDraftAnnotationSet()
-      if (!current.ok) {
-        return this.handleActionError(current.error)
-      }
-      const payload: TransitionResearchPhaseRequest = {
-        phase_label_id: phaseLabelId,
-        current_frame: currentFrame,
-        expected_revision: current.data.revision,
-      }
-      return this.applyMutationRequest(requestJson<ResearchPhaseMutationResponse>(
-        `/api/research/phase-annotation-sets/${current.data.id}/transition`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        },
-      ))
+      return this.applyMutationRequest(() => {
+        const current = this.requireDraftAnnotationSet()
+        if (!current.ok) {
+          return Promise.resolve(this.handleActionError(current.error))
+        }
+        const payload: TransitionResearchPhaseRequest = {
+          phase_label_id: phaseLabelId,
+          current_frame: currentFrame,
+          expected_revision: current.data.revision,
+        }
+        return requestJson<ResearchPhaseMutationResponse>(
+          `/api/research/phase-annotation-sets/${current.data.id}/transition`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          },
+        )
+      })
     },
     async closeActiveSegment(endFrameExclusive: number) {
-      const current = this.requireDraftAnnotationSet()
-      if (!current.ok) {
-        return this.handleActionError(current.error)
-      }
-      const payload: CloseActivePhaseSegmentRequest = {
-        end_frame_exclusive: endFrameExclusive,
-        expected_revision: current.data.revision,
-      }
-      return this.applyMutationRequest(requestJson<ResearchPhaseMutationResponse>(
-        `/api/research/phase-annotation-sets/${current.data.id}/close-active`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        },
-      ))
+      return this.applyMutationRequest(() => {
+        const current = this.requireDraftAnnotationSet()
+        if (!current.ok) {
+          return Promise.resolve(this.handleActionError(current.error))
+        }
+        const payload: CloseActivePhaseSegmentRequest = {
+          end_frame_exclusive: endFrameExclusive,
+          expected_revision: current.data.revision,
+        }
+        return requestJson<ResearchPhaseMutationResponse>(
+          `/api/research/phase-annotation-sets/${current.data.id}/close-active`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          },
+        )
+      })
     },
     async updateSegment(segmentId: number, patch: Omit<UpdateResearchPhaseSegmentRequest, 'expected_revision'>) {
-      const current = this.requireDraftAnnotationSet()
-      if (!current.ok) {
-        return this.handleActionError(current.error)
-      }
-      return this.applyMutationRequest(requestJson<ResearchPhaseMutationResponse>(
-        `/api/research/phase-segments/${segmentId}`,
-        {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...patch,
-            expected_revision: current.data.revision,
-          } satisfies UpdateResearchPhaseSegmentRequest),
-        },
-      ))
+      return this.applyMutationRequest(() => {
+        const current = this.requireDraftAnnotationSet()
+        if (!current.ok) {
+          return Promise.resolve(this.handleActionError(current.error))
+        }
+        return requestJson<ResearchPhaseMutationResponse>(
+          `/api/research/phase-segments/${segmentId}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ...patch,
+              expected_revision: current.data.revision,
+            } satisfies UpdateResearchPhaseSegmentRequest),
+          },
+        )
+      })
     },
     async deleteSegment(segmentId: number) {
-      const current = this.requireDraftAnnotationSet()
-      if (!current.ok) {
-        return this.handleActionError(current.error)
-      }
-      return this.applyMutationRequest(requestJson<ResearchPhaseMutationResponse>(
-        `/api/research/phase-segments/${segmentId}?${new URLSearchParams({
-          expected_revision: String(current.data.revision),
-        }).toString()}`,
-        {
-          method: 'DELETE',
-        },
-      ))
+      return this.applyMutationRequest(() => {
+        const current = this.requireDraftAnnotationSet()
+        if (!current.ok) {
+          return Promise.resolve(this.handleActionError(current.error))
+        }
+        return requestJson<ResearchPhaseMutationResponse>(
+          `/api/research/phase-segments/${segmentId}?${new URLSearchParams({
+            expected_revision: String(current.data.revision),
+          }).toString()}`,
+          {
+            method: 'DELETE',
+          },
+        )
+      })
     },
     async splitSegment(segmentId: number, splitFrame: number) {
-      const current = this.requireDraftAnnotationSet()
-      if (!current.ok) {
-        return this.handleActionError(current.error)
-      }
-      const payload: SplitPhaseSegmentRequest = {
-        split_frame: splitFrame,
-        expected_revision: current.data.revision,
-      }
-      return this.applyMutationRequest(requestJson<ResearchPhaseMutationResponse>(
-        `/api/research/phase-segments/${segmentId}/split`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        },
-      ))
+      return this.applyMutationRequest(() => {
+        const current = this.requireDraftAnnotationSet()
+        if (!current.ok) {
+          return Promise.resolve(this.handleActionError(current.error))
+        }
+        const payload: SplitPhaseSegmentRequest = {
+          split_frame: splitFrame,
+          expected_revision: current.data.revision,
+        }
+        return requestJson<ResearchPhaseMutationResponse>(
+          `/api/research/phase-segments/${segmentId}/split`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          },
+        )
+      })
     },
     async mergeSegments(leftSegmentId: number, rightSegmentId: number) {
+      return this.applyMutationRequest(() => {
+        const current = this.requireDraftAnnotationSet()
+        if (!current.ok) {
+          return Promise.resolve(this.handleActionError(current.error))
+        }
+        const payload: MergePhaseSegmentsRequest = {
+          left_segment_id: leftSegmentId,
+          right_segment_id: rightSegmentId,
+          expected_revision: current.data.revision,
+        }
+        return requestJson<ResearchPhaseMutationResponse>(
+          `/api/research/phase-annotation-sets/${current.data.id}/merge`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          },
+        )
+      })
+    },
+    async previewGapFill(phaseLabelId: number) {
       const current = this.requireDraftAnnotationSet()
       if (!current.ok) {
-        return this.handleActionError(current.error)
+        return Promise.resolve(this.handleActionError(current.error, { markSaving: false }))
       }
-      const payload: MergePhaseSegmentsRequest = {
-        left_segment_id: leftSegmentId,
-        right_segment_id: rightSegmentId,
+      const payload: FillPhaseGapsRequest = {
+        phase_label_id: phaseLabelId,
         expected_revision: current.data.revision,
       }
-      return this.applyMutationRequest(requestJson<ResearchPhaseMutationResponse>(
-        `/api/research/phase-annotation-sets/${current.data.id}/merge`,
+      return requestJson<ResearchPhaseGapFillPreview>(
+        `/api/research/phase-annotation-sets/${current.data.id}/fill-gaps/preview`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         },
-      ))
+      )
+    },
+    async fillGaps(phaseLabelId: number, expectedRevision: number) {
+      return this.applyMutationRequest(() => {
+        const current = this.requireDraftAnnotationSet()
+        if (!current.ok) {
+          return Promise.resolve(this.handleActionError(current.error))
+        }
+        const payload: FillPhaseGapsRequest = {
+          phase_label_id: phaseLabelId,
+          expected_revision: expectedRevision,
+        }
+        return requestJson<ResearchPhaseMutationResponse>(
+          `/api/research/phase-annotation-sets/${current.data.id}/fill-gaps`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          },
+        )
+      })
     },
     async validateAnnotationSet() {
       const current = this.requireCurrentAnnotationSet()

@@ -14,6 +14,13 @@ export type TimelineSegmentGeometry = {
   right: number
 }
 
+export type TimelineSegmentEdges = {
+  leftPx: number
+  rightPx: number
+  trueWidthPx: number
+  needsSubpixelMarker: boolean
+}
+
 export type VisibleFrameRange = {
   startFrame: number
   endFrameExclusive: number
@@ -43,12 +50,29 @@ export type PhaseCoverageGap = {
   durationFrames: number
 }
 
+export type PhaseGapAtFrame = {
+  gapStartFrame: number
+  gapEndFrameExclusive: number
+  previousSegmentId: number | null
+  nextSegmentId: number | null
+  containsTargetFrame: boolean
+}
+
 export type NewPhaseStartResolution = {
   startFrame: number | null
   source: 'pending-next-frame' | 'current-frame'
   conflict: 'none' | 'out-of-bounds' | 'occupied-start' | 'occupied-inside'
   occupiedSegmentId: number | null
   reason: 'ok' | 'no-next-frame' | 'next-frame-already-annotated' | 'next-frame-occupied'
+}
+
+export type PhaseNextStartHint = {
+  annotationSetId: number
+  startFrame: number
+  sourceSegmentId: number
+  sourceEndFrameExclusive: number
+  annotationSetRevision: number
+  closedAtPlayheadFrame: number
 }
 
 export const MIN_VISIBLE_SEGMENT_PX = 2
@@ -112,6 +136,20 @@ export function calculateSegmentGeometry(
     left,
     width: Math.max(0, right - left),
     right,
+  }
+}
+
+export function calculatePhaseSegmentEdges(
+  segment: Pick<ResearchPhaseSegment, 'start_frame' | 'end_frame_exclusive'>,
+  input: TimelineGeometryInput,
+): TimelineSegmentEdges {
+  const geometry = calculateSegmentGeometry(segment, input)
+  const timelineWidth = calculateTimelineWidth(input)
+  return {
+    leftPx: geometry.left,
+    rightPx: Math.max(0, timelineWidth - geometry.right),
+    trueWidthPx: geometry.width,
+    needsSubpixelMarker: geometry.width > 0 && geometry.width < MIN_VISIBLE_SEGMENT_PX,
   }
 }
 
@@ -397,6 +435,60 @@ export function getVisiblePhaseCoverageGaps(
   return gaps
 }
 
+export function findPhaseGapAtFrame(
+  segments: readonly Pick<ResearchPhaseSegment, 'id' | 'start_frame' | 'end_frame_exclusive'>[],
+  targetFrame: number,
+  videoFrameCount: number,
+  ignoreSegmentId: number | null = null,
+): PhaseGapAtFrame | null {
+  if (!Number.isFinite(targetFrame) || !Number.isFinite(videoFrameCount) || videoFrameCount <= 0) {
+    return null
+  }
+  const boundedTarget = Math.max(0, Math.min(Math.trunc(targetFrame), videoFrameCount - 1))
+  const sortedSegments = segments
+    .filter((segment) => segment.id !== ignoreSegmentId)
+    .map((segment) => ({
+      id: segment.id,
+      startFrame: clampFrame(segment.start_frame, videoFrameCount),
+      endFrameExclusive: clampFrame(segment.end_frame_exclusive ?? videoFrameCount, videoFrameCount),
+    }))
+    .filter((segment) => segment.endFrameExclusive > segment.startFrame)
+    .sort((left, right) => left.startFrame - right.startFrame || left.endFrameExclusive - right.endFrameExclusive || left.id - right.id)
+
+  let cursor = 0
+  let previousSegmentId: number | null = null
+  for (const segment of sortedSegments) {
+    if (boundedTarget >= segment.startFrame && boundedTarget < segment.endFrameExclusive) {
+      return null
+    }
+    if (boundedTarget >= cursor && boundedTarget < segment.startFrame) {
+      return {
+        gapStartFrame: cursor,
+        gapEndFrameExclusive: segment.startFrame,
+        previousSegmentId,
+        nextSegmentId: segment.id,
+        containsTargetFrame: true,
+      }
+    }
+    if (segment.endFrameExclusive > cursor) {
+      cursor = segment.endFrameExclusive
+      previousSegmentId = segment.id
+    }
+  }
+
+  if (boundedTarget >= cursor && boundedTarget < videoFrameCount) {
+    return {
+      gapStartFrame: cursor,
+      gapEndFrameExclusive: videoFrameCount,
+      previousSegmentId,
+      nextSegmentId: null,
+      containsTargetFrame: true,
+    }
+  }
+
+  return null
+}
+
 export function resolveNewPhaseStartFrame(options: {
   currentFrame: number
   pendingNextStartFrame: number | null
@@ -432,4 +524,33 @@ export function resolveNewPhaseStartFrame(options: {
     occupiedSegmentId: null,
     reason: 'ok',
   }
+}
+
+export function getValidPhaseNextStartHint(
+  hint: PhaseNextStartHint | null,
+  context: {
+    annotationSetId: number | null | undefined
+    annotationSetRevision: number | null | undefined
+    currentFrame: number
+    videoFrameCount: number
+    existingSegments: readonly Pick<ResearchPhaseSegment, 'id' | 'end_frame_exclusive'>[]
+  },
+): PhaseNextStartHint | null {
+  if (!hint || !Number.isFinite(context.videoFrameCount) || context.videoFrameCount <= 0) {
+    return null
+  }
+  if (context.annotationSetId !== hint.annotationSetId || context.annotationSetRevision !== hint.annotationSetRevision) {
+    return null
+  }
+  if (context.currentFrame !== hint.closedAtPlayheadFrame) {
+    return null
+  }
+  if (hint.startFrame !== hint.sourceEndFrameExclusive || hint.startFrame < 0 || hint.startFrame >= context.videoFrameCount) {
+    return null
+  }
+  const sourceSegment = context.existingSegments.find((segment) => segment.id === hint.sourceSegmentId)
+  if (!sourceSegment || sourceSegment.end_frame_exclusive !== hint.sourceEndFrameExclusive) {
+    return null
+  }
+  return hint
 }

@@ -4,6 +4,8 @@ import { useI18n } from 'vue-i18n'
 
 import type { ResearchPhaseSegment } from '../../types/researchPhase'
 import {
+  MIN_VISIBLE_SEGMENT_PX,
+  calculatePhaseSegmentEdges,
   calculateSegmentGeometry,
   calculateTimelineWidth,
   calculateVisibleFrameRange,
@@ -30,6 +32,7 @@ const props = defineProps<{
   fps?: number | null
   frameCount: number
   readonly?: boolean
+  pendingSegments?: ResearchPhaseSegment[]
   segments: ResearchPhaseSegment[]
   selectedSegmentId: number | null
 }>()
@@ -70,6 +73,13 @@ const timelineInput = computed(() => ({
 const sortedSegments = computed(() => (
   props.segments.slice().sort((left, right) => left.start_frame - right.start_frame || left.id - right.id)
 ))
+const sortedTimelineSegments = computed(() => (
+  [
+    ...props.segments,
+    ...(props.pendingSegments ?? []),
+  ].sort((left, right) => left.start_frame - right.start_frame || left.id - right.id)
+))
+const pendingSegmentIds = computed(() => new Set((props.pendingSegments ?? []).map((segment) => segment.id)))
 
 const segmentById = computed(() => new Map(sortedSegments.value.map((segment) => [segment.id, segment])))
 const segmentIndexById = computed(() => new Map(sortedSegments.value.map((segment, index) => [segment.id, index])))
@@ -80,14 +90,16 @@ const visibleRange = computed(() => calculateVisibleFrameRange(
   timelineInput.value,
 ))
 
-const renderedSegments = computed(() => sortedSegments.value.map((segment) => {
+const renderedSegments = computed(() => sortedTimelineSegments.value.map((segment) => {
   const preview = dragPreview.value[segment.id]
+  const positionedSegment = preview
+    ? { ...segment, ...preview }
+    : segment
   const geometry = calculateSegmentGeometry(
-    preview
-      ? { ...segment, ...preview }
-      : segment,
+    positionedSegment,
     timelineInput.value,
   )
+  const edges = calculatePhaseSegmentEdges(positionedSegment, timelineInput.value)
   const widthPx = getPhaseSegmentPixelWidth(geometry)
   const presentation = getPhaseSegmentPresentation(widthPx)
   const tooltip = getPhaseSegmentTooltip(segment, props.frameCount, props.fps)
@@ -95,11 +107,30 @@ const renderedSegments = computed(() => sortedSegments.value.map((segment) => {
     segment,
     preview,
     geometry,
+    edges,
     widthPx,
     presentation,
     tooltip,
     isOpen: (preview?.end_frame_exclusive ?? segment.end_frame_exclusive) === null,
+    isPendingDraft: pendingSegmentIds.value.has(segment.id),
     isSelected: props.selectedSegmentId === segment.id,
+  }
+}))
+
+const renderedConfirmedSegments = computed(() => sortedSegments.value.map((segment) => {
+  const preview = dragPreview.value[segment.id]
+  const positionedSegment = preview
+    ? { ...segment, ...preview }
+    : segment
+  const geometry = calculateSegmentGeometry(positionedSegment, timelineInput.value)
+  const edges = calculatePhaseSegmentEdges(positionedSegment, timelineInput.value)
+  return {
+    segment,
+    preview,
+    geometry,
+    edges,
+    isOpen: (preview?.end_frame_exclusive ?? segment.end_frame_exclusive) === null,
+    needsSubpixelMarker: edges.needsSubpixelMarker,
   }
 }))
 
@@ -274,6 +305,14 @@ function gapTooltip(gap: { startFrame: number; endFrameExclusive: number; durati
   return `${t('phaseTimeline.unannotatedRange')}: ${gap.startFrame + 1}-${gap.endFrameExclusive} · ${t('phaseTimeline.durationFrames')} ${gap.durationFrames}`
 }
 
+function segmentPositionStyle(entry: Pick<typeof renderedSegments.value[number], 'edges' | 'segment'>) {
+  return {
+    left: `${entry.edges.leftPx}px`,
+    right: `${entry.edges.rightPx}px`,
+    '--phase-segment-color': entry.segment.phase_label.color,
+  }
+}
+
 function getNeighborSegments(segmentId: number) {
   const index = segmentIndexById.value.get(segmentId)
   if (index === undefined) {
@@ -433,16 +472,18 @@ defineExpose({
 
         <div class="phase-timeline-coverage-layer" aria-hidden="true">
           <div
-            v-for="entry in renderedSegments"
+            v-for="entry in renderedConfirmedSegments"
             :key="`coverage-${entry.segment.id}`"
             class="phase-timeline-coverage-segment"
-            :class="{ 'is-open': entry.isOpen }"
-            :style="{
-              left: `${entry.geometry.left}px`,
-              width: `${entry.geometry.width}px`,
-              '--phase-segment-color': entry.segment.phase_label.color,
-            }"
-          ></div>
+            :class="{ 'is-open': entry.isOpen, 'has-subpixel-marker': entry.needsSubpixelMarker }"
+            :style="segmentPositionStyle(entry)"
+          >
+            <span
+              v-if="entry.needsSubpixelMarker"
+              class="phase-timeline-segment__subpixel-marker"
+              :style="{ width: `${MIN_VISIBLE_SEGMENT_PX}px` }"
+            ></span>
+          </div>
         </div>
 
         <el-tooltip
@@ -502,33 +543,44 @@ defineExpose({
             :class="{
               'is-selected': entry.isSelected,
               'is-open': entry.isOpen,
+              'is-pending-draft': entry.isPendingDraft,
               [`is-${entry.presentation}`]: true,
             }"
             :style="{
-              left: `${entry.geometry.left}px`,
-              width: `${entry.geometry.width}px`,
+              left: `${entry.edges.leftPx}px`,
+              right: `${entry.edges.rightPx}px`,
+              '--phase-segment-color': entry.segment.phase_label.color,
             }"
             type="button"
             role="option"
             :aria-selected="entry.isSelected"
             :aria-label="segmentAriaLabel(entry)"
-            @click.stop="emit('selectSegment', entry.segment.id)"
-            @dblclick.stop.prevent="handleSegmentDblClick(entry.segment)"
-            @keydown="handleSegmentKeydown(entry.segment, $event)"
+            @click.stop="!entry.isPendingDraft && emit('selectSegment', entry.segment.id)"
+            @dblclick.stop.prevent="!entry.isPendingDraft && handleSegmentDblClick(entry.segment)"
+            @keydown="!entry.isPendingDraft && handleSegmentKeydown(entry.segment, $event)"
           >
-            <span v-if="entry.presentation !== 'marker-only'" class="phase-timeline-segment-label">
-              {{ entry.segment.phase_label.name }}
-            </span>
-            <span v-if="entry.presentation === 'full'" class="phase-timeline-segment-range">
-              {{ entry.segment.start_frame + 1 }}-{{ entry.segment.end_frame_exclusive ?? frameCount }}
+            <span class="phase-timeline-segment__body" aria-hidden="true"></span>
+            <span
+              v-if="entry.edges.needsSubpixelMarker"
+              class="phase-timeline-segment__subpixel-marker"
+              :style="{ width: `${MIN_VISIBLE_SEGMENT_PX}px` }"
+              aria-hidden="true"
+            ></span>
+            <span v-if="entry.presentation !== 'marker-only'" class="phase-timeline-segment__content">
+              <span class="phase-timeline-segment-label">
+                {{ entry.segment.phase_label.name }}
+              </span>
+              <span v-if="entry.presentation === 'full'" class="phase-timeline-segment-range">
+                {{ entry.segment.start_frame + 1 }}-{{ entry.segment.end_frame_exclusive ?? frameCount }}
+              </span>
             </span>
             <span
-              v-if="!readonly"
+              v-if="!readonly && !entry.isPendingDraft"
               class="phase-timeline-handle is-left"
               @pointerdown.stop="startBoundaryDrag(entry.segment, 'left', $event)"
             ></span>
             <span
-              v-if="!readonly && entry.segment.end_frame_exclusive !== null"
+              v-if="!readonly && !entry.isPendingDraft && entry.segment.end_frame_exclusive !== null"
               class="phase-timeline-handle is-right"
               @pointerdown.stop="startBoundaryDrag(entry.segment, 'right', $event)"
             ></span>
@@ -635,9 +687,9 @@ defineExpose({
   left: 0;
   right: 0;
   height: 44px;
-  overflow: hidden;
+  overflow: visible;
   border-radius: 0.52rem;
-  z-index: 1;
+  z-index: 2;
   pointer-events: none;
 }
 
@@ -686,7 +738,8 @@ defineExpose({
       rgba(30, 41, 59, 0.74) 5px,
       rgba(30, 41, 59, 0.74) 10px
     );
-  z-index: 2;
+  z-index: 1;
+  pointer-events: none;
 }
 
 .phase-timeline-gap.is-compact {
@@ -709,19 +762,73 @@ defineExpose({
   gap: 0.2rem;
   padding: 0.42rem 0.62rem;
   text-align: left;
-  overflow: hidden;
+  overflow: visible;
   z-index: 3;
+}
+
+.phase-timeline-segment__body {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--phase-segment-color) 70%, #0f172a), color-mix(in srgb, var(--phase-segment-color) 42%, #0f172a));
+  box-shadow: inset -1px 0 0 rgba(15, 23, 42, 0.32);
+  pointer-events: none;
+}
+
+.phase-timeline-segment__subpixel-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  min-width: 1px;
+  transform: translateX(-50%);
+  background: var(--phase-segment-color, #38bdf8);
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.42), 0 0 8px color-mix(in srgb, var(--phase-segment-color, #38bdf8) 50%, transparent);
+  pointer-events: none;
+}
+
+.phase-timeline-segment__content {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
 }
 
 .phase-timeline-segment.is-selected {
   outline: 2px solid rgba(255, 255, 255, 0.84);
   outline-offset: -2px;
   box-shadow: inset 0 0 0 2px rgba(125, 211, 252, 0.74), 0 0 16px rgba(34, 211, 238, 0.22);
-  z-index: 4;
+  z-index: 5;
 }
 
 .phase-timeline-segment.is-open {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.32);
+}
+
+.phase-timeline-segment.is-open .phase-timeline-segment__body {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--phase-segment-color) 66%, #0f172a) 0,
+      color-mix(in srgb, var(--phase-segment-color) 66%, #0f172a) 7px,
+      color-mix(in srgb, var(--phase-segment-color) 42%, #0f172a) 7px,
+      color-mix(in srgb, var(--phase-segment-color) 42%, #0f172a) 14px
+    );
+}
+
+.phase-timeline-segment.is-pending-draft {
+  border: 1px dashed rgba(255, 255, 255, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.36), 0 0 16px rgba(125, 211, 252, 0.18);
+  cursor: default;
+  z-index: 4;
+}
+
+.phase-timeline-segment.is-pending-draft .phase-timeline-segment__body {
+  background: color-mix(in srgb, var(--phase-segment-color, #38bdf8) 32%, transparent);
 }
 
 .phase-timeline-segment.is-label-only {
@@ -735,27 +842,6 @@ defineExpose({
 
 .phase-timeline-segment.is-marker-only {
   padding: 0;
-  overflow: visible;
-}
-
-.phase-timeline-segment.is-marker-only::before {
-  content: '';
-  position: absolute;
-  top: 2px;
-  bottom: 2px;
-  left: 50%;
-  width: 2px;
-  min-width: 2px;
-  transform: translateX(-50%);
-  border-radius: 0;
-  background: rgba(255, 255, 255, 0.58);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--phase-segment-color) 72%, transparent);
-}
-
-.phase-timeline-segment.is-marker-only.is-selected::before {
-  width: 3px;
-  background: #ffffff;
-  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.78), 0 0 14px color-mix(in srgb, var(--phase-segment-color) 76%, transparent);
 }
 
 .phase-timeline-segment-label,

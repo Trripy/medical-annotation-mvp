@@ -13,7 +13,7 @@ import zipfile
 from typing import Any, Iterable
 
 from fastapi import HTTPException, status
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import (
@@ -38,10 +38,19 @@ from app.schemas.research import (
     ResearchVideoChecklistStatsRead,
     ResearchVideoChecklistTrimRead,
     ResearchVideoChecklistVideoRead,
+    ResearchVideoPhaseSummaryRead,
+    ResearchVideoVisibilityBulkItemRead,
+    ResearchVideoVisibilityBulkPreviewRead,
+    ResearchVideoVisibilityBulkResultRead,
 )
 from app.services.download_filenames import build_attachment_content_disposition, sanitize_filename
 from app.services.phase_label_mapping import profile_key
 from app.services.research_phase_export_service import build_phase_json_export, serialize_phase_json_export
+from app.services.research_video_visibility import (
+    TRIMMED_SOURCE_HIDDEN_REASON,
+    hide_research_video_from_list,
+    restore_research_video_to_list,
+)
 
 MAX_CHECKLIST_PAGE_SIZE = 100
 MAX_BATCH_EXPORT_VIDEOS = 500
@@ -74,6 +83,7 @@ def list_video_operation_checklist(
     trim_status: str = "all",
     phase_status: str = "all",
     protocol_id: int | None = None,
+    visibility: str = "all",
     sort_by: str = "created_at",
     sort_order: str = "desc",
 ) -> ResearchVideoChecklistPageRead:
@@ -91,6 +101,7 @@ def list_video_operation_checklist(
         if _matches_trim_status(item, trim_status)
         and _matches_phase_status(item, phase_status)
         and _matches_protocol(item, protocol_id)
+        and _matches_visibility(item, visibility)
     ]
     filtered_items = _sort_items(filtered_items, sort_by=sort_by, sort_order=sort_order)
     start = (normalized_page - 1) * normalized_page_size
@@ -112,6 +123,7 @@ def list_default_phase_export_selections(
     trim_status: str = "all",
     phase_status: str = "all",
     protocol_id: int | None = None,
+    visibility: str = "all",
 ) -> list[ResearchVideoChecklistDefaultPhaseSelectionRead]:
     videos = db.scalars(_video_select(search=search, video_status=video_status)).all()
     if not videos:
@@ -127,6 +139,7 @@ def list_default_phase_export_selections(
         if _matches_trim_status(item, trim_status)
         and _matches_phase_status(item, phase_status)
         and _matches_protocol(item, protocol_id)
+        and _matches_visibility(item, visibility)
     ]
     selections: list[ResearchVideoChecklistDefaultPhaseSelectionRead] = []
     for item in filtered_items:
@@ -145,6 +158,84 @@ def list_default_phase_export_selections(
             )
         )
     return selections
+
+
+def list_research_video_phase_summaries(
+    db: Session,
+    video_ids: list[int],
+) -> dict[int, ResearchVideoPhaseSummaryRead]:
+    if not video_ids:
+        return {}
+    context = _ChecklistContext.load(db, video_ids)
+    summaries: dict[int, ResearchVideoPhaseSummaryRead] = {}
+    for video_id in video_ids:
+        video = context.videos_by_id.get(video_id)
+        if video is None:
+            continue
+        phase = _build_phase_summary(video, context)
+        latest_submitted = _latest_submitted_annotation_set(phase.sets)
+        latest_draft = _latest_draft_annotation_set(phase.sets)
+        summaries[video_id] = ResearchVideoPhaseSummaryRead(
+            annotation_set_count=phase.annotation_set_count,
+            draft_count=phase.draft_count,
+            submitted_count=phase.submitted_count,
+            latest_submitted_set_id=latest_submitted.annotation_set_id if latest_submitted else None,
+            latest_submitted_version=latest_submitted.version if latest_submitted else None,
+            latest_submitted_protocol_name=latest_submitted.protocol_name if latest_submitted else None,
+            latest_submitted_coverage_percent=latest_submitted.coverage_percent if latest_submitted else 0.0,
+            latest_draft_set_id=latest_draft.annotation_set_id if latest_draft else None,
+            latest_draft_version=latest_draft.version if latest_draft else None,
+            latest_error_count=phase.latest_error_count,
+            latest_warning_count=phase.latest_warning_count,
+        )
+    return summaries
+
+
+def preview_hide_trimmed_source_videos(db: Session) -> ResearchVideoVisibilityBulkPreviewRead:
+    eligible = _eligible_trimmed_source_videos(db)
+    already_hidden = _already_hidden_trimmed_source_count(db)
+    total_roots = _root_source_count(db)
+    skipped = max(0, total_roots - len(eligible) - already_hidden)
+    return ResearchVideoVisibilityBulkPreviewRead(
+        eligible_count=len(eligible),
+        already_hidden_count=already_hidden,
+        skipped_count=skipped,
+        items=eligible[:50],
+    )
+
+
+def hide_trimmed_source_videos(db: Session) -> ResearchVideoVisibilityBulkResultRead:
+    eligible_items = _eligible_trimmed_source_videos(db)
+    if not eligible_items:
+        return ResearchVideoVisibilityBulkResultRead(affected_count=0, items=[])
+    video_ids = [item.video_id for item in eligible_items]
+    videos = db.scalars(select(ResearchVideo).where(ResearchVideo.id.in_(video_ids))).all()
+    for video in videos:
+        hide_research_video_from_list(video, reason=TRIMMED_SOURCE_HIDDEN_REASON)
+    db.commit()
+    return ResearchVideoVisibilityBulkResultRead(affected_count=len(videos), items=eligible_items)
+
+
+def preview_restore_trimmed_source_videos(db: Session) -> ResearchVideoVisibilityBulkPreviewRead:
+    items = _hidden_trimmed_source_videos(db)
+    return ResearchVideoVisibilityBulkPreviewRead(
+        eligible_count=len(items),
+        already_hidden_count=len(items),
+        skipped_count=0,
+        items=items[:50],
+    )
+
+
+def restore_trimmed_source_videos(db: Session) -> ResearchVideoVisibilityBulkResultRead:
+    items = _hidden_trimmed_source_videos(db)
+    if not items:
+        return ResearchVideoVisibilityBulkResultRead(affected_count=0, items=[])
+    video_ids = [item.video_id for item in items]
+    videos = db.scalars(select(ResearchVideo).where(ResearchVideo.id.in_(video_ids))).all()
+    for video in videos:
+        restore_research_video_to_list(video)
+    db.commit()
+    return ResearchVideoVisibilityBulkResultRead(affected_count=len(videos), items=items)
 
 
 def preview_video_batch_export(
@@ -254,6 +345,78 @@ def _video_select(*, search: str | None, video_status: str | None) -> Select[tup
     return statement.order_by(ResearchVideo.created_at.desc(), ResearchVideo.id.desc())
 
 
+def _root_source_count(db: Session) -> int:
+    return db.scalar(
+        select(func.count(ResearchVideo.id))
+        .where(ResearchVideo.source_video_id.is_(None))
+        .where(ResearchVideo.origin_type.in_(("uploaded", "server_imported")))
+    ) or 0
+
+
+def _already_hidden_trimmed_source_count(db: Session) -> int:
+    return db.scalar(
+        select(func.count(ResearchVideo.id))
+        .where(ResearchVideo.hidden_from_video_list.is_(True))
+        .where(ResearchVideo.hidden_reason == TRIMMED_SOURCE_HIDDEN_REASON)
+    ) or 0
+
+
+def _eligible_trimmed_source_videos(db: Session) -> list[ResearchVideoVisibilityBulkItemRead]:
+    ready_child_counts = dict(
+        db.execute(
+            select(ResearchVideo.source_video_id, func.count(ResearchVideo.id))
+            .where(ResearchVideo.source_video_id.is_not(None))
+            .where(ResearchVideo.origin_type == "trimmed")
+            .where(ResearchVideo.status == "ready")
+            .group_by(ResearchVideo.source_video_id)
+        ).all()
+    )
+    if not ready_child_counts:
+        return []
+    sources = db.scalars(
+        select(ResearchVideo)
+        .where(ResearchVideo.id.in_(ready_child_counts.keys()))
+        .where(ResearchVideo.source_video_id.is_(None))
+        .where(ResearchVideo.origin_type.in_(("uploaded", "server_imported")))
+        .where(ResearchVideo.hidden_from_video_list.is_(False))
+        .order_by(ResearchVideo.created_at.desc(), ResearchVideo.id.desc())
+    ).all()
+    return [
+        ResearchVideoVisibilityBulkItemRead(
+            video_id=source.id,
+            display_name=source.name,
+            ready_derived_count=int(ready_child_counts.get(source.id, 0)),
+        )
+        for source in sources
+    ]
+
+
+def _hidden_trimmed_source_videos(db: Session) -> list[ResearchVideoVisibilityBulkItemRead]:
+    videos = db.scalars(
+        select(ResearchVideo)
+        .where(ResearchVideo.hidden_from_video_list.is_(True))
+        .where(ResearchVideo.hidden_reason == TRIMMED_SOURCE_HIDDEN_REASON)
+        .order_by(ResearchVideo.hidden_at.desc().nullslast(), ResearchVideo.id.desc())
+    ).all()
+    ready_child_counts = dict(
+        db.execute(
+            select(ResearchVideo.source_video_id, func.count(ResearchVideo.id))
+            .where(ResearchVideo.source_video_id.in_([video.id for video in videos] or [-1]))
+            .where(ResearchVideo.origin_type == "trimmed")
+            .where(ResearchVideo.status == "ready")
+            .group_by(ResearchVideo.source_video_id)
+        ).all()
+    )
+    return [
+        ResearchVideoVisibilityBulkItemRead(
+            video_id=video.id,
+            display_name=video.name,
+            ready_derived_count=int(ready_child_counts.get(video.id, 0)),
+        )
+        for video in videos
+    ]
+
+
 class _ChecklistContext:
     def __init__(
         self,
@@ -361,6 +524,10 @@ def _build_checklist_item(video: ResearchVideo, context: _ChecklistContext) -> R
             height=video.height,
             created_at=video.created_at,
             thumbnail_url=f"/api/research/videos/{video.id}/thumbnail" if video.thumbnail_path else None,
+            hidden_from_video_list=video.hidden_from_video_list,
+            hidden_at=video.hidden_at,
+            hidden_reason=video.hidden_reason,
+            notes=video.notes,
         ),
         trim=_build_trim_summary(video, context),
         phase=_build_phase_summary(video, context),
@@ -441,6 +608,23 @@ def _latest_submitted_annotation_set(
         submitted,
         key=lambda item: (
             item.submitted_at or datetime.min.replace(tzinfo=timezone.utc),
+            item.version,
+            item.annotation_set_id,
+        ),
+        reverse=True,
+    )[0]
+
+
+def _latest_draft_annotation_set(
+    annotation_sets: Iterable[ResearchVideoChecklistAnnotationSetRead],
+) -> ResearchVideoChecklistAnnotationSetRead | None:
+    drafts = [annotation_set for annotation_set in annotation_sets if annotation_set.status == "draft"]
+    if not drafts:
+        return None
+    return sorted(
+        drafts,
+        key=lambda item: (
+            item.updated_at,
             item.version,
             item.annotation_set_id,
         ),
@@ -585,6 +769,16 @@ def _matches_protocol(item: ResearchVideoChecklistItemRead, protocol_id: int | N
     if protocol_id is None:
         return True
     return any(annotation_set.protocol_id == protocol_id for annotation_set in item.phase.sets)
+
+
+def _matches_visibility(item: ResearchVideoChecklistItemRead, visibility: str) -> bool:
+    if visibility in {"", "all"}:
+        return True
+    if visibility == "visible":
+        return not item.video.hidden_from_video_list
+    if visibility == "hidden":
+        return item.video.hidden_from_video_list
+    return True
 
 
 def _sort_items(items: list[ResearchVideoChecklistItemRead], *, sort_by: str, sort_order: str) -> list[ResearchVideoChecklistItemRead]:

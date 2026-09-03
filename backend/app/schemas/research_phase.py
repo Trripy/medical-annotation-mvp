@@ -12,6 +12,7 @@ ResearchPhaseAnnotationSetStatus = Literal["draft", "submitted", "reviewed", "lo
 ResearchPhaseSegmentSource = Literal["manual", "model_suggestion", "model_corrected", "imported"]
 ResearchPhaseMutationAction = Literal[
     "created",
+    "filled_gaps",
     "transitioned",
     "closed",
     "updated",
@@ -22,6 +23,7 @@ ResearchPhaseMutationAction = Literal[
 ]
 ResearchPhaseStatusMutationAction = Literal["submitted", "reopened"]
 ResearchPhaseValidationSeverity = Literal["error", "warning", "info"]
+ResearchPhaseGapType = Literal["leading", "internal", "trailing"]
 ResearchPhaseValidationIssueType = Literal[
     "no_segments",
     "open_segment",
@@ -243,6 +245,34 @@ class MergeResearchPhaseSegmentsRequest(BaseModel):
     left_segment_id: int
     right_segment_id: int
     expected_revision: int = Field(ge=1)
+
+
+class FillResearchPhaseGapsRequest(BaseModel):
+    phase_label_id: int
+    expected_revision: int = Field(ge=1)
+
+
+class ResearchPhaseGapResponse(BaseModel):
+    start_frame: int
+    end_frame_exclusive: int
+    frame_count: int
+    gap_type: ResearchPhaseGapType
+
+
+class ResearchPhaseGapFillPreviewResponse(BaseModel):
+    annotation_set_id: int
+    current_revision: int
+    phase_label_id: int
+    phase_label_name: str
+    video_frame_count: int
+    gap_count: int
+    total_gap_frames: int
+    total_gap_duration_ms: int | None = None
+    leading_gap_count: int
+    internal_gap_count: int
+    trailing_gap_count: int
+    gaps: list[ResearchPhaseGapResponse] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class SubmitResearchPhaseAnnotationSetRequest(BaseModel):

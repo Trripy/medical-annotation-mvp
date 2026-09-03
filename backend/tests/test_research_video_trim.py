@@ -23,6 +23,7 @@ from app.services.research_video_trim import (
     _run_ffmpeg_trim,
     _video_encoder_args,
 )
+from app.services.research_video_visibility import hide_research_video_from_list
 
 
 FFMPEG = Path("/data1/zhangyuzhu/code/autoannotate/conda_envs/sam/bin/ffmpeg")
@@ -195,7 +196,7 @@ def test_trim_creates_new_video_with_exact_frame_count_and_no_annotations(trim_d
 
     with session_factory() as db:
         source_video = db.get(ResearchVideo, source.id)
-        trimmed, warnings = trim_research_video(
+        trimmed, warnings, source_video_hidden = trim_research_video(
             db=db,
             source_video=source_video,
             start_frame=25,
@@ -205,6 +206,7 @@ def test_trim_creates_new_video_with_exact_frame_count_and_no_annotations(trim_d
             storage_root=storage_root,
         )
         assert warnings == []
+        assert source_video_hidden is False
         assert trimmed.id != source.id
         assert trimmed.status == "ready"
         assert trimmed.origin_type == "trimmed"
@@ -230,7 +232,7 @@ def test_trim_audio_source_succeeds_and_keeps_exact_frame_count(trim_db_context)
     source = _create_source_video(session_factory, storage_root, audio=True)
 
     with session_factory() as db:
-        trimmed, _warnings = trim_research_video(
+        trimmed, _warnings, source_video_hidden = trim_research_video(
             db=db,
             source_video=db.get(ResearchVideo, source.id),
             start_frame=25,
@@ -239,9 +241,87 @@ def test_trim_audio_source_succeeds_and_keeps_exact_frame_count(trim_db_context)
             acknowledge_annotations_not_copied=True,
             storage_root=storage_root,
         )
+        assert source_video_hidden is False
         assert trimmed.frame_count == 30
         assert trimmed.duration_ms == 1200
         assert Path(trimmed.file_path).is_file()
+
+
+def test_trim_can_hide_source_after_trimmed_video_is_ready(trim_db_context) -> None:
+    session_factory, storage_root = trim_db_context
+    source = _create_source_video(session_factory, storage_root)
+
+    with session_factory() as db:
+        source_video = db.get(ResearchVideo, source.id)
+        trimmed, _warnings, source_video_hidden = trim_research_video(
+            db=db,
+            source_video=source_video,
+            start_frame=25,
+            end_frame_exclusive=60,
+            display_name="hidden_source_trimmed.mp4",
+            acknowledge_annotations_not_copied=True,
+            hide_source_after_success=True,
+            storage_root=storage_root,
+        )
+        db.refresh(source_video)
+        assert trimmed.status == "ready"
+        assert trimmed.hidden_from_video_list is False
+        assert source_video_hidden is True
+        assert source_video.hidden_from_video_list is True
+        assert source_video.hidden_reason == "trimmed_source"
+        assert source_video.hidden_at is not None
+
+
+def test_trim_hide_source_is_idempotent_and_preserves_manual_reason(trim_db_context) -> None:
+    session_factory, storage_root = trim_db_context
+    source = _create_source_video(session_factory, storage_root)
+
+    with session_factory() as db:
+        source_video = db.get(ResearchVideo, source.id)
+        hide_research_video_from_list(source_video, reason="manual", preserve_existing_reason=False)
+        db.commit()
+
+        trimmed, _warnings, source_video_hidden = trim_research_video(
+            db=db,
+            source_video=source_video,
+            start_frame=25,
+            end_frame_exclusive=60,
+            display_name="manual_hidden_source_trimmed.mp4",
+            acknowledge_annotations_not_copied=True,
+            hide_source_after_success=True,
+            storage_root=storage_root,
+        )
+        db.refresh(source_video)
+        assert trimmed.status == "ready"
+        assert source_video_hidden is True
+        assert source_video.hidden_from_video_list is True
+        assert source_video.hidden_reason == "manual"
+
+
+def test_trim_false_does_not_restore_already_hidden_source(trim_db_context) -> None:
+    session_factory, storage_root = trim_db_context
+    source = _create_source_video(session_factory, storage_root)
+
+    with session_factory() as db:
+        source_video = db.get(ResearchVideo, source.id)
+        hide_research_video_from_list(source_video, reason="manual", preserve_existing_reason=False)
+        db.commit()
+
+        trimmed, _warnings, source_video_hidden = trim_research_video(
+            db=db,
+            source_video=source_video,
+            start_frame=25,
+            end_frame_exclusive=60,
+            display_name="still_hidden_source_trimmed.mp4",
+            acknowledge_annotations_not_copied=True,
+            hide_source_after_success=False,
+            storage_root=storage_root,
+        )
+        db.refresh(source_video)
+        assert trimmed.status == "ready"
+        assert source_video_hidden is True
+        assert source_video.hidden_from_video_list is True
+        assert source_video.hidden_reason == "manual"
 
 
 def test_video_encoder_args_uses_only_supported_h264_encoders(monkeypatch) -> None:

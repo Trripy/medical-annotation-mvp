@@ -3,6 +3,8 @@ export type TrimRange = {
   endFrameExclusive: number
 }
 
+export const HIDE_SOURCE_AFTER_TRIM_STORAGE_KEY = 'researchVideoTrim.hideSourceAfterSuccess'
+
 export type UiTrimRange = {
   startFrameInclusiveOneBased: number
   endFrameInclusiveOneBased: number
@@ -141,11 +143,24 @@ export function buildTrimPayload(
   range: TrimRange,
   displayName: string,
   acknowledgeAnnotationsNotCopied: boolean,
+  hideSourceAfterSuccess = false,
 ) {
   return {
     start_frame: range.startFrame,
     end_frame_exclusive: range.endFrameExclusive,
     display_name: displayName,
     acknowledge_annotations_not_copied: acknowledgeAnnotationsNotCopied,
+    hide_source_after_success: hideSourceAfterSuccess,
   }
+}
+
+export function readHideSourceAfterTrimPreference(storage: Pick<Storage, 'getItem'> = localStorage): boolean {
+  return storage.getItem(HIDE_SOURCE_AFTER_TRIM_STORAGE_KEY) === 'true'
+}
+
+export function writeHideSourceAfterTrimPreference(
+  value: boolean,
+  storage: Pick<Storage, 'setItem'> = localStorage,
+): void {
+  storage.setItem(HIDE_SOURCE_AFTER_TRIM_STORAGE_KEY, value ? 'true' : 'false')
 }
