@@ -11,6 +11,7 @@ from app.db.base import Base
 if TYPE_CHECKING:
     from app.models.annotation import Annotation
     from app.models.image import Image
+    from app.models.job_layer_order import JobLayerOrderRule
     from app.models.label import Label
     from app.models.project import Project
     from app.models.task import Task
@@ -44,3 +45,6 @@ class Job(Base):
     annotations: Mapped[list[Annotation]] = relationship(back_populates="job")
     images: Mapped[list[Image]] = relationship(back_populates="job")
     labels: Mapped[list[Label]] = relationship(back_populates="job", cascade="all, delete-orphan")
+    layer_order_rule: Mapped[JobLayerOrderRule | None] = relationship(
+        back_populates="job", cascade="all, delete-orphan", uselist=False
+    )

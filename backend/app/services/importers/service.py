@@ -148,6 +148,7 @@ def import_labels_for_job(
         "reassigned_conflicting_colors": sum(1 for item in created_label_details if item["color_changed"]),
         "skipped_items": [{"source": item.source, "reason": item.reason} for item in skipped_items],
         "errors": parse_result.errors,
+        "affected_image_ids": sorted(annotations_by_image),
     }
 
 

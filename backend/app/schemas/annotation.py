@@ -67,6 +67,7 @@ class AnnotationWrite(BaseModel):
 
 class AnnotationSaveRequest(BaseModel):
     annotations: list[AnnotationWrite]
+    apply_layer_rule: bool = False
 
 
 class JobDetailRead(BaseModel):

@@ -19,6 +19,8 @@ import {
   type Label,
   type LabelDeleteStrategy,
   type LabelUsage,
+  type JobLayerOrderRule,
+  type JobLayerOrderPreview,
   type ShapeType,
 } from '../stores/annotation'
 import {
@@ -72,6 +74,11 @@ type Sam2PreviewAcceptPayload = {
   targetAnnotationId: number | string | null
 }
 type TrackOutputMode = 'preview_first' | 'direct_create'
+type TrackingStartConfirmationKind = 'discard_preview' | 'direct_create'
+type TrackingStartConfirmation = {
+  kind: TrackingStartConfirmationKind
+  discardPreviewConfirmed: boolean
+}
 type TrackingReviewStatus = 'pending' | 'accepted' | 'rejected' | 'needs_fix'
 type TrackingCommitOutcome = 'saved' | 'skipped' | 'failed' | 'already_committed' | 'invalid'
 type TrackWithSam2FormState = {
@@ -160,6 +167,18 @@ const suppressNextSelectToolSwitch = ref(false)
 const hasUserChangedSam2Settings = ref(false)
 const sam2Settings = ref<Sam2Settings>(sam2SettingsFromUserSettings(userSettings.value))
 const labelManagerVisible = ref(false)
+const layerRuleVisible = ref(false)
+const layerRuleLoading = ref(false)
+const layerRuleSaving = ref(false)
+const layerRule = ref<JobLayerOrderRule | null>(null)
+const layerRuleLabelIds = ref<number[]>([])
+const layerRuleAutoApply = ref(true)
+const applyLayerRuleOnNextSave = ref(false)
+const draggedLayerRuleIndex = ref<number | null>(null)
+const layerRuleApplyConfirmVisible = ref(false)
+const layerRulePreview = ref<JobLayerOrderPreview | null>(null)
+const layerRuleDeleteConfirmVisible = ref(false)
+const layerRuleDeleteSubmitting = ref(false)
 const labelDrafts = ref<LabelDraft[]>([])
 const labelManagerLoading = ref(false)
 const labelActionLoading = ref(false)
@@ -178,6 +197,7 @@ const refiningSelectedPolygonWithSam2 = ref(false)
 const trackWithSam2DialogVisible = ref(false)
 const trackingReviewDialogVisible = ref(false)
 const trackingWithSam2 = ref(false)
+const trackingStartConfirmation = ref<TrackingStartConfirmation | null>(null)
 const acceptingTrackingPreview = ref(false)
 const trackingDialogAnnotationId = ref<number | string | null>(null)
 const trackingReviewRangeStart = ref(0)
@@ -230,6 +250,9 @@ const currentImageObjectAnnotations = computed(() =>
 )
 const objectLabelDrafts = computed(() => labelDrafts.value.filter((label) => !isClassificationLabel(label)))
 const classificationLabelDrafts = computed(() => labelDrafts.value.filter((label) => isClassificationLabel(label)))
+const layerRuleLabels = computed(() => layerRuleLabelIds.value
+  .map((id) => objectLabels.value.find((label) => label.id === id))
+  .filter((label): label is Label => Boolean(label)))
 const canUseClassificationTool = computed(() => classificationLabels.value.length > 0)
 const classificationAnnotationsByImageId = computed(() => {
   const map = new Map<number, AnnotationObject>()
@@ -414,12 +437,15 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  resetLayerRuleDeleteConfirmation()
+  closeTrackingStartConfirmation()
   persistLastFrame()
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('beforeunload', onBeforeUnload)
 })
 
 watch(selectedImageIndex, (index) => {
+  closeTrackingStartConfirmation()
   goToIndex.value = String(currentImageNumber.value || 1)
   selectedAnnotationId.value = null
   hiddenAnnotationIds.value = []
@@ -431,6 +457,10 @@ watch(selectedImageIndex, (index) => {
     syncFrameQuery(index)
     persistLastFrame()
   }
+})
+
+watch(() => props.jobId, () => {
+  resetLayerRuleDeleteConfirmation()
 })
 
 watch(currentImageAnnotations, (annotations) => {
@@ -868,6 +898,13 @@ function updateAnnotationsForImage(imageId: number, nextAnnotations: AnnotationO
     return
   }
 
+  const priorById = new Map(job.value.annotations.filter((annotation) => annotation.image_id === imageId).map((annotation) => [annotation.id, annotation]))
+  const shouldApplyRule = nextAnnotations.some((annotation) => {
+    if (isClassificationAnnotation(annotation)) return false
+    const previous = priorById.get(annotation.id)
+    return !previous || previous.label_id !== annotation.label_id
+  })
+  if (shouldApplyRule) applyLayerRuleOnNextSave.value = true
   const normalizedAnnotations = normalizeAnnotationLayerOrder(nextAnnotations.map((annotation) => normalizeAnnotationObject(annotation)))
   job.value.annotations = [
     ...job.value.annotations.filter((annotation) => annotation.image_id !== imageId),
@@ -1912,8 +1949,23 @@ function closeTrackWithSam2Dialog() {
   if (trackingWithSam2.value) {
     return
   }
+  closeTrackingStartConfirmation()
   trackWithSam2DialogVisible.value = false
   trackingDialogAnnotationId.value = null
+}
+
+const trackingStartConfirmationVisible = computed(() => trackingStartConfirmation.value !== null)
+const trackingStartConfirmationMessage = computed(() => {
+  if (trackingStartConfirmation.value?.kind === 'discard_preview') {
+    return trackWithSam2Form.value.outputMode === 'direct_create'
+      ? t('frameAnnotation.tracking.discardPreviewForDirectConfirm')
+      : t('frameAnnotation.tracking.discardPreviewForNewRunConfirm')
+  }
+  return t('frameAnnotation.tracking.directCreateConfirm')
+})
+
+function closeTrackingStartConfirmation() {
+  trackingStartConfirmation.value = null
 }
 
 function applyTrackingPreview(response: Sam2TrackVideoResponse, annotation: AnnotationObject) {
@@ -1984,7 +2036,7 @@ async function saveDirectTrackingResults(
       continue
     }
 
-    const saved = await annotationStore.saveImageAnnotations(result.image_id, preparedCommit.nextAnnotations)
+    const saved = await annotationStore.saveImageAnnotations(result.image_id, preparedCommit.nextAnnotations, true)
     if (saved) {
       savedCount += 1
     } else {
@@ -2000,7 +2052,10 @@ async function saveDirectTrackingResults(
   }
 }
 
-async function startTrackWithSam2() {
+async function startTrackWithSam2(options: {
+  discardPreviewConfirmed?: boolean
+  directCreateConfirmed?: boolean
+} = {}) {
   if (!job.value || !currentImage.value) {
     return
   }
@@ -2013,26 +2068,6 @@ async function startTrackWithSam2() {
   if (annotation.points.length < 3) {
     ElMessage.warning(t('frameAnnotation.polygonNeedsThreePoints'))
     return
-  }
-
-  if (trackingPreviewState.value) {
-    const discardPreviewMessage = trackWithSam2Form.value.outputMode === 'direct_create'
-      ? t('frameAnnotation.tracking.discardPreviewForDirectConfirm')
-      : t('frameAnnotation.tracking.discardPreviewForNewRunConfirm')
-    if (!window.confirm(discardPreviewMessage)) {
-      return
-    }
-  }
-
-  if (trackWithSam2Form.value.outputMode === 'direct_create') {
-    const confirmed = window.confirm(t('frameAnnotation.tracking.directCreateConfirm'))
-    if (!confirmed) {
-      return
-    }
-  }
-
-  if (trackingPreviewState.value) {
-    clearTrackingPreview()
   }
 
   const startFrameIndex = imageFrameIndex()
@@ -2076,6 +2111,26 @@ async function startTrackWithSam2() {
       ElMessage.warning(t('frameAnnotation.tracking.forwardEndAfterOrEqualStart'))
       return
     }
+  }
+
+  if (trackingPreviewState.value && !options.discardPreviewConfirmed) {
+    trackingStartConfirmation.value = {
+      kind: 'discard_preview',
+      discardPreviewConfirmed: false,
+    }
+    return
+  }
+
+  if (trackWithSam2Form.value.outputMode === 'direct_create' && !options.directCreateConfirmed) {
+    trackingStartConfirmation.value = {
+      kind: 'direct_create',
+      discardPreviewConfirmed: Boolean(options.discardPreviewConfirmed),
+    }
+    return
+  }
+
+  if (trackingPreviewState.value) {
+    clearTrackingPreview()
   }
 
   trackingWithSam2.value = true
@@ -2163,6 +2218,19 @@ async function startTrackWithSam2() {
   } finally {
     trackingWithSam2.value = false
   }
+}
+
+function confirmTrackingStart() {
+  const confirmation = trackingStartConfirmation.value
+  if (!confirmation) {
+    return
+  }
+
+  closeTrackingStartConfirmation()
+  void startTrackWithSam2({
+    discardPreviewConfirmed: confirmation.discardPreviewConfirmed || confirmation.kind === 'discard_preview',
+    directCreateConfirmed: confirmation.kind === 'direct_create',
+  })
 }
 
 function isTrackingReviewFrame(frameIndex: number) {
@@ -2323,7 +2391,7 @@ async function commitTrackingResult(imageId: number): Promise<TrackingCommitOutc
     return preparedCommit.outcome === 'skipped' ? 'skipped' : 'invalid'
   }
 
-  const saved = await annotationStore.saveImageAnnotations(result.image_id, preparedCommit.nextAnnotations)
+  const saved = await annotationStore.saveImageAnnotations(result.image_id, preparedCommit.nextAnnotations, true)
   if (!saved) {
     return 'failed' as const
   }
@@ -2767,13 +2835,161 @@ async function saveAnnotations() {
     return true
   }
 
-  const saved = await annotationStore.saveImageAnnotations(currentImage.value.id, currentImageAnnotations.value)
+  const saved = await annotationStore.saveImageAnnotations(
+    currentImage.value.id,
+    currentImageAnnotations.value,
+    applyLayerRuleOnNextSave.value,
+  )
   if (saved) {
     reconcileTrackingFixAnnotationsForImage(currentImage.value.id)
     hasUnsavedChanges.value = false
+    applyLayerRuleOnNextSave.value = false
   }
 
   return saved
+}
+
+async function openLayerRuleDialog() {
+  layerRuleVisible.value = true
+  layerRuleLoading.value = true
+  const result = await annotationStore.fetchJobLayerOrderRule(props.jobId)
+  layerRuleLoading.value = false
+  if (!result) {
+    ElMessage.error(annotationStore.error || t('jobLayerOrder.loadFailed'))
+    return
+  }
+  layerRule.value = result
+  layerRuleAutoApply.value = result.configured ? result.auto_apply : true
+  const availableIds = objectLabels.value.map((label) => label.id)
+  const ordered = result.configured ? result.front_to_back_label_ids.filter((id) => availableIds.includes(id)) : []
+  layerRuleLabelIds.value = [...ordered, ...availableIds.filter((id) => !ordered.includes(id))]
+}
+
+function closeLayerRuleDialog() {
+  if (!layerRuleSaving.value && !layerRuleDeleteSubmitting.value) {
+    layerRuleApplyConfirmVisible.value = false
+    layerRulePreview.value = null
+    resetLayerRuleDeleteConfirmation()
+    layerRuleVisible.value = false
+  }
+}
+
+function moveLayerRuleLabel(index: number, step: -1 | 1) {
+  const target = index + step
+  if (target < 0 || target >= layerRuleLabelIds.value.length) return
+  const next = [...layerRuleLabelIds.value]
+  ;[next[index], next[target]] = [next[target], next[index]]
+  layerRuleLabelIds.value = next
+}
+
+function beginLayerRuleDrag(index: number) {
+  draggedLayerRuleIndex.value = index
+}
+
+function dropLayerRuleLabel(targetIndex: number) {
+  const sourceIndex = draggedLayerRuleIndex.value
+  draggedLayerRuleIndex.value = null
+  if (sourceIndex === null || sourceIndex === targetIndex) return
+  const next = [...layerRuleLabelIds.value]
+  const [moved] = next.splice(sourceIndex, 1)
+  next.splice(targetIndex, 0, moved)
+  layerRuleLabelIds.value = next
+}
+
+async function saveLayerRule(applyExisting: boolean) {
+  if (layerRuleSaving.value) return
+  if (applyExisting) {
+    const preview = await annotationStore.previewJobLayerOrderRule(props.jobId, layerRuleLabelIds.value)
+    if (!preview) {
+      ElMessage.error(annotationStore.error || t('jobLayerOrder.previewFailed'))
+      return
+    }
+    layerRulePreview.value = preview
+    layerRuleApplyConfirmVisible.value = true
+    return
+  }
+  await persistLayerRule(false)
+}
+
+function closeLayerRuleApplyConfirm() {
+  if (layerRuleSaving.value) return
+  layerRuleApplyConfirmVisible.value = false
+  layerRulePreview.value = null
+}
+
+async function confirmLayerRuleApply() {
+  await persistLayerRule(true)
+}
+
+async function persistLayerRule(applyExisting: boolean) {
+  layerRuleSaving.value = true
+  const saved = await annotationStore.saveJobLayerOrderRule(
+    props.jobId, layerRuleLabelIds.value, layerRuleAutoApply.value, applyExisting,
+  )
+  layerRuleSaving.value = false
+  if (!saved) {
+    ElMessage.error(annotationStore.error || t('jobLayerOrder.saveFailed'))
+    return
+  }
+  layerRule.value = saved
+  ElMessage.success(applyExisting
+    ? t('jobLayerOrder.applied', { images: saved.changed_image_count ?? 0, annotations: saved.changed_annotation_count ?? 0 })
+    : t('jobLayerOrder.saved'))
+  if (applyExisting) {
+    layerRuleApplyConfirmVisible.value = false
+    layerRulePreview.value = null
+    await annotationStore.fetchJob(props.jobId)
+  }
+  layerRuleVisible.value = false
+}
+
+function requestLayerRuleDelete() {
+  if (!layerRule.value?.configured || layerRuleDeleteSubmitting.value) {
+    return
+  }
+  layerRuleDeleteConfirmVisible.value = true
+}
+
+function closeLayerRuleDeleteConfirm() {
+  if (layerRuleDeleteSubmitting.value) {
+    return
+  }
+  resetLayerRuleDeleteConfirmation()
+}
+
+function resetLayerRuleDeleteConfirmation() {
+  layerRuleDeleteConfirmVisible.value = false
+  layerRuleDeleteSubmitting.value = false
+}
+
+async function confirmLayerRuleDelete() {
+  if (!layerRuleDeleteConfirmVisible.value || layerRuleDeleteSubmitting.value) {
+    return
+  }
+
+  const deletingJobId = props.jobId
+  layerRuleDeleteSubmitting.value = true
+  const deleted = await annotationStore.deleteJobLayerOrderRule(deletingJobId)
+  layerRuleDeleteSubmitting.value = false
+  if (!deleted) {
+    ElMessage.error(annotationStore.error || t('jobLayerOrder.deleteFailed'))
+    return
+  }
+
+  const refreshedRule = await annotationStore.fetchJobLayerOrderRule(deletingJobId)
+  if (!refreshedRule) {
+    ElMessage.error(annotationStore.error || t('jobLayerOrder.loadFailed'))
+    return
+  }
+  if (props.jobId !== deletingJobId) {
+    return
+  }
+
+  layerRule.value = refreshedRule
+  layerRuleAutoApply.value = false
+  layerRuleLabelIds.value = objectLabels.value.map((label) => label.id)
+  resetLayerRuleDeleteConfirmation()
+  ElMessage.success(t('jobLayerOrder.deleted'))
 }
 
 async function goToImage(index: number) {
@@ -2829,6 +3045,24 @@ function submitGoToIndex() {
 
 function onKeydown(event: KeyboardEvent) {
   if (isTextEntryTarget(event.target)) {
+    return
+  }
+
+  if (event.key === 'Escape' && layerRuleDeleteConfirmVisible.value) {
+    event.preventDefault()
+    closeLayerRuleDeleteConfirm()
+    return
+  }
+
+  if (event.key === 'Escape' && trackingStartConfirmationVisible.value) {
+    event.preventDefault()
+    closeTrackingStartConfirmation()
+    return
+  }
+
+  if (event.key === 'Escape' && layerRuleApplyConfirmVisible.value) {
+    event.preventDefault()
+    closeLayerRuleApplyConfirm()
     return
   }
 
@@ -2936,6 +3170,9 @@ function isTextEntryTarget(target: EventTarget | null) {
               <p class="panel-label">{{ t('frameAnnotation.label') }}</p>
               <button class="panel-link-button" type="button" @click="openLabelManager">
                 {{ t('frameAnnotation.manage') }}
+              </button>
+              <button class="panel-link-button" type="button" @click="openLayerRuleDialog">
+                {{ t('jobLayerOrder.shortTitle') }}
               </button>
             </div>
             <div class="label-list">
@@ -3484,6 +3721,35 @@ function isTextEntryTarget(target: EventTarget | null) {
       </section>
     </div>
 
+    <Teleport to="body">
+      <div
+        v-if="trackingStartConfirmationVisible"
+        class="tracking-start-confirm-backdrop"
+        @click.self="closeTrackingStartConfirmation"
+      >
+        <section
+          class="tracking-start-confirm-dialog"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="t('frameAnnotation.tracking.startConfirmTitle')"
+        >
+          <header class="nested-confirm-header">
+            <h3>{{ t('frameAnnotation.tracking.startConfirmTitle') }}</h3>
+            <el-button text @click="closeTrackingStartConfirmation">{{ t('common.close') }}</el-button>
+          </header>
+          <div class="nested-confirm-body">
+            <p>{{ trackingStartConfirmationMessage }}</p>
+          </div>
+          <footer class="nested-confirm-footer">
+            <el-button @click="closeTrackingStartConfirmation">{{ t('common.cancel') }}</el-button>
+            <el-button type="primary" @click="confirmTrackingStart">
+              {{ t('frameAnnotation.tracking.continueTracking') }}
+            </el-button>
+          </footer>
+        </section>
+      </div>
+    </Teleport>
+
     <div v-if="trackingReviewDialogVisible && trackingPreviewState" class="app-modal-backdrop" @click.self="closeTrackingReviewDialog">
       <section class="app-modal tracking-review-modal" @click.stop>
         <header class="track-sam2-modal-header">
@@ -3770,6 +4036,132 @@ function isTextEntryTarget(target: EventTarget | null) {
         </div>
       </section>
     </div>
+
+    <div v-if="layerRuleVisible" class="app-modal-backdrop" @click.self="closeLayerRuleDialog">
+      <section class="app-modal job-layer-rule-modal" @click.stop>
+        <header class="label-management-modal-header">
+          <div>
+            <p class="eyebrow">{{ t('jobLayerOrder.shortTitle') }}</p>
+            <h2>{{ t('jobLayerOrder.title') }}</h2>
+            <span>{{ t('jobLayerOrder.currentJob', { name: job?.name ?? `Job ${jobId}`, id: jobId }) }}</span>
+          </div>
+          <el-button :disabled="layerRuleSaving" @click="closeLayerRuleDialog">{{ t('common.close') }}</el-button>
+        </header>
+        <div v-loading="layerRuleLoading" class="job-layer-rule-modal-body">
+          <p class="job-layer-rule-description">{{ t('jobLayerOrder.description') }}</p>
+          <p class="job-layer-rule-notice">{{ t('jobLayerOrder.jobScopedNotice') }}</p>
+          <div class="job-layer-rule-boundary">{{ t('jobLayerOrder.top') }}</div>
+          <div class="job-layer-rule-list">
+            <div
+              v-for="(label, index) in layerRuleLabels"
+              :key="label.id"
+              class="job-layer-rule-row"
+              :class="{ 'is-dragging': draggedLayerRuleIndex === index }"
+              draggable="true"
+              @dragstart="beginLayerRuleDrag(index)"
+              @dragend="draggedLayerRuleIndex = null"
+              @dragover.prevent
+              @drop.prevent="dropLayerRuleLabel(index)"
+            >
+              <span class="job-layer-rule-handle" aria-hidden="true">☰</span>
+              <span class="label-swatch" :style="{ backgroundColor: label.color }"></span>
+              <span class="job-layer-rule-name">{{ label.name }}</span>
+              <span class="job-layer-rule-shape">{{ label.shape_type }}</span>
+              <div class="job-layer-rule-actions">
+                <el-button size="small" text :disabled="index === 0 || layerRuleSaving" @click="moveLayerRuleLabel(index, -1)">↑</el-button>
+                <el-button size="small" text :disabled="index === layerRuleLabels.length - 1 || layerRuleSaving" @click="moveLayerRuleLabel(index, 1)">↓</el-button>
+              </div>
+            </div>
+          </div>
+          <div class="job-layer-rule-boundary">{{ t('jobLayerOrder.bottom') }}</div>
+          <el-checkbox v-model="layerRuleAutoApply" :disabled="layerRuleSaving">
+            {{ t('jobLayerOrder.autoApply') }}
+          </el-checkbox>
+          <p class="job-layer-rule-help">{{ t('jobLayerOrder.autoApplyHelp') }}</p>
+          <p class="job-layer-rule-help">{{ t('jobLayerOrder.manualOverrideHelp') }}</p>
+        </div>
+        <footer class="job-layer-rule-footer">
+          <el-button
+            v-if="layerRule?.configured"
+            type="danger"
+            text
+            :disabled="layerRuleDeleteSubmitting"
+            @click="requestLayerRuleDelete"
+          >
+            {{ t('jobLayerOrder.deleteRule') }}
+          </el-button>
+          <span class="job-layer-rule-footer-spacer"></span>
+          <el-button :disabled="layerRuleSaving" @click="closeLayerRuleDialog">{{ t('common.cancel') }}</el-button>
+          <el-button :loading="layerRuleSaving" @click="saveLayerRule(false)">{{ t('jobLayerOrder.save') }}</el-button>
+          <el-button type="primary" :loading="layerRuleSaving" @click="saveLayerRule(true)">{{ t('jobLayerOrder.saveAndApply') }}</el-button>
+        </footer>
+      </section>
+    </div>
+
+    <Teleport to="body">
+      <div
+        v-if="layerRuleApplyConfirmVisible && layerRulePreview"
+        class="job-layer-rule-confirm-backdrop"
+        @click.self="closeLayerRuleApplyConfirm"
+      >
+        <section class="job-layer-rule-confirm-dialog" role="dialog" aria-modal="true" :aria-label="t('jobLayerOrder.applyConfirmTitle')">
+          <header class="job-layer-rule-confirm-header">
+            <h3>{{ t('jobLayerOrder.applyConfirmTitle') }}</h3>
+            <el-button text :disabled="layerRuleSaving" @click="closeLayerRuleApplyConfirm">{{ t('common.close') }}</el-button>
+          </header>
+          <div class="job-layer-rule-confirm-body">
+            <p>{{ t('jobLayerOrder.applyConfirmDescription', {
+              images: layerRulePreview.image_count,
+              annotations: layerRulePreview.annotation_count,
+              changed: layerRulePreview.changed_annotation_count,
+            }) }}</p>
+            <dl class="job-layer-rule-confirm-stats">
+              <div><dt>{{ t('jobLayerOrder.imageCount') }}</dt><dd>{{ layerRulePreview.image_count }}</dd></div>
+              <div><dt>{{ t('jobLayerOrder.annotationCount') }}</dt><dd>{{ layerRulePreview.annotation_count }}</dd></div>
+              <div><dt>{{ t('jobLayerOrder.changedImageCount') }}</dt><dd>{{ layerRulePreview.changed_image_count }}</dd></div>
+              <div><dt>{{ t('jobLayerOrder.changedAnnotationCount') }}</dt><dd>{{ layerRulePreview.changed_annotation_count }}</dd></div>
+            </dl>
+            <p class="job-layer-rule-confirm-safety">{{ t('jobLayerOrder.applySafety') }}</p>
+          </div>
+          <footer class="job-layer-rule-confirm-footer">
+            <el-button :disabled="layerRuleSaving" @click="closeLayerRuleApplyConfirm">{{ t('common.cancel') }}</el-button>
+            <el-button type="primary" :loading="layerRuleSaving" @click="confirmLayerRuleApply">
+              {{ t('jobLayerOrder.confirmApply') }}
+            </el-button>
+          </footer>
+        </section>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="layerRuleDeleteConfirmVisible"
+        class="job-layer-rule-confirm-backdrop"
+        @click.self="closeLayerRuleDeleteConfirm"
+      >
+        <section
+          class="job-layer-rule-confirm-dialog"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="t('jobLayerOrder.deleteConfirmTitle')"
+        >
+          <header class="job-layer-rule-confirm-header">
+            <h3>{{ t('jobLayerOrder.deleteConfirmTitle') }}</h3>
+            <el-button text :disabled="layerRuleDeleteSubmitting" @click="closeLayerRuleDeleteConfirm">{{ t('common.close') }}</el-button>
+          </header>
+          <div class="job-layer-rule-confirm-body">
+            <p>{{ t('jobLayerOrder.deleteConfirmDescription') }}</p>
+            <p class="job-layer-rule-confirm-safety">{{ t('jobLayerOrder.deleteConfirmAnnotationNotice') }}</p>
+          </div>
+          <footer class="job-layer-rule-confirm-footer">
+            <el-button :disabled="layerRuleDeleteSubmitting" @click="closeLayerRuleDeleteConfirm">{{ t('common.cancel') }}</el-button>
+            <el-button type="danger" :disabled="layerRuleDeleteSubmitting" :loading="layerRuleDeleteSubmitting" @click="confirmLayerRuleDelete">
+              {{ t('jobLayerOrder.deleteConfirmButton') }}
+            </el-button>
+          </footer>
+        </section>
+      </div>
+    </Teleport>
 
     <Teleport to="body">
       <div

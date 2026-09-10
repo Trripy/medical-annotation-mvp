@@ -63,6 +63,33 @@ class JobLabelDeleteResponse(BaseModel):
     target_label: str | None = None
 
 
+class JobLayerOrderRulePayload(BaseModel):
+    front_to_back_label_ids: list[int] = Field(default_factory=list)
+    auto_apply: bool = True
+    apply_existing: bool = False
+
+
+class JobLayerOrderPreviewRead(BaseModel):
+    job_id: int
+    image_count: int
+    annotation_count: int
+    changed_image_count: int
+    changed_annotation_count: int
+
+
+class JobLayerOrderRuleRead(BaseModel):
+    job_id: int
+    configured: bool
+    auto_apply: bool
+    front_to_back_label_ids: list[int] = Field(default_factory=list)
+    unconfigured_label_ids: list[int] = Field(default_factory=list)
+    applied_existing: bool = False
+    image_count: int = 0
+    annotation_count: int = 0
+    changed_image_count: int = 0
+    changed_annotation_count: int = 0
+
+
 class JobRead(BaseModel):
     id: int
     project_id: int | None

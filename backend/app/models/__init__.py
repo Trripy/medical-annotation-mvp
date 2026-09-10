@@ -1,6 +1,7 @@
 from app.models.annotation import Annotation
 from app.models.image import Image
 from app.models.job import Job
+from app.models.job_layer_order import JobLayerOrderRule, JobLayerOrderRuleItem
 from app.models.label import Label
 from app.models.project import Project
 from app.models.research_phase import (
@@ -29,6 +30,8 @@ __all__ = [
     "Annotation",
     "Image",
     "Job",
+    "JobLayerOrderRule",
+    "JobLayerOrderRuleItem",
     "Label",
     "Project",
     "ResearchPhaseProtocol",

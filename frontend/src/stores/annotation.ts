@@ -76,6 +76,27 @@ export type LabelDeleteResult = {
   target_label: string | null
 }
 
+export type JobLayerOrderRule = {
+  job_id: number
+  configured: boolean
+  auto_apply: boolean
+  front_to_back_label_ids: number[]
+  unconfigured_label_ids: number[]
+  applied_existing?: boolean
+  image_count?: number
+  annotation_count?: number
+  changed_image_count?: number
+  changed_annotation_count?: number
+}
+
+export type JobLayerOrderPreview = {
+  job_id: number
+  image_count: number
+  annotation_count: number
+  changed_image_count: number
+  changed_annotation_count: number
+}
+
 export type Sam2TrackDirection = 'forward' | 'backward' | 'both'
 export type Sam2ExistingAnnotationPolicy = 'skip_same_label' | 'replace_same_label' | 'append'
 
@@ -171,7 +192,7 @@ export const useAnnotationStore = defineStore('annotation', {
         this.loading = false
       }
     },
-    async saveImageAnnotations(imageId: number, annotations: AnnotationObject[]) {
+    async saveImageAnnotations(imageId: number, annotations: AnnotationObject[], applyLayerRule = false) {
       if (!this.job) {
         return false
       }
@@ -187,6 +208,7 @@ export const useAnnotationStore = defineStore('annotation', {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
+            apply_layer_rule: applyLayerRule,
             annotations: normalizedAnnotations.map((annotation) => ({
               label_id: annotation.label_id,
               shape_type: annotation.shape_type,
@@ -341,6 +363,56 @@ export const useAnnotationStore = defineStore('annotation', {
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Unknown error'
         return null
+      }
+    },
+    async fetchJobLayerOrderRule(jobId: string | number): Promise<JobLayerOrderRule | null> {
+      this.error = ''
+      try {
+        const response = await fetch(apiUrl(`/api/jobs/${jobId}/layer-order-rule`), { cache: 'no-store' })
+        if (!response.ok) throw new Error(`Layer rule request failed: ${response.status}`)
+        return await response.json() as JobLayerOrderRule
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      }
+    },
+    async previewJobLayerOrderRule(jobId: string | number, frontToBackLabelIds: number[]): Promise<JobLayerOrderPreview | null> {
+      this.error = ''
+      try {
+        const response = await fetch(apiUrl(`/api/jobs/${jobId}/layer-order-rule/preview`), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ front_to_back_label_ids: frontToBackLabelIds }),
+        })
+        if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || `Layer rule preview failed: ${response.status}`)
+        return await response.json() as JobLayerOrderPreview
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      }
+    },
+    async saveJobLayerOrderRule(jobId: string | number, frontToBackLabelIds: number[], autoApply: boolean, applyExisting: boolean): Promise<JobLayerOrderRule | null> {
+      this.error = ''
+      try {
+        const response = await fetch(apiUrl(`/api/jobs/${jobId}/layer-order-rule`), {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ front_to_back_label_ids: frontToBackLabelIds, auto_apply: autoApply, apply_existing: applyExisting }),
+        })
+        if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || `Save layer rule failed: ${response.status}`)
+        return await response.json() as JobLayerOrderRule
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return null
+      }
+    },
+    async deleteJobLayerOrderRule(jobId: string | number): Promise<boolean> {
+      this.error = ''
+      try {
+        const response = await fetch(apiUrl(`/api/jobs/${jobId}/layer-order-rule`), { method: 'DELETE' })
+        if (!response.ok) throw new Error(`Delete layer rule failed: ${response.status}`)
+        return true
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error'
+        return false
       }
     },
   },

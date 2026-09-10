@@ -33,6 +33,9 @@ from app.schemas.job import (
     JobLabelPayload,
     JobLabelRead,
     JobLabelUsageRead,
+    JobLayerOrderPreviewRead,
+    JobLayerOrderRulePayload,
+    JobLayerOrderRuleRead,
     JobRead,
 )
 from app.services.download_filenames import (
@@ -49,6 +52,15 @@ from app.services.image_storage import InvalidImageError, save_uploaded_image
 from app.services.importers import import_labels_for_job
 from app.services.label_colors import is_color_conflict, normalize_hex_color, pick_distinct_label_color
 from app.services.labelme_export import build_job_labelme_zip
+from app.services.job_layer_order import (
+    apply_job_layer_order_to_annotations,
+    apply_job_layer_rule_to_image,
+    front_to_back_label_ids,
+    get_job_layer_rule,
+    job_layer_order_labels,
+    preview_job_layer_order,
+    upsert_job_layer_rule,
+)
 from app.services.export_visual import (
     build_job_color_mask_zip,
     build_job_indexed_mask_zip,
@@ -355,6 +367,93 @@ def delete_job_label(
     )
 
 
+@router.get("/{job_id}/layer-order-rule", response_model=JobLayerOrderRuleRead)
+def get_job_layer_order_rule(job_id: int, db: Session = Depends(get_db)) -> JobLayerOrderRuleRead:
+    job = _get_job_for_layer_rule(job_id, db)
+    rule = get_job_layer_rule(db, job.id)
+    available_ids = [label.id for label in job_layer_order_labels(db, job) if label.shape_type != "classification"]
+    if rule is None:
+        return JobLayerOrderRuleRead(
+            job_id=job.id,
+            configured=False,
+            auto_apply=False,
+            unconfigured_label_ids=available_ids,
+        )
+    ordered_ids = front_to_back_label_ids(rule)
+    configured_ids = set(ordered_ids)
+    return JobLayerOrderRuleRead(
+        job_id=job.id,
+        configured=True,
+        auto_apply=rule.auto_apply,
+        front_to_back_label_ids=ordered_ids,
+        unconfigured_label_ids=[label_id for label_id in available_ids if label_id not in configured_ids],
+    )
+
+
+@router.post("/{job_id}/layer-order-rule/preview", response_model=JobLayerOrderPreviewRead)
+def preview_job_layer_order_rule(
+    job_id: int,
+    payload: JobLayerOrderRulePayload,
+    db: Session = Depends(get_db),
+) -> JobLayerOrderPreviewRead:
+    job = _get_job_for_layer_rule(job_id, db)
+    try:
+        preview = preview_job_layer_order(db, job, payload.front_to_back_label_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return JobLayerOrderPreviewRead(job_id=job.id, **preview.__dict__)
+
+
+@router.put("/{job_id}/layer-order-rule", response_model=JobLayerOrderRuleRead)
+def save_job_layer_order_rule(
+    job_id: int,
+    payload: JobLayerOrderRulePayload,
+    db: Session = Depends(get_db),
+) -> JobLayerOrderRuleRead:
+    job = _get_job_for_layer_rule(job_id, db)
+    try:
+        rule = upsert_job_layer_rule(
+            db,
+            job,
+            label_ids=payload.front_to_back_label_ids,
+            auto_apply=payload.auto_apply,
+        )
+        preview = (
+            apply_job_layer_order_to_annotations(db, job, payload.front_to_back_label_ids)
+            if payload.apply_existing
+            else None
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to save layer rule for job %s", job_id)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to save layer rule")
+
+    return JobLayerOrderRuleRead(
+        job_id=job.id,
+        configured=True,
+        auto_apply=rule.auto_apply,
+        front_to_back_label_ids=front_to_back_label_ids(rule),
+        applied_existing=payload.apply_existing,
+        image_count=preview.image_count if preview else 0,
+        annotation_count=preview.annotation_count if preview else 0,
+        changed_image_count=preview.changed_image_count if preview else 0,
+        changed_annotation_count=preview.changed_annotation_count if preview else 0,
+    )
+
+
+@router.delete("/{job_id}/layer-order-rule", status_code=status.HTTP_204_NO_CONTENT)
+def delete_job_layer_order_rule(job_id: int, db: Session = Depends(get_db)) -> None:
+    job = _get_job_for_layer_rule(job_id, db)
+    rule = get_job_layer_rule(db, job.id)
+    if rule is not None:
+        db.delete(rule)
+        db.commit()
+
+
 @router.put("/{job_id}/images/{image_id}/annotations", response_model=list[AnnotationRead])
 def save_image_annotations(
     job_id: int,
@@ -390,6 +489,9 @@ def save_image_annotations(
         for index, annotation in enumerate(normalized_writes)
     ]
     db.add_all(saved_annotations)
+    db.flush()
+    if payload.apply_layer_rule:
+        apply_job_layer_rule_to_image(db, job, image_id)
     db.commit()
 
     for annotation in saved_annotations:
@@ -445,6 +547,8 @@ async def import_job_labels(
             import_mode=payload.import_mode,
             missing_label_policy=payload.missing_label_policy,
         )
+        for image_id in result.get("affected_image_ids", []):
+            apply_job_layer_rule_to_image(db, job, image_id)
         db.commit()
     except ValueError as exc:
         db.rollback()
@@ -737,6 +841,20 @@ def _get_job_for_label_management(job_id: int, db: Session) -> Job:
             selectinload(Job.project).selectinload(Project.labels),
             selectinload(Job.task).selectinload(Task.images),
             selectinload(Job.task).selectinload(Task.project).selectinload(Project.labels),
+        )
+    )
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return job
+
+
+def _get_job_for_layer_rule(job_id: int, db: Session) -> Job:
+    job = db.scalar(
+        select(Job)
+        .where(Job.id == job_id)
+        .options(
+            selectinload(Job.labels),
+            selectinload(Job.project).selectinload(Project.labels),
         )
     )
     if job is None:

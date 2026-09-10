@@ -1545,6 +1545,252 @@ button.server-video-selection-row:hover,
   overflow: hidden;
 }
 
+.job-layer-rule-modal {
+  display: flex;
+  width: min(640px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  flex-direction: column;
+}
+
+.job-layer-rule-modal-body {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  padding: 18px 24px;
+}
+
+.job-layer-rule-description,
+.job-layer-rule-help {
+  margin: 0;
+  color: #405058;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.job-layer-rule-notice {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #b8d9ee;
+  border-radius: 6px;
+  color: #17456a;
+  background: #edf7fd;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.job-layer-rule-boundary {
+  color: #22313a;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.job-layer-rule-list {
+  display: grid;
+  gap: 6px;
+}
+
+.job-layer-rule-row {
+  display: grid;
+  grid-template-columns: 20px 14px minmax(0, 1fr) minmax(70px, max-content) max-content;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #d8e0e4;
+  border-radius: 6px;
+  background: #f8fafb;
+}
+
+.job-layer-rule-row.is-dragging {
+  opacity: 0.55;
+}
+
+.job-layer-rule-handle {
+  color: #5b6970;
+  cursor: grab;
+  font-weight: 800;
+}
+
+.job-layer-rule-name {
+  min-width: 0;
+  overflow: hidden;
+  color: #172026;
+  font-size: 14px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-layer-rule-shape {
+  color: #56646c;
+  font-size: 12px;
+}
+
+.job-layer-rule-actions,
+.job-layer-rule-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.job-layer-rule-footer {
+  flex: 0 0 auto;
+  padding: 14px 24px;
+  border-top: 1px solid #e5e7eb;
+  background: #ffffff;
+}
+
+.job-layer-rule-footer-spacer {
+  flex: 1 1 auto;
+}
+
+/* Teleported confirmations deliberately sit one modal layer above an app modal. */
+.job-layer-rule-confirm-backdrop,
+.tracking-start-confirm-backdrop {
+  position: fixed;
+  z-index: 10001;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.34);
+}
+
+.job-layer-rule-confirm-dialog,
+.tracking-start-confirm-dialog {
+  position: relative;
+  z-index: 10002;
+  width: min(500px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  border: 1px solid rgba(23, 32, 38, 0.12);
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+}
+
+.job-layer-rule-confirm-header,
+.job-layer-rule-confirm-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+}
+
+.job-layer-rule-confirm-header {
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.job-layer-rule-confirm-header h3 {
+  margin: 0;
+  color: #172026;
+  font-size: 18px;
+}
+
+.job-layer-rule-confirm-body {
+  padding: 18px 20px;
+  color: #34434a;
+  line-height: 1.55;
+}
+
+.job-layer-rule-confirm-body p {
+  margin: 0;
+}
+
+.job-layer-rule-confirm-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.job-layer-rule-confirm-stats > div {
+  padding: 10px;
+  border: 1px solid #d8e0e4;
+  border-radius: 6px;
+  background: #f8fafb;
+}
+
+.job-layer-rule-confirm-stats dt {
+  color: #526169;
+  font-size: 12px;
+}
+
+.job-layer-rule-confirm-stats dd {
+  margin: 3px 0 0;
+  color: #172026;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.job-layer-rule-confirm-safety {
+  color: #405058;
+  font-size: 13px;
+}
+
+.job-layer-rule-confirm-footer {
+  justify-content: flex-end;
+  border-top: 1px solid #e5e7eb;
+}
+
+.nested-confirm-header,
+.nested-confirm-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+}
+
+.nested-confirm-header {
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.nested-confirm-header h3 {
+  margin: 0;
+  color: #172026;
+  font-size: 18px;
+}
+
+.nested-confirm-body {
+  padding: 18px 20px;
+  color: #34434a;
+  line-height: 1.55;
+}
+
+.nested-confirm-body p {
+  margin: 0;
+}
+
+.nested-confirm-footer {
+  justify-content: flex-end;
+  border-top: 1px solid #e5e7eb;
+}
+
+@media (max-width: 560px) {
+  .job-layer-rule-row {
+    grid-template-columns: 20px 14px minmax(0, 1fr) max-content;
+  }
+
+  .job-layer-rule-shape {
+    display: none;
+  }
+
+  .job-layer-rule-footer {
+    flex-wrap: wrap;
+  }
+
+  .job-layer-rule-confirm-stats {
+    grid-template-columns: 1fr;
+  }
+}
+
 .app-modal h2 {
   margin: 0 0 18px;
   color: #172026;
