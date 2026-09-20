@@ -550,6 +550,10 @@ Research videos can also be trimmed before annotation while preserving the relat
 
 # Development
 
+## Releases and Production Updates
+
+The root `VERSION` file is the application version and formal release tags use the matching `vMAJOR.MINOR.PATCH` form. Production updates are intentionally explicit: see [docs/RELEASE.md](docs/RELEASE.md) and `scripts/release/` for the required precheck, verified PostgreSQL backup, deployment, and smoke-test workflow. A verified database backup is mandatory before a production database migration.
+
 ## Backend
 
 ```bash

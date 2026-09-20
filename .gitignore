@@ -25,6 +25,8 @@ frontend/vite.config.d.ts
 
 # Runtime data
 logs/
+backups/
+.runtime/
 storage/*
 !storage/.gitkeep
 !storage/uploads/
@@ -34,6 +36,7 @@ postgres_data/
 
 # Local artifacts
 .local/
+/ICO评分表格翻译版本.xlsx
 .DS_Store
 Thumbs.db
 =*

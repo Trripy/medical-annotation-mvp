@@ -1,0 +1,22 @@
+name: Release Metadata Check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  release-metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check release metadata
+        run: |
+          test -f VERSION
+          test -f CHANGELOG.md
+          test -f docs/RELEASE.md
+          test -f .github/RELEASE_TEMPLATE.md
+          grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' VERSION
+      - name: Check release script syntax
+        run: bash -n scripts/release/*.sh
+      - name: Check patch whitespace
+        run: git diff --check HEAD^ HEAD
