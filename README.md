@@ -1,52 +1,12 @@
 <p align="center">
-  <img src="./assets/logo.png" width="108" alt="Medical Annotation MVP logo" />
+  <img src="./assets/logo.png" width="196" alt="Medical Annotation MVP logo" />
 </p>
 
 <h1 align="center">Medical Annotation MVP</h1>
 
 <p align="center">
-  <strong>GPU-assisted annotation for medical images and surgical-video research.</strong><br />
-  面向医学图像与手术视频研究的 GPU 辅助标注平台。
+  <strong>GPU-assisted annotation for medical images and surgical-video research.</strong>
 </p>
-
-<p align="center">
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#product-demo">Product demo</a> ·
-  <a href="#features-at-a-glance">Features</a> ·
-  <a href="#deployment-at-a-glance">Deployment</a> ·
-  <a href="#research-scope-and-data-safety">Data safety</a>
-</p>
-
-> **Research software / 研究软件。** This project supports research data preparation and annotation workflows. It is not medical advice, a diagnostic device, or a clinical decision-support system.
-
-## Overview
-
-Medical Annotation MVP brings image annotation, surgical-video curation, AI-assisted segmentation, and research-oriented export into one self-hosted workspace. It is designed for teams that need an auditable path from raw media to reusable annotation datasets without moving data to a public cloud.
-
-The project follows the practical conventions common in mature annotation ecosystems: a clear product entry point, focused demonstrations, reproducible local deployment, explicit data boundaries, and exportable results. The interface currently supports Chinese and English.
-
-### What it is for
-
-- Annotating images or extracted video frames with polygons and rectangles.
-- Refining regions with SAM 2 point- and box-prompted segmentation.
-- Managing surgical-video footage, frame extraction, non-destructive trims, notes, and provenance.
-- Recording surgical phases and research skill-assessment metadata.
-- Exporting LabelMe-compatible annotations, masks, overlays, and phase data.
-
-### System architecture
-
-```text
-Browser (Vue 3 + TypeScript)
-            │
-            ▼
-FastAPI service ───── PostgreSQL metadata
-     │       │
-     │       ├──── Local media / annotation storage
-     │       ├──── FFmpeg / ffprobe video processing
-     │       └──── SAM 2 GPU inference
-     ▼
-Export: LabelMe JSON · masks · overlays · phase records
-```
 
 ## Product demo
 
@@ -90,6 +50,45 @@ SAM 2 can generate and refine masks from point or box prompts, while the operato
     </td>
   </tr>
 </table>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#product-demo">Product demo</a> ·
+  <a href="#features-at-a-glance">Features</a> ·
+  <a href="#deployment-at-a-glance">Deployment</a> ·
+  <a href="#research-scope-and-data-safety">Data safety</a>
+</p>
+
+> **Research software.** This project supports research data preparation and annotation workflows. It is not medical advice, a diagnostic device, or a clinical decision-support system.
+
+## Overview
+
+Medical Annotation MVP brings image annotation, surgical-video curation, AI-assisted segmentation, and research-oriented export into one self-hosted workspace. It is designed for teams that need an auditable path from raw media to reusable annotation datasets without moving data to a public cloud.
+
+The project follows the practical conventions common in mature annotation ecosystems: a clear product entry point, focused demonstrations, reproducible local deployment, explicit data boundaries, and exportable results. The interface currently supports Chinese and English.
+
+### What it is for
+
+- Annotating images or extracted video frames with polygons and rectangles.
+- Refining regions with SAM 2 point- and box-prompted segmentation.
+- Managing surgical-video footage, frame extraction, non-destructive trims, notes, and provenance.
+- Recording surgical phases and research skill-assessment metadata.
+- Exporting LabelMe-compatible annotations, masks, overlays, and phase data.
+
+### System architecture
+
+```text
+Browser (Vue 3 + TypeScript)
+            │
+            ▼
+FastAPI service ───── PostgreSQL metadata
+     │       │
+     │       ├──── Local media / annotation storage
+     │       ├──── FFmpeg / ffprobe video processing
+     │       └──── SAM 2 GPU inference
+     ▼
+Export: LabelMe JSON · masks · overlays · phase records
+```
 
 ## Features at a glance
 
