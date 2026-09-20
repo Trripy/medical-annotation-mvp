@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - name: Check release metadata
         run: |
           test -f VERSION
@@ -19,4 +21,9 @@ jobs:
       - name: Check release script syntax
         run: bash -n scripts/release/*.sh
       - name: Check patch whitespace
-        run: git diff --check HEAD^ HEAD
+        run: |
+          if git rev-parse HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^ HEAD
+          else
+            git diff-tree --check --root HEAD
+          fi
