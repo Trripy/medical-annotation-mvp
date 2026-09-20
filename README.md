@@ -1,3 +1,215 @@
+<p align="center">
+  <img src="./assets/logo.png" width="108" alt="Medical Annotation MVP logo" />
+</p>
+
+<h1 align="center">Medical Annotation MVP</h1>
+
+<p align="center">
+  <strong>GPU-assisted annotation for medical images and surgical-video research.</strong><br />
+  面向医学图像与手术视频研究的 GPU 辅助标注平台。
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#product-demo">Product demo</a> ·
+  <a href="#features-at-a-glance">Features</a> ·
+  <a href="#deployment-at-a-glance">Deployment</a> ·
+  <a href="#research-scope-and-data-safety">Data safety</a>
+</p>
+
+> **Research software / 研究软件。** This project supports research data preparation and annotation workflows. It is not medical advice, a diagnostic device, or a clinical decision-support system.
+
+## Overview
+
+Medical Annotation MVP brings image annotation, surgical-video curation, AI-assisted segmentation, and research-oriented export into one self-hosted workspace. It is designed for teams that need an auditable path from raw media to reusable annotation datasets without moving data to a public cloud.
+
+The project follows the practical conventions common in mature annotation ecosystems: a clear product entry point, focused demonstrations, reproducible local deployment, explicit data boundaries, and exportable results. The interface currently supports Chinese and English.
+
+### What it is for
+
+- Annotating images or extracted video frames with polygons and rectangles.
+- Refining regions with SAM 2 point- and box-prompted segmentation.
+- Managing surgical-video footage, frame extraction, non-destructive trims, notes, and provenance.
+- Recording surgical phases and research skill-assessment metadata.
+- Exporting LabelMe-compatible annotations, masks, overlays, and phase data.
+
+### System architecture
+
+```text
+Browser (Vue 3 + TypeScript)
+            │
+            ▼
+FastAPI service ───── PostgreSQL metadata
+     │       │
+     │       ├──── Local media / annotation storage
+     │       ├──── FFmpeg / ffprobe video processing
+     │       └──── SAM 2 GPU inference
+     ▼
+Export: LabelMe JSON · masks · overlays · phase records
+```
+
+## Product demo
+
+All demonstrations below are included in this repository. Before publishing a fork or derivative, verify that the media contains no patient-identifying information and that you have permission to share it.
+
+### AI-assisted image annotation
+
+SAM 2 can generate and refine masks from point or box prompts, while the operator retains control over the final annotation.
+
+<p align="center">
+  <img src="./assets/sam2-annotation.gif" width="900" alt="SAM 2 assisted medical image annotation" />
+</p>
+
+### Surgical-video research workflow
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <strong>Surgical phase annotation</strong><br />
+      <img src="./assets/phase-annotation.gif" alt="Surgical phase annotation demo" />
+    </td>
+    <td width="50%" align="center">
+      <strong>Non-destructive video trimming</strong><br />
+      <img src="./assets/video-trimming.gif" alt="Research video trimming demo" />
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>Ultrasound-probe tracking</strong><br />
+      <img src="./assets/ultrasound-probe-tracking.gif" alt="Ultrasound probe tracking demo" />
+    </td>
+    <td width="50%" align="center">
+      <strong>Forceps tracking</strong><br />
+      <img src="./assets/forceps-tracking.gif" alt="Forceps tracking demo" />
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <strong>OCT tracking</strong><br />
+      <img src="./assets/oct-tracking.gif" width="720" alt="OCT tracking demo" />
+    </td>
+  </tr>
+</table>
+
+## Features at a glance
+
+| Area | Included capabilities |
+| --- | --- |
+| Dataset management | Projects, tasks, labels, image batches, and local media storage. |
+| Manual annotation | Polygon and rectangle tools, label-specific colors, undo/reset, and per-image navigation. |
+| SAM 2 assistance | Point and box prompts, multimask candidates, refinement, polygon simplification, and edge-aware cleanup. |
+| Surgical video | Video upload/import, thumbnails, extracted frames, browser preview, provenance, notes, visibility controls, and non-destructive clips. |
+| Research records | Surgical phase annotation and skill-assessment support for research workflows. |
+| Export | LabelMe JSON, binary masks, visual overlays, phase annotations, and project artifacts. |
+| Local deployment | Self-hosted Vue frontend, FastAPI backend, PostgreSQL metadata store, local file storage, and optional CUDA inference. |
+| Internationalization | Chinese and English user interface. |
+
+## Quick start
+
+The preferred setup runs PostgreSQL and the frontend through Docker Compose, while the FastAPI service runs on the host so it can access the GPU and local SAM 2 installation.
+
+```bash
+git clone https://github.com/Trripy/medical-annotation-mvp.git
+cd medical-annotation-mvp
+cp .env.example .env
+
+# Start PostgreSQL. The default host port is 5433.
+docker compose up -d db
+```
+
+Create a Python environment, install backend dependencies, and install SAM 2 according to its upstream instructions. Then update `.env` so `CONDA_ENV`, `SAM2_REPO_ROOT`, `SAM2_CHECKPOINT`, and `SAM2_DEVICE` match the machine.
+
+```bash
+# Linux host backend
+./scripts/start_backend_host.sh
+
+# Separate terminal: start frontend container
+./scripts/start_frontend.sh
+```
+
+Open `http://localhost:5173`. The frontend calls the backend on the current browser host at port `8000` unless `VITE_API_BASE_URL` is configured.
+
+### Windows workstation
+
+The platform can also run on Windows. Use PowerShell or Git Bash, install Docker Desktop if using the bundled PostgreSQL service, and set Windows-style paths in environment variables where needed. GPU-based SAM 2 requires a compatible CUDA/PyTorch installation; CPU execution is possible but substantially slower.
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d db
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r .\backend\requirements.txt
+
+cd .\frontend
+npm install
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+In another PowerShell window, set `SAM2_REPO_ROOT` and other required variables from `.env`, then start the API:
+
+```powershell
+$env:PYTHONPATH = "$PWD\backend;$env:SAM2_REPO_ROOT"
+python -m alembic -c .\backend\alembic.ini upgrade head
+python -m uvicorn app.main:app --app-dir .\backend --host 127.0.0.1 --port 8000
+```
+
+## Deployment at a glance
+
+| Requirement | Recommendation |
+| --- | --- |
+| GPU inference | Linux with NVIDIA GPU and a compatible CUDA/PyTorch stack is recommended. |
+| Database | PostgreSQL 16 via the supplied `docker-compose.yml`; default host port is `5433`. |
+| Video tools | Install `ffmpeg` and `ffprobe` for research-video trimming. |
+| Model files | Keep the SAM 2 repository and checkpoint outside Git; configure their local paths in `.env`. |
+| Network exposure | Restrict CORS, use authentication and TLS, set a strong database password, and take verified backups. |
+
+Copy `.env.example` to `.env`; it documents the available database, storage, SAM 2, FFmpeg, and server-side import settings. The following commands validate a running installation:
+
+```bash
+curl http://127.0.0.1:8000/api/v1/health
+curl http://127.0.0.1:8000/api/v1/sam2/health
+```
+
+The SAM 2 health endpoint will report unavailable if the model repository, checkpoint, GPU runtime, or model load is not ready. Manual annotation and non-SAM workflows can still be assessed independently.
+
+## Typical workflow
+
+1. Create a project and define labels, shape types, and colors.
+2. Upload images or ingest approved research video.
+3. Annotate manually or use SAM 2 prompts to propose masks.
+4. Review and refine the result at image/frame level.
+5. Add phases, notes, clips, and skill-assessment data as needed.
+6. Export the required research artifacts.
+
+## Development and releases
+
+```bash
+# Backend tests
+cd backend
+pytest -q
+
+# Frontend checks and build
+cd ../frontend
+npm install
+npm run build
+```
+
+The root [VERSION](./VERSION) file is the authoritative repository version. The release workflow checks that it is valid SemVer and has a corresponding entry in [CHANGELOG.md](./CHANGELOG.md). Before a production update, review [docs/RELEASE.md](./docs/RELEASE.md).
+
+## Research scope and data safety
+
+- Keep clinical identifiers, credentials, database dumps, private checkpoints, and raw patient media out of Git.
+- Confirm that all demo assets and exported datasets are de-identified and authorized for their intended audience.
+- Back up the PostgreSQL database and `LOCAL_STORAGE_ROOT` together; metadata without media, or media without metadata, is incomplete.
+- This software assists data preparation. Final annotations remain the responsibility of qualified researchers and reviewers.
+- Validate any deployment against the governance, privacy, security, and regulatory requirements of your institution before processing real clinical data.
+
+## Detailed reference
+
+<details>
+<summary>Expand the original detailed feature, configuration, deployment, testing, and contribution guide.</summary>
+
 # Medical Annotation MVP
 
 **A GPU-assisted annotation platform for medical images and surgical videos.**
@@ -722,3 +934,5 @@ Please do not include patient data, private datasets, credentials, or model chec
 This repository does not currently include a project `LICENSE`.
 
 Before public redistribution or formal open-source release, select an appropriate project license and review the licenses of bundled or required third-party components, including SAM 2, PyTorch, FFmpeg, PostgreSQL, Vue, and other dependencies.
+
+</details>
