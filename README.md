@@ -33,6 +33,13 @@ SAM 2 can generate and refine masks from point or box prompts, while the operato
       <img src="./assets/video-trimming.gif" alt="Research video trimming demo" />
     </td>
   </tr>
+</table>
+
+### SAM 2 tracking
+
+Examples of SAM 2-assisted tracking for surgical instruments and imaging devices.
+
+<table>
   <tr>
     <td width="50%" align="center">
       <strong>Ultrasound-probe tracking</strong><br />
