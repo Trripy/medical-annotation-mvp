@@ -253,8 +253,8 @@ def _run_ffmpeg_trim(
         video_filter,
         "-map",
         "0:v:0",
-        "-vsync",
-        "0",
+        "-fps_mode",
+        "passthrough",
         *_video_encoder_args(ffmpeg_binary),
         "-pix_fmt",
         "yuv420p",
@@ -265,7 +265,7 @@ def _run_ffmpeg_trim(
         str(part_path),
     ]
     if has_audio:
-        output_index = command.index("-vsync")
+        output_index = command.index("-fps_mode")
         command[output_index:output_index] = [
             "-af",
             f"atrim=start={start_seconds:.9f}:duration={duration_seconds:.9f},asetpts=PTS-STARTPTS",
@@ -283,7 +283,7 @@ def _run_ffmpeg_trim(
 
 
 def _source_has_audio(ffmpeg_binary: str, source_path: Path) -> bool:
-    ffprobe_binary = str(Path(ffmpeg_binary).with_name("ffprobe"))
+    ffprobe_binary = _ffprobe_binary_for(ffmpeg_binary)
     if not Path(ffprobe_binary).is_file():
         return False
     completed = subprocess.run(
@@ -327,7 +327,7 @@ def _video_encoder_args(ffmpeg_binary: str) -> list[str]:
 
 
 def _validate_trimmed_container(*, ffmpeg_binary: str, video_path: Path) -> None:
-    ffprobe_binary = str(Path(ffmpeg_binary).with_name("ffprobe"))
+    ffprobe_binary = _ffprobe_binary_for(ffmpeg_binary)
     if not Path(ffprobe_binary).is_file():
         raise ResearchVideoTrimError("FFprobe is not available.")
     completed = subprocess.run(
@@ -372,6 +372,11 @@ def _validate_trimmed_container(*, ffmpeg_binary: str, video_path: Path) -> None
                 raise ResearchVideoTrimError("Trimmed video timestamps do not start at zero.")
         except ValueError as exc:
             raise ResearchVideoTrimError("Trimmed video could not be validated.") from exc
+
+
+def _ffprobe_binary_for(ffmpeg_binary: str) -> str:
+    ffmpeg_path = Path(ffmpeg_binary)
+    return str(ffmpeg_path.with_name(f"ffprobe{ffmpeg_path.suffix}"))
 
 
 def _ensure_managed_storage_space(

@@ -20,6 +20,7 @@ from app.services.research_video_trim import (
     minimum_keep_frames,
     trim_research_video,
     validate_trim_range,
+    _ffprobe_binary_for,
     _run_ffmpeg_trim,
     _video_encoder_args,
 )
@@ -343,6 +344,11 @@ def test_video_encoder_args_rejects_when_h264_encoder_is_unavailable(monkeypatch
         _video_encoder_args(str(FFMPEG))
 
 
+def test_ffprobe_binary_preserves_platform_executable_suffix() -> None:
+    assert Path(_ffprobe_binary_for("C:/tools/ffmpeg.exe")).name == "ffprobe.exe"
+    assert Path(_ffprobe_binary_for("/usr/bin/ffmpeg")).name == "ffprobe"
+
+
 def test_ffmpeg_select_filter_uses_exclusive_end_minus_one(monkeypatch, tmp_path: Path) -> None:
     commands: list[list[str]] = []
 
@@ -366,3 +372,5 @@ def test_ffmpeg_select_filter_uses_exclusive_end_minus_one(monkeypatch, tmp_path
 
     ffmpeg_command = commands[0]
     assert ffmpeg_command[ffmpeg_command.index("-vf") + 1] == "select=between(n\\,10\\,29),setpts=PTS-STARTPTS"
+    assert ffmpeg_command[ffmpeg_command.index("-fps_mode") + 1] == "passthrough"
+    assert "-vsync" not in ffmpeg_command
