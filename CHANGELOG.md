@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Research video name privacy mode for masking sensitive filenames across video annotation interfaces.
+
 ### Changed
 
 ### Fixed

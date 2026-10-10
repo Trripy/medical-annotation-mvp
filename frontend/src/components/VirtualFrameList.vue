@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 
 import type { ResearchVideoFrame } from '../stores/researchVideos'
 import { getVirtualRange } from '../utils/researchVideoLayout'
+import { getResearchVideoFrameDisplayName } from '../utils/videoPrivacy'
 
 const DEFAULT_ROW_HEIGHT = 54
 const DEFAULT_OVERSCAN = 8
@@ -12,9 +13,11 @@ const props = withDefaults(defineProps<{
   totalCount: number
   selectedFrameIndex: number
   getFrame: (index: number) => ResearchVideoFrame | undefined
+  hideFrameNames?: boolean
   rowHeight?: number
   overscan?: number
 }>(), {
+  hideFrameNames: false,
   rowHeight: DEFAULT_ROW_HEIGHT,
   overscan: DEFAULT_OVERSCAN,
 })
@@ -24,7 +27,7 @@ const emit = defineEmits<{
   select: [index: number]
 }>()
 
-const { t } = useI18n()
+const { locale, t } = useI18n()
 const viewportRef = ref<HTMLElement | null>(null)
 const scrollTop = ref(0)
 const viewportHeight = ref(0)
@@ -145,6 +148,11 @@ function formatTimestamp(timestampMs: number) {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(milliseconds).padStart(2, '0')}`
 }
 
+function frameDisplayName(frame: ResearchVideoFrame | undefined, index: number) {
+  if (!frame) return `${index + 1}. ${t('common.loadingFrame')}`
+  return `${index + 1}. ${getResearchVideoFrameDisplayName(frame, props.hideFrameNames, locale.value)}`
+}
+
 defineExpose({
   scrollToIndex,
 })
@@ -174,7 +182,7 @@ defineExpose({
             @click="emit('select', entry.index)"
           >
             <span>
-              {{ entry.frame ? `${entry.index + 1}. ${entry.frame.filename}` : `${entry.index + 1}. ${t('common.loadingFrame')}` }}
+              {{ frameDisplayName(entry.frame, entry.index) }}
             </span>
             <span class="frame-choice-badge review">
               {{ entry.frame ? formatTimestamp(entry.frame.timestamp_ms) : '--:--.--' }}

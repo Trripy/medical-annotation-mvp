@@ -348,6 +348,16 @@ const enUS = {
     placeholder: 'The base project is ready. DICOM/NIfTI viewing, annotation tasks, and label export can be connected next.',
     storageRoot: 'Storage root: {path}',
   },
+  privacy: {
+    videoNames: {
+      hide: 'Hide video names',
+      hidden: 'Video names hidden',
+      show: 'Show video names',
+      description: 'Privacy mode hides video names in the interface only. It does not rename files or modify stored data.',
+      alias: 'Video #{id}',
+      exportWarning: 'Exported filenames may still use the original stored names.',
+    },
+  },
   landing: {
     subtitle: 'Annotation',
     eyebrow: 'Task entry',

@@ -18,6 +18,7 @@ import { useVideoPlaybackRate } from '../composables/useVideoPlaybackRate.ts'
 import { useResearchPhasesStore } from '../stores/researchPhases.ts'
 import { useResearchSkillsStore } from '../stores/researchSkills.ts'
 import { useResearchVideosStore, type ResearchVideoFrame, type ResearchVideoWorkspaceDetail } from '../stores/researchVideos.ts'
+import { usePrivacyStore } from '../stores/privacy.ts'
 import { useUsersStore } from '../stores/users.ts'
 import type { ResearchPhaseAnnotationSetSummary } from '../types/researchPhase.ts'
 import type { ResearchSkillCriterion, ResearchSkillEvidence, ResearchSkillValidationIssue } from '../types/researchSkill.ts'
@@ -26,6 +27,7 @@ import { getPhaseProtocolDisplayName, translateApiErrorMessage, translateStatus,
 import { parseResearchFrameQuery } from '../utils/researchPhaseUi.ts'
 import { buildIntervalEvidence, buildPhaseSegmentOccurrences, buildPointEvidence, findSkillScore, getApplicableCriteria } from '../utils/researchSkill.ts'
 import { formatSkillTime } from '../utils/researchSkillUi.ts'
+import { getResearchVideoDisplayName } from '../utils/videoPrivacy.ts'
 
 const props = defineProps<{ videoId: string }>()
 
@@ -35,6 +37,7 @@ const { locale, t } = useI18n()
 const videosStore = useResearchVideosStore()
 const skillsStore = useResearchSkillsStore()
 const phasesStore = useResearchPhasesStore()
+const privacyStore = usePrivacyStore()
 const usersStore = useUsersStore()
 
 const {
@@ -61,6 +64,7 @@ const {
   selectedScore,
 } = storeToRefs(skillsStore)
 const { protocols, annotationSets, protocolDetails } = storeToRefs(phasesStore)
+const { hideResearchVideoNames } = storeToRefs(privacyStore)
 const { currentUsername } = storeToRefs(usersStore)
 
 const videoRef = ref<HTMLVideoElement | null>(null)
@@ -96,6 +100,9 @@ let validateTimer: number | null = null
 let overallCommentTimer: number | null = null
 
 const video = computed(() => workspaceVideo.value)
+const videoDisplayName = computed(() =>
+  getResearchVideoDisplayName(video.value, hideResearchVideoNames.value, locale.value, t('skillAssessment.title')),
+)
 useVideoPlaybackRate(videoRef, computed(() => video.value?.file_url ?? null))
 const currentLocale = computed(() => locale.value as SupportedLocale)
 const totalFrames = computed(() => video.value?.frame_count ?? 0)
@@ -578,7 +585,7 @@ function togglePlayback() {
       :current-frame-index="selectedFrameIndex"
       :meta-items="workspaceHeaderMetaItems"
       :task-label="t('taskNav.skill')"
-      :title="video?.name ?? t('skillAssessment.title')"
+      :title="videoDisplayName"
       :video-id="videoId"
     />
 

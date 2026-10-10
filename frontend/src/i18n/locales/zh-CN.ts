@@ -350,6 +350,16 @@ const zhCN: typeof enUS = {
     placeholder: '基础项目已就绪，后续可接入 DICOM/NIfTI 浏览、标注任务和标签导出。',
     storageRoot: '存储根目录：{path}',
   },
+  privacy: {
+    videoNames: {
+      hide: '隐藏视频名',
+      hidden: '视频名已隐藏',
+      show: '显示视频名',
+      description: '隐私模式仅隐藏界面中的视频名称，不会重命名文件或修改数据。',
+      alias: '视频 #{id}',
+      exportWarning: '导出的文件名可能仍使用真实原始名称。',
+    },
+  },
   landing: {
     subtitle: '标注',
     eyebrow: '任务入口',

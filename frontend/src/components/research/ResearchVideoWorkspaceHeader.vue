@@ -3,6 +3,7 @@ import { Back } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 
 import ResearchVideoTaskNav from './ResearchVideoTaskNav.vue'
+import VideoNamePrivacyToggle from './VideoNamePrivacyToggle.vue'
 import type { ResearchTaskKey } from '../../utils/researchWorkflowUi.ts'
 
 defineProps<{
@@ -37,6 +38,7 @@ const { t } = useI18n()
         :current-frame-index="currentFrameIndex"
         :video-id="videoId"
       />
+      <VideoNamePrivacyToggle compact />
     </div>
 
     <div class="research-workspace-meta" :aria-label="t('accessibility.videoWorkspaceStatus')">
@@ -65,7 +67,7 @@ const { t } = useI18n()
 
 .research-workspace-header-top {
   display: grid;
-  grid-template-columns: auto auto auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto auto minmax(0, 1fr) auto auto;
   gap: 0.45rem;
   align-items: center;
   min-width: 0;

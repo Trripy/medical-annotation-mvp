@@ -8,9 +8,12 @@ import { useRouter } from 'vue-router'
 
 import AppSidebar from '../components/AppSidebar.vue'
 import VideoPlaybackRateControl from '../components/VideoPlaybackRateControl.vue'
+import VideoNamePrivacyToggle from '../components/research/VideoNamePrivacyToggle.vue'
 import VideoTrimTimeline from '../components/research/VideoTrimTimeline.vue'
 import { useVideoPlaybackRate } from '../composables/useVideoPlaybackRate'
+import { usePrivacyStore } from '../stores/privacy'
 import { useResearchVideosStore, type ResearchVideoTrimInfo } from '../stores/researchVideos'
+import { getResearchVideoDisplayName } from '../utils/videoPrivacy'
 import {
   backendRangeToUi,
   buildTrimPayload,
@@ -35,9 +38,11 @@ const props = defineProps<{
 }>()
 
 const router = useRouter()
-const { t } = useI18n()
+const { locale, t } = useI18n()
 const store = useResearchVideosStore()
+const privacyStore = usePrivacyStore()
 const { loading, saving } = storeToRefs(store)
+const { hideResearchVideoNames } = storeToRefs(privacyStore)
 const videoRef = shallowRef<HTMLVideoElement | null>(null)
 const trimInfo = ref<ResearchVideoTrimInfo | null>(null)
 const trimRange = ref<TrimRange>({ startFrame: 0, endFrameExclusive: 0 })
@@ -51,6 +56,9 @@ const submitting = ref(false)
 const previewing = ref(false)
 
 const sourceVideo = computed(() => trimInfo.value?.video ?? null)
+const sourceVideoDisplayName = computed(() =>
+  getResearchVideoDisplayName(sourceVideo.value, hideResearchVideoNames.value, locale.value, t('videoTrim.sourceVideo')),
+)
 const frameCount = computed(() => sourceVideo.value?.frame_count ?? 0)
 const fps = computed(() => sourceVideo.value?.fps ?? 0)
 const minimumFrames = computed(() => trimInfo.value?.minimum_keep_frames ?? 10)
@@ -247,8 +255,9 @@ async function submitTrim() {
         </el-button>
         <div>
           <p class="eyebrow">{{ t('videoTrim.title') }}</p>
-          <h2 :title="sourceVideo?.name">{{ sourceVideo?.name || t('videoTrim.sourceVideo') }}</h2>
+          <h2 :title="sourceVideoDisplayName">{{ sourceVideoDisplayName }}</h2>
         </div>
+        <VideoNamePrivacyToggle />
       </header>
 
       <el-alert v-if="store.error" :title="store.error" type="error" show-icon />
@@ -331,7 +340,15 @@ async function submitTrim() {
 
           <section class="research-trim-card">
             <h3>{{ t('videoTrim.create') }}</h3>
-            <el-input v-model="outputName" :placeholder="t('videoTrim.outputName')" />
+            <el-input
+              v-model="outputName"
+              :type="hideResearchVideoNames ? 'password' : 'text'"
+              :placeholder="hideResearchVideoNames ? t('privacy.videoNames.description') : t('videoTrim.outputName')"
+              autocomplete="off"
+            />
+            <p v-if="hideResearchVideoNames" class="research-trim-privacy-note">
+              {{ t('privacy.videoNames.description') }} {{ t('privacy.videoNames.exportWarning') }}
+            </p>
             <el-alert
               v-if="hasLinkedData"
               type="warning"

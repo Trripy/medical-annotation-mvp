@@ -8,9 +8,12 @@ import { useRouter } from 'vue-router'
 
 import AppSidebar from '../components/AppSidebar.vue'
 import ResearchVideoNotesDialog from '../components/research/ResearchVideoNotesDialog.vue'
+import VideoNamePrivacyToggle from '../components/research/VideoNamePrivacyToggle.vue'
 import { apiUrl } from '../utils/api'
+import { usePrivacyStore } from '../stores/privacy'
 import { useResearchVideosStore, type ResearchVideoListItem, type ResearchVideoVisibility, type ServerVideoFileEntry, type ServerVideoImportRoot, type ServerVideoBrowseResult, type ServerVideoScanResult } from '../stores/researchVideos'
 import { formatDateTime, formatDuration as formatDurationValue, translateStatus, type SupportedLocale } from '../utils/locale'
+import { getResearchVideoDisplayName } from '../utils/videoPrivacy'
 import {
   buildImportQueue,
   calculateSelectedSize,
@@ -32,7 +35,9 @@ type ImportQueueItem = ServerImportQueueItem<ServerVideoFileEntry>
 const router = useRouter()
 const { locale, t } = useI18n()
 const researchVideosStore = useResearchVideosStore()
+const privacyStore = usePrivacyStore()
 const { error, loading, saving, videos } = storeToRefs(researchVideosStore)
+const { hideResearchVideoNames } = storeToRefs(privacyStore)
 const uploadInputRef = ref<HTMLInputElement | null>(null)
 const selectedUploadName = ref('')
 const importDialogVisible = ref(false)
@@ -486,6 +491,10 @@ function hiddenReasonLabel(reason: string | null) {
   return t('common.unknown')
 }
 
+function videoDisplayName(video: ResearchVideoListItem) {
+  return getResearchVideoDisplayName(video, hideResearchVideoNames.value, locale.value, t('research.videoFallback', { id: video.id }))
+}
+
 async function deleteVideo(videoId: number, name: string) {
   try {
     await ElMessageBox.confirm(
@@ -531,6 +540,7 @@ async function deleteVideo(videoId: number, name: string) {
             <el-option :label="t('researchVideos.hidden')" value="hidden" />
             <el-option :label="t('researchVideos.allVisibility')" value="all" />
           </el-select>
+          <VideoNamePrivacyToggle />
           <el-button :loading="loading" @click="researchVideosStore.fetchVideos(visibilityFilter)">
             <el-icon><RefreshRight /></el-icon>
             {{ t('common.refresh') }}
@@ -562,7 +572,7 @@ async function deleteVideo(videoId: number, name: string) {
       <section class="research-video-grid">
         <article v-for="video in videoCards" :key="video.id" class="research-video-card">
           <div class="research-video-thumb">
-            <img v-if="video.thumbnail_url" :src="video.thumbnail_url" :alt="video.name" />
+            <img v-if="video.thumbnail_url" :src="video.thumbnail_url" :alt="videoDisplayName(video)" />
             <div v-else class="research-video-thumb-empty">
               <el-icon><VideoPlay /></el-icon>
             </div>
@@ -570,11 +580,13 @@ async function deleteVideo(videoId: number, name: string) {
 
           <div class="research-video-meta">
             <div class="research-video-title-row">
-              <h3>{{ video.name }}</h3>
+              <h3>{{ videoDisplayName(video) }}</h3>
               <span class="research-video-status" :class="video.status">{{ translateStatus(video.status, t) }}</span>
               <el-tag v-if="video.hidden_from_video_list" type="info">{{ t('researchVideos.hiddenBadge') }}</el-tag>
             </div>
-            <p class="research-video-filename">{{ video.original_filename }}</p>
+            <p class="research-video-filename">
+              {{ hideResearchVideoNames ? t('privacy.videoNames.description') : video.original_filename }}
+            </p>
             <div class="research-video-stats">
               <span>{{ formatDuration(video.duration_ms) }}</span>
               <span>{{ video.fps ? `${video.fps.toFixed(2)} fps` : t('research.unknownFps') }}</span>
@@ -634,7 +646,7 @@ async function deleteVideo(videoId: number, name: string) {
                 </el-button>
               </span>
             </el-tooltip>
-            <el-button text type="danger" @click="deleteVideo(video.id, video.name)">
+            <el-button text type="danger" @click="deleteVideo(video.id, videoDisplayName(video))">
               <el-icon><Delete /></el-icon>
               {{ t('common.delete') }}
             </el-button>
@@ -652,7 +664,7 @@ async function deleteVideo(videoId: number, name: string) {
       <ResearchVideoNotesDialog
         v-model="notesDialogVisible"
         :video-id="notesVideo?.id ?? null"
-        :video-name="notesVideo?.name ?? ''"
+        :video-name="notesVideo ? videoDisplayName(notesVideo) : ''"
         :notes="notesVideo?.notes ?? null"
         :saving="saving"
         @save="saveVideoNotes"

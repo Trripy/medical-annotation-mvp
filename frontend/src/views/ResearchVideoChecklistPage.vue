@@ -1,15 +1,18 @@
 <script setup lang="ts">
 import { ArrowLeft, Download, Hide, RefreshRight, Search, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { storeToRefs } from 'pinia'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
 import AppSidebar from '../components/AppSidebar.vue'
 import ResearchVideoNotesDialog from '../components/research/ResearchVideoNotesDialog.vue'
+import VideoNamePrivacyToggle from '../components/research/VideoNamePrivacyToggle.vue'
 import { apiUrl } from '../utils/api'
 import { downloadBlobWithFilename } from '../utils/download'
 import { formatDateTime, formatDuration as formatDurationValue, type SupportedLocale } from '../utils/locale'
+import { usePrivacyStore } from '../stores/privacy'
 import {
   applyDefaultPhaseSelections,
   buildBatchExportPayload,
@@ -29,10 +32,13 @@ import {
   type VisibilityPreview,
   type VideoExportSelection,
 } from '../utils/researchVideoChecklist'
+import { getRelatedResearchVideoDisplayName, getResearchVideoDisplayName } from '../utils/videoPrivacy'
 
 const router = useRouter()
 const route = useRoute()
 const { locale, t } = useI18n()
+const privacyStore = usePrivacyStore()
+const { hideResearchVideoNames } = storeToRefs(privacyStore)
 
 const loading = ref(false)
 const error = ref('')
@@ -326,6 +332,14 @@ function thumbnailSrc(item: ChecklistItem) {
   return `${base}${separator}retry=${retrySeed}`
 }
 
+function checklistVideoName(item: ChecklistItem) {
+  return getResearchVideoDisplayName(item.video, hideResearchVideoNames.value, locale.value)
+}
+
+function relatedVideoName(videoId: number | null | undefined, rawName: string | null | undefined) {
+  return getRelatedResearchVideoDisplayName(videoId, rawName, hideResearchVideoNames.value, locale.value, t('common.unknown'))
+}
+
 function thumbnailFailed(videoId: number) {
   return thumbnailErrorIds.value.has(videoId)
 }
@@ -391,7 +405,7 @@ async function confirmVisibilityAction() {
 async function restoreSingleVideo(item: ChecklistItem) {
   try {
     await ElMessageBox.confirm(
-      t('videoChecklist.restoreSingleConfirm', { name: item.video.display_name }),
+      t('videoChecklist.restoreSingleConfirm', { name: checklistVideoName(item) }),
       t('researchVideos.restoreVisibility'),
       {
         cancelButtonText: t('common.cancel'),
@@ -557,6 +571,7 @@ function formatFrameRange(start: number | null, end: number | null) {
           <p class="page-subtitle">{{ t('videoChecklist.subtitle') }}</p>
         </div>
         <div class="topbar-actions">
+          <VideoNamePrivacyToggle />
           <el-button @click="router.push('/research/videos')">
             <el-icon><ArrowLeft /></el-icon>
             {{ t('videoChecklist.backToVideos') }}
@@ -664,13 +679,13 @@ function formatFrameRange(start: number | null, end: number | null) {
                 </p>
                 <p>{{ t('researchVideos.videoNotes') }}: {{ row.video.notes || t('researchVideos.noNotes') }}</p>
                 <p v-if="row.trim.is_trimmed">
-                  {{ t('videoChecklist.sourceVideo') }}: {{ row.trim.source_video_display_name || row.trim.source_video_id || t('common.unknown') }}
+                  {{ t('videoChecklist.sourceVideo') }}: {{ relatedVideoName(row.trim.source_video_id, row.trim.source_video_display_name) }}
                   · {{ t('videoChecklist.keepRange') }} {{ formatFrameRange(row.trim.trim_start_frame, row.trim.trim_end_frame_exclusive) }}
                 </p>
                 <p v-else>{{ t('videoChecklist.notTrimmedDescription') }}</p>
                 <ul v-if="row.trim.derived_videos.length">
                   <li v-for="derived in row.trim.derived_videos" :key="derived.video_id">
-                    {{ derived.display_name }} · {{ formatFrameRange(derived.trim_start_frame, derived.trim_end_frame_exclusive) }}
+                    {{ relatedVideoName(derived.video_id, derived.display_name) }} · {{ formatFrameRange(derived.trim_start_frame, derived.trim_end_frame_exclusive) }}
                     <el-button text size="small" @click="router.push(`/research/videos/${derived.video_id}/annotate`)">{{ t('common.open') }}</el-button>
                   </li>
                 </ul>
@@ -713,7 +728,7 @@ function formatFrameRange(start: number | null, end: number | null) {
                 </el-tooltip>
               </div>
               <div>
-                <strong>{{ row.video.display_name }}</strong>
+                <strong>{{ checklistVideoName(row) }}</strong>
                 <el-tag v-if="row.video.hidden_from_video_list" size="small" type="info">{{ t('researchVideos.hiddenBadge') }}</el-tag>
                 <small>ID {{ row.video.id }} · {{ formatDuration(row.video.duration_ms) }} · {{ row.video.frame_count }} {{ t('videoChecklist.frames') }}</small>
                 <small>{{ row.video.fps ? `${row.video.fps.toFixed(2)} fps` : t('common.unknown') }} · {{ formatDateTime(row.video.created_at, locale as SupportedLocale) }}</small>
@@ -788,7 +803,7 @@ function formatFrameRange(start: number | null, end: number | null) {
       <el-dialog v-model="phaseDialogVisible" :title="t('videoChecklist.selectPhaseLabels')" width="720px">
         <div v-if="phaseDialogItem" class="phase-export-list">
           <div class="phase-export-dialog-header">
-            <strong>{{ phaseDialogItem.video.display_name }}</strong>
+            <strong>{{ checklistVideoName(phaseDialogItem) }}</strong>
             <el-button size="small" @click="selectLatestSubmittedForRow(phaseDialogItem)">{{ t('videoChecklist.selectLatestSubmitted') }}</el-button>
           </div>
           <div v-if="phaseDialogItem.phase.sets.length === 0" class="research-empty-state">{{ t('videoChecklist.noAnnotationSet') }}</div>
@@ -823,7 +838,7 @@ function formatFrameRange(start: number | null, end: number | null) {
           <p>{{ t('videoChecklist.selectedTrimCount', { count: previewResult.trim_export_count }) }}</p>
           <p>{{ t('videoChecklist.selectedPhaseCount', { count: previewResult.phase_export_count }) }}</p>
           <p>{{ t('videoChecklist.originalAndMappedCount', { original: previewResult.original_phase_export_count, mapped: previewResult.mapped_phase_export_count }) }}</p>
-          <p>{{ t('videoChecklist.downloadZip') }}: {{ previewResult.suggested_filename }}</p>
+          <p>{{ t('videoChecklist.downloadZip') }}: {{ hideResearchVideoNames ? t('privacy.videoNames.exportWarning') : previewResult.suggested_filename }}</p>
           <el-alert v-for="warning in previewResult.warnings" :key="warning" :title="warning" type="warning" show-icon :closable="false" />
           <el-alert v-if="previewResult.invalid_items.length" :title="t('videoChecklist.invalidItems')" type="error" show-icon :closable="false">
             <ul>
@@ -858,7 +873,7 @@ function formatFrameRange(start: number | null, end: number | null) {
           />
           <ul>
             <li v-for="item in visibilityPreview.items" :key="item.video_id">
-              {{ item.display_name }} · {{ t('videoChecklist.readyDerivedCount', { count: item.ready_derived_count }) }}
+              {{ relatedVideoName(item.video_id, item.display_name) }} · {{ t('videoChecklist.readyDerivedCount', { count: item.ready_derived_count }) }}
             </li>
           </ul>
           <p v-if="visibilityPreview.eligible_count > visibilityPreview.items.length" class="checklist-muted">
@@ -881,7 +896,7 @@ function formatFrameRange(start: number | null, end: number | null) {
       <ResearchVideoNotesDialog
         v-model="notesDialogVisible"
         :video-id="notesItem?.video.id ?? null"
-        :video-name="notesItem?.video.display_name ?? ''"
+        :video-name="notesItem ? checklistVideoName(notesItem) : ''"
         :notes="notesItem?.video.notes ?? null"
         @save="saveVideoNotes"
       />

@@ -19,6 +19,7 @@ import {
   type ResearchVideoFrame,
   type ResearchVideoWorkspaceDetail,
 } from '../stores/researchVideos'
+import { usePrivacyStore } from '../stores/privacy'
 import { useUsersStore } from '../stores/users'
 import { useUserSettingsStore, type Sam2Candidate, type Sam2ModelName } from '../stores/userSettings'
 import {
@@ -49,6 +50,7 @@ import {
 } from '../utils/researchVideoLayout'
 import { parseResearchFrameQuery } from '../utils/researchPhaseUi'
 import { translateApiErrorMessage } from '../utils/locale'
+import { getResearchVideoDisplayName, getResearchVideoFrameDisplayName } from '../utils/videoPrivacy'
 
 type ToolType = 'cursor' | 'rectangle' | 'polygon' | 'sam2'
 type Sam2Settings = {
@@ -93,12 +95,14 @@ const MAX_CACHED_FRAME_PAGES = DEFAULT_MAX_CACHED_FRAME_PAGES
 const props = defineProps<{ videoId: string }>()
 
 const researchVideosStore = useResearchVideosStore()
+const privacyStore = usePrivacyStore()
 const usersStore = useUsersStore()
 const userSettingsStore = useUserSettingsStore()
 const route = useRoute()
 const router = useRouter()
-const { t } = useI18n()
+const { locale, t } = useI18n()
 const { error, loading, saving } = storeToRefs(researchVideosStore)
+const { hideResearchVideoNames } = storeToRefs(privacyStore)
 const { currentUsername } = storeToRefs(usersStore)
 const { settings: userSettings } = storeToRefs(userSettingsStore)
 
@@ -172,6 +176,9 @@ const sam2Settings = ref<Sam2Settings>({
 })
 
 const video = computed(() => workspaceVideo.value)
+const videoDisplayName = computed(() =>
+  getResearchVideoDisplayName(video.value, hideResearchVideoNames.value, locale.value, t('research.videoFallback', { id: props.videoId })),
+)
 useVideoPlaybackRate(videoRef, computed(() => video.value?.file_url ?? null))
 const totalFrames = computed(() => video.value?.frame_count ?? 0)
 const currentFrame = computed(() => getFrameAt(selectedFrameIndex.value) ?? null)
@@ -1280,7 +1287,7 @@ function startDevMeasure(name: string) {
       :current-frame-index="selectedFrameIndex"
       :meta-items="workspaceHeaderMetaItems"
       :task-label="t('taskNav.frame')"
-      :title="video?.name ?? t('research.videoFallback', { id: videoId })"
+      :title="videoDisplayName"
       :video-id="videoId"
     />
 
@@ -1347,6 +1354,7 @@ function startDevMeasure(name: string) {
             :total-count="totalFrames"
             :selected-frame-index="selectedFrameIndex"
             :get-frame="getFrameAt"
+            :hide-frame-names="hideResearchVideoNames"
             @request-range="requestFrameRange"
             @select="goToFrame"
           />
@@ -1364,7 +1372,7 @@ function startDevMeasure(name: string) {
     <section class="annotate-stage annotation-main">
       <header class="annotate-stage-bar research-video-stage-bar">
         <div class="annotate-stage-title research-video-stage-compact-title">
-          <strong>{{ currentFrame?.filename ?? t('common.frameWithNumber', { number: currentFrameNumber }) }}</strong>
+          <strong>{{ getResearchVideoFrameDisplayName(currentFrame, hideResearchVideoNames, locale) || t('common.frameWithNumber', { number: currentFrameNumber }) }}</strong>
         </div>
         <div class="annotation-toolbar">
           <div class="toolbar-group toolbar-group-frames">
@@ -1467,8 +1475,8 @@ function startDevMeasure(name: string) {
 
             <div v-if="isPlayerCollapsed" class="research-player-compact-bar">
               <div class="research-player-compact-meta">
-                <strong :title="video?.original_filename ?? video?.name ?? t('research.videoFallback', { id: videoId })">
-                  {{ video?.original_filename ?? video?.name ?? t('research.videoFallback', { id: videoId }) }}
+                <strong :title="videoDisplayName">
+                  {{ videoDisplayName }}
                 </strong>
                 <span>{{ compactVideoTimeText }} / {{ totalVideoTimeText }}</span>
               </div>
@@ -1597,7 +1605,7 @@ function startDevMeasure(name: string) {
           <div>
             <p class="eyebrow">{{ t('frameAnnotation.researchLabels') }}</p>
             <h2>{{ t('frameAnnotation.manageLabels') }}</h2>
-            <span>{{ video?.name ?? t('research.videoFallback', { id: videoId }) }}</span>
+            <span>{{ videoDisplayName }}</span>
           </div>
           <el-button :disabled="labelActionLoading" @click="closeLabelManager">{{ t('common.close') }}</el-button>
         </header>

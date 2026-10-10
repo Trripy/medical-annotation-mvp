@@ -94,11 +94,18 @@ textarea {
 
 .research-card-content p,
 .research-video-filename,
+.research-trim-privacy-note,
+.research-phase-export-privacy-note,
 .research-video-player-help,
 .research-upload-help {
   margin: 0;
   color: #4f5f5c;
   line-height: 1.5;
+}
+
+.research-trim-privacy-note,
+.research-phase-export-privacy-note {
+  font-size: 0.84rem;
 }
 
 .research-card-link {

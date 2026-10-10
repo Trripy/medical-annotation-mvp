@@ -23,6 +23,7 @@ import {
   type ResearchVideoFrame,
   type ResearchVideoWorkspaceDetail,
 } from '../stores/researchVideos'
+import { usePrivacyStore } from '../stores/privacy'
 import { useUsersStore } from '../stores/users'
 import type {
   ResearchPhaseLabel,
@@ -74,6 +75,7 @@ import {
   translateStatus,
   type SupportedLocale,
 } from '../utils/locale'
+import { getResearchVideoDisplayName } from '../utils/videoPrivacy'
 import {
   buildCloseActiveEndFrame,
   formatDurationMs,
@@ -108,6 +110,7 @@ const router = useRouter()
 const { locale, t } = useI18n()
 const researchVideosStore = useResearchVideosStore()
 const researchPhasesStore = useResearchPhasesStore()
+const privacyStore = usePrivacyStore()
 const usersStore = useUsersStore()
 const {
   protocols,
@@ -129,6 +132,7 @@ const {
   mappingProfileDetails,
   loadingMappingProfiles,
 } = storeToRefs(researchPhasesStore)
+const { hideResearchVideoNames } = storeToRefs(privacyStore)
 const { currentUsername } = storeToRefs(usersStore)
 
 const videoRef = ref<HTMLVideoElement | null>(null)
@@ -197,6 +201,9 @@ let pendingVideoHeight: number | null = null
 let scheduledVideoResizeFrame = 0
 
 const video = computed(() => workspaceVideo.value)
+const videoDisplayName = computed(() =>
+  getResearchVideoDisplayName(video.value, hideResearchVideoNames.value, locale.value, t('research.videoFallback', { id: props.videoId })),
+)
 useVideoPlaybackRate(videoRef, computed(() => video.value?.file_url ?? null))
 const currentLocale = computed(() => locale.value as SupportedLocale)
 const totalFrames = computed(() => video.value?.frame_count ?? 0)
@@ -283,7 +290,7 @@ const mergePreviewText = computed(() => {
   return `${selectedMappingLabels.value.map((label) => getPhaseLabelDisplayName(label, currentLocale.value)).join(' + ')} → ${mergeTargetName.value.trim()}`
 })
 const exportMappingProfileId = ref<number | null>(null)
-const phaseExportFilenamePreview = computed(() => buildPhaseExportFilename({
+const phaseExportFilenameActual = computed(() => buildPhaseExportFilename({
   videoDisplayName: video.value?.name ?? video.value?.original_filename ?? null,
   videoId: video.value?.id ?? Number(props.videoId),
   mappingMode: exportMappingProfileId.value ? 'profile' : 'original',
@@ -291,6 +298,18 @@ const phaseExportFilenamePreview = computed(() => buildPhaseExportFilename({
     ? slugifyMappingKey(mappingProfiles.value.find((profile) => profile.id === exportMappingProfileId.value)?.name ?? '')
     : null,
 }))
+const phaseExportFilenamePreview = computed(() =>
+  hideResearchVideoNames.value
+    ? buildPhaseExportFilename({
+        videoDisplayName: videoDisplayName.value,
+        videoId: video.value?.id ?? Number(props.videoId),
+        mappingMode: exportMappingProfileId.value ? 'profile' : 'original',
+        mappingProfileKey: exportMappingProfileId.value
+          ? slugifyMappingKey(mappingProfiles.value.find((profile) => profile.id === exportMappingProfileId.value)?.name ?? '')
+          : null,
+      })
+    : phaseExportFilenameActual.value,
+)
 const currentPhaseName = computed(() => {
   const draft = pendingPhaseDraft.value
   if (draft && selectedFrameIndex.value >= draft.startFrame && selectedFrameIndex.value < draft.gapEndFrameExclusive) {
@@ -1683,7 +1702,7 @@ async function handleExport(command: 'json' | 'segments' | 'framewise') {
   const result = command === 'json'
     ? await researchPhasesStore.downloadJson({
         mappingProfileId: exportMappingProfileId.value,
-        fallbackFilename: phaseExportFilenamePreview.value,
+        fallbackFilename: phaseExportFilenameActual.value,
       })
     : command === 'segments'
       ? await researchPhasesStore.downloadSegmentCsv()
@@ -1877,7 +1896,7 @@ function formatTimestamp(timestampMs: number | null | undefined) {
       :current-frame-index="selectedFrameIndex"
       :meta-items="workspaceHeaderMetaItems"
       :task-label="t('taskNav.phase')"
-      :title="video?.name ?? t('research.videoFallback', { id: videoId })"
+      :title="videoDisplayName"
       :video-id="videoId"
     />
 
@@ -1997,8 +2016,8 @@ function formatTimestamp(timestampMs: number | null | undefined) {
 
               <div v-if="isVideoCollapsed" class="research-player-compact-bar">
                 <div class="research-player-compact-meta">
-                  <strong :title="video?.original_filename ?? video?.name ?? t('research.videoFallback', { id: videoId })">
-                    {{ video?.original_filename ?? video?.name ?? t('research.videoFallback', { id: videoId }) }}
+                  <strong :title="videoDisplayName">
+                    {{ videoDisplayName }}
                   </strong>
                   <span>{{ compactVideoTimeText }} / {{ totalVideoTimeText }}</span>
                 </div>
@@ -2267,6 +2286,7 @@ function formatTimestamp(timestampMs: number | null | undefined) {
             />
           </el-select>
           <span class="research-phase-export-filename" :title="phaseExportFilenamePreview">{{ phaseExportFilenamePreview }}</span>
+          <span v-if="hideResearchVideoNames" class="research-phase-export-privacy-note">{{ t('privacy.videoNames.exportWarning') }}</span>
         </div>
       </aside>
     </section>
@@ -2570,6 +2590,7 @@ function formatTimestamp(timestampMs: number | null | undefined) {
             :total-count="totalFrames"
             :selected-frame-index="selectedFrameIndex"
             :get-frame="getFrameAt"
+            :hide-frame-names="hideResearchVideoNames"
             @request-range="requestFrameRange"
             @select="goToFrame"
           />
