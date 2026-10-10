@@ -56,4 +56,3 @@ export function getRelatedResearchVideoDisplayName(
 export function containsSensitiveVideoName(text: string, sensitiveTokens: readonly string[]): boolean {
   return sensitiveTokens.some((token) => token.length > 0 && text.includes(token))
 }
-

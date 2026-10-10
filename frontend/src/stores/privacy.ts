@@ -33,4 +33,3 @@ export const usePrivacyStore = defineStore('privacy', {
     },
   },
 })
-

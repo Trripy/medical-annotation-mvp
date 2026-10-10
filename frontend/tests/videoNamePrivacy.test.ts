@@ -115,4 +115,3 @@ test('privacy i18n key sets match', () => {
   assert.equal(zhCN.privacy.videoNames.hide, '隐藏视频名')
   assert.equal(enUS.privacy.videoNames.hide, 'Hide video names')
 })
-
